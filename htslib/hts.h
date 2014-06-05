@@ -6,6 +6,185 @@
 
 #include "cram/os.h"
 
+/*
+ * Functions for reading and writing to potentially unaligned addresses.
+ * These could perhaps be replaced by system specific opcodes (eg on MIPS).
+ *
+ * Note we may also be able to combine unaligned memory I/O and
+ * endianness swapping into compound functions for better
+ * optimisation.
+ */
+#ifdef ALLOW_UAC
+static inline float ua_read_f(const float *ip) { return *ip; }
+static inline double ua_read_d(const double *ip) { return *ip; }
+static inline uint64_t ua_read8(const uint64_t *ip) { return *ip; }
+static inline uint32_t ua_read4(const uint32_t *ip) { return *ip; }
+static inline uint16_t ua_read2(const uint16_t *ip) { return *ip; }
+static inline  int64_t ua_read8s(const int64_t *ip) { return *ip; }
+static inline  int32_t ua_read4s(const int32_t *ip) { return *ip; }
+static inline  int16_t ua_read2s(const int16_t *ip) { return *ip; }
+
+static inline void ua_write8 (uint64_t *ip, uint64_t v) {*ip=v;}
+static inline void ua_write4 (uint32_t *ip, uint32_t v) {*ip=v;}
+static inline void ua_write2 (uint16_t *ip, uint16_t v) {*ip=v;}
+static inline void ua_write8s( int64_t *ip,  int64_t v) {*ip=v;}
+static inline void ua_write4s( int32_t *ip,  int32_t v) {*ip=v;}
+static inline void ua_write2s( int16_t *ip,  int16_t v) {*ip=v;}
+
+#else
+static inline float ua_read_f(const float *ip) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	unsigned char c[4];
+	float f;
+    } u = {{cp[0],cp[1],cp[2],cp[3]}};
+    return u.f;
+}
+
+static inline float ua_read_d(const double *ip) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	unsigned char c[8];
+	double d;
+    } u = {{cp[0],cp[1],cp[2],cp[3],
+	    cp[4],cp[5],cp[6],cp[7]}};
+    return u.d;
+}
+
+static inline uint64_t ua_read8(const uint64_t *ip) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	unsigned char c[8];
+	uint64_t i;
+    } u = {{cp[0],cp[1],cp[2],cp[3],
+	    cp[4],cp[5],cp[6],cp[7]}};
+    return u.i;
+}
+
+static inline void ua_write8(uint64_t *ip, uint64_t v) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	uint64_t i;
+	unsigned char c[8];
+    } u = {v};
+    cp[0] = u.c[0];
+    cp[1] = u.c[1];
+    cp[2] = u.c[2];
+    cp[3] = u.c[3];
+    cp[4] = u.c[4];
+    cp[5] = u.c[5];
+    cp[6] = u.c[6];
+    cp[7] = u.c[7];
+}
+
+static inline uint32_t ua_read4(const uint32_t *ip) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	unsigned char c[4];
+	uint32_t i;
+    } u = {{cp[0],cp[1],cp[2],cp[3]}};
+    return u.i;
+}
+
+static inline void ua_write4(uint32_t *ip, uint32_t v) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	uint32_t i;
+	unsigned char c[4];
+    } u = {v};
+    cp[0] = u.c[0];
+    cp[1] = u.c[1];
+    cp[2] = u.c[2];
+    cp[3] = u.c[3];
+}
+
+static inline uint16_t ua_read2(const uint16_t *ip) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	unsigned char c[2];
+	uint16_t i;
+    } u = {{cp[0],cp[1]}};
+    return u.i;
+}
+
+static inline void ua_write2(uint16_t *ip, uint32_t v) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	uint16_t i;
+	unsigned char c[2];
+    } u = {v};
+    cp[0] = u.c[0];
+    cp[1] = u.c[1];
+}
+
+// Signed versions. FIXME: Maybe have u for unsigned and nothing for signed instead of s.
+static inline int64_t ua_read8s(const int64_t *ip) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	unsigned char c[8];
+	int64_t i;
+    } u = {{cp[0],cp[1],cp[2],cp[3],
+	    cp[4],cp[5],cp[6],cp[7]}};
+    return u.i;
+}
+
+static inline void ua_write8s(uint64_t *ip, int64_t v) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	int64_t i;
+	unsigned char c[8];
+    } u = {v};
+    cp[0] = u.c[0];
+    cp[1] = u.c[1];
+    cp[2] = u.c[2];
+    cp[3] = u.c[3];
+    cp[4] = u.c[4];
+    cp[5] = u.c[5];
+    cp[6] = u.c[6];
+    cp[7] = u.c[7];
+}
+
+static inline uint32_t ua_read4s(const int32_t *ip) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	unsigned char c[4];
+	int32_t i;
+    } u = {{cp[0],cp[1],cp[2],cp[3]}};
+    return u.i;
+}
+
+static inline void ua_write4s(uint32_t *ip, int32_t v) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	int32_t i;
+	unsigned char c[4];
+    } u = {v};
+    cp[0] = u.c[0];
+    cp[1] = u.c[1];
+    cp[2] = u.c[2];
+    cp[3] = u.c[3];
+}
+
+static inline int16_t ua_read2s(const int16_t *ip) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	unsigned char c[2];
+	int16_t i;
+    } u = {{cp[0],cp[1]}};
+    return u.i;
+}
+
+static inline void ua_write2s(uint16_t *ip, int32_t v) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	int16_t i;
+	unsigned char c[2];
+    } u = {v};
+    cp[0] = u.c[0];
+    cp[1] = u.c[1];
+}
+#endif /* ALLOW_UAC */
+
 #ifndef HTS_BGZF_TYPEDEF
 typedef struct BGZF BGZF;
 #define HTS_BGZF_TYPEDEF
@@ -285,17 +464,7 @@ static inline uint16_t ed_swap_2(uint16_t v)
 }
 static inline void *ed_swap_2p(void *x)
 {
-#ifdef ALLOW_UAC
-	*(uint16_t*)x = ed_swap_2(*(uint16_t*)x);
-#else
-	uint8_t tmpData[2];
-	uint16_t *ptmpData = (uint16_t*)&tmpData;
-	uint8_t *px = (uint8_t*)x;
-	int j;
-	for(j=0;j<2;j++) tmpData[j] = px[j];
-        *ptmpData = ed_swap_2(*ptmpData);
-	for(j=0;j<2;j++) px[j] = tmpData[j];
-#endif
+	ua_write2((uint16_t*)x, ed_swap_2(ua_read2((uint16_t*)x)));
 	return x;
 }
 static inline uint32_t ed_swap_4(uint32_t v)
@@ -305,17 +474,7 @@ static inline uint32_t ed_swap_4(uint32_t v)
 }
 static inline void *ed_swap_4p(void *x)
 {
-#ifdef ALLOW_UAC
-	*(uint32_t*)x = ed_swap_4(*(uint32_t*)x);
-#else
-	uint8_t tmpData[4];
-	uint32_t *ptmpData = (uint32_t*)&tmpData;
-	uint8_t *px = (uint8_t*)x;
-	int j;
-	for(j=0;j<4;j++) tmpData[j] = px[j];
-	*ptmpData = ed_swap_4(*ptmpData);
-	for(j=0;j<4;j++) px[j] = tmpData[j];
-#endif
+	ua_write4((uint32_t*)x, ed_swap_4(ua_read4((uint32_t*)x)));
 	return x;
 }
 static inline uint64_t ed_swap_8(uint64_t v)
@@ -326,17 +485,7 @@ static inline uint64_t ed_swap_8(uint64_t v)
 }
 static inline void *ed_swap_8p(void *x)
 {
-#ifdef ALLOW_UAC
-	*(uint64_t*)x = ed_swap_8(*(uint64_t*)x);
-#else
-	uint8_t tmpData[8];
-	uint64_t *ptmpData = (uint64_t*)&tmpData;
-	uint8_t *px = (uint8_t*)x;
-	int j;
-	for(j=0;j<8;j++) tmpData[j] = px[j];
-	*ptmpData = ed_swap_8(*ptmpData);
-	for(j=0;j<8;j++) px[j] = tmpData[j];
-#endif
+	ua_write8((uint64_t*)x, ed_swap_8(ua_read8((uint64_t*)x)));
 	return x;
 }
 

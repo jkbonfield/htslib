@@ -1801,10 +1801,17 @@ static char *cram_encode_aux_1_0(cram_fd *fd, bam_seq_t *b, cram_container *c,
 
 	case 'B': {
 	    int type = aux[3], blen;
+#ifdef SP_BIG_ENDIAN
+	    uint32_t count = (uint32_t)((((unsigned char *)aux)[7]<< 0) +
+					(((unsigned char *)aux)[6]<< 8) +
+					(((unsigned char *)aux)[5]<<16) +
+					(((unsigned char *)aux)[4]<<24));
+#else
 	    uint32_t count = (uint32_t)((((unsigned char *)aux)[4]<< 0) +
 					(((unsigned char *)aux)[5]<< 8) +
 					(((unsigned char *)aux)[6]<<16) +
 					(((unsigned char *)aux)[7]<<24));
+#endif
 	    // skip TN field
 	    aux+=3; //*tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
 
@@ -2267,9 +2274,9 @@ static int process_one_read(cram_fd *fd, cram_container *c,
 	cr->feature = 0;
 	cr->nfeature = 0;
 	for (i = 0; i < cr->ncigar; i++) {
-	    enum cigar_op cig_op = cig_from[i] & BAM_CIGAR_MASK;
-	    int cig_len = cig_from[i] >> BAM_CIGAR_SHIFT;
-	    cig_to[i] = cig_from[i];
+	    enum cigar_op cig_op = ua_read4s(&cig_from[i]) & BAM_CIGAR_MASK;
+	    int cig_len = ua_read4s(&cig_from[i]) >> BAM_CIGAR_SHIFT;
+	    ua_write4s(&cig_to[i], ua_read4s(&cig_from[i]));
 
 	    /* Can also generate events from here for CRAM diffs */
 
