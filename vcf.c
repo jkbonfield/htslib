@@ -1308,9 +1308,9 @@ void bcf_fmt_array(kstring_t *s, int n, int type, void *data)
         }
         switch (type) {
             case BCF_BT_INT8:  BRANCH(int8_t,  p[j]==bcf_int8_missing,  p[j]==bcf_int8_vector_end,  kputw(p[j], s)); break;
-            case BCF_BT_INT16: BRANCH(int16_t, p[j]==bcf_int16_missing, p[j]==bcf_int16_vector_end, kputw(p[j], s)); break;
-            case BCF_BT_INT32: BRANCH(int32_t, p[j]==bcf_int32_missing, p[j]==bcf_int32_vector_end, kputw(p[j], s)); break;
-            case BCF_BT_FLOAT: BRANCH(float,   bcf_float_is_missing(p[j]), bcf_float_is_vector_end(p[j]), ksprintf(s, "%g", p[j])); break;
+            case BCF_BT_INT16: BRANCH(int16_t, ua_read2s(&p[j])==bcf_int16_missing, ua_read2s(&p[j])==bcf_int16_vector_end, kputw(ua_read2s(&p[j]), s)); break;
+            case BCF_BT_INT32: BRANCH(int32_t, ua_read4s(&p[j])==bcf_int32_missing, ua_read4s(&p[j])==bcf_int32_vector_end, kputw(ua_read4s(&p[j]), s)); break;
+            case BCF_BT_FLOAT: BRANCH(float,   bcf_float_is_missing(ua_read_f(&p[j])), bcf_float_is_vector_end(ua_read_f(&p[j])), ksprintf(s, "%g", ua_read_f(&p[j]))); break;
             default: fprintf(stderr,"todo: type %d\n", type); exit(1); break;
         }
         #undef BRANCH
@@ -1766,10 +1766,6 @@ static inline uint8_t *bcf_unpack_fmt_core1(uint8_t *ptr, int n_sample, bcf_fmt_
 static inline uint8_t *bcf_unpack_info_core1(uint8_t *ptr, bcf_info_t *info)
 {
     uint8_t *ptr_start = ptr;
-#ifndef ALLOW_UAC
-    uint8_t tmpData[4];
-    int j;
-#endif
     info->key = bcf_dec_typed_int1(ptr, &ptr);
     info->len = bcf_dec_size(ptr, &ptr, &info->type);
     info->vptr = ptr;
@@ -1778,15 +1774,9 @@ static inline uint8_t *bcf_unpack_info_core1(uint8_t *ptr, bcf_info_t *info)
     info->v1.i = 0;
     if (info->len == 1) {
         if (info->type == BCF_BT_INT8 || info->type == BCF_BT_CHAR) info->v1.i = *(int8_t*)ptr;
-#ifdef ALLOW_UAC
-        else if (info->type == BCF_BT_INT32) info->v1.i = *(int32_t*)ptr;
-        else if (info->type == BCF_BT_FLOAT) info->v1.f = *(float*)ptr;
-        else if (info->type == BCF_BT_INT16) info->v1.i = *(int16_t*)ptr;
-#else
-        else if (info->type == BCF_BT_INT32) { int32_t *ptmpData = (int32_t*)&tmpData; for(j=0;j<4;j++) tmpData[j]=ptr[j]; info->v1.i = *ptmpData;}
-        else if (info->type == BCF_BT_FLOAT) { float *ptmpData = (float*)&tmpData; for(j=0;j<4;j++) tmpData[j]=ptr[j]; info->v1.f = *ptmpData;}
-        else if (info->type == BCF_BT_INT16) { int16_t *ptmpData = (int16_t*)&tmpData; for(j=0;j<2;j++) tmpData[j]=ptr[j]; info->v1.i = *ptmpData;}
-#endif
+        else if (info->type == BCF_BT_INT32) info->v1.i = ua_read4s((int32_t*)ptr);
+        else if (info->type == BCF_BT_FLOAT) info->v1.f = ua_read_f((float*)ptr);
+        else if (info->type == BCF_BT_INT16) info->v1.i = ua_read2s((int16_t*)ptr);
     }
     ptr += info->len << bcf_type_shift[info->type];
     info->vptr_len = ptr - info->vptr;
