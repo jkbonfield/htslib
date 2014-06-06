@@ -24,8 +24,8 @@ static inline  int64_t ua_read8s(const int64_t *ip) { return *ip; }
 static inline  int32_t ua_read4s(const int32_t *ip) { return *ip; }
 static inline  int16_t ua_read2s(const int16_t *ip) { return *ip; }
 
-static inline void ua_write_f(float *ip, float v) {*ip=vl}
-static inline void ua_write_d(double *ip, double v) {*ip=d}
+static inline void ua_write_f(float *ip, float v) {*ip=v;}
+static inline void ua_write_d(double *ip, double v) {*ip=v;}
 static inline void ua_write8 (uint64_t *ip, uint64_t v) {*ip=v;}
 static inline void ua_write4 (uint32_t *ip, uint32_t v) {*ip=v;}
 static inline void ua_write2 (uint16_t *ip, uint16_t v) {*ip=v;}
