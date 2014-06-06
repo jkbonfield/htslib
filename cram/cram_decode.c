@@ -1094,8 +1094,9 @@ static cram_map *map_find(cram_map **map, unsigned char *key, int id) {
 
 //#define map_find(M,K,I) M[CRAM_MAP(K[0],K[1])];while (m && m->key != I);m= m->next
 
+#ifdef SP_BIG_ENDIAN
 static int cram_byte_swap_aux(cram_slice *s, cram_record *cr) {
-    char *cp = BLOCK_DATA(s->aux_blk) + cr->aux;
+    char *cp = (char *)BLOCK_DATA(s->aux_blk) + cr->aux;
     int i;
     
     for (i = 0; i < cr->ntags; i++) {
@@ -1160,6 +1161,7 @@ static int cram_byte_swap_aux(cram_slice *s, cram_record *cr) {
     
     return 0;
 }
+#endif
 
 static int cram_decode_aux_1_0(cram_container *c, cram_slice *s,
 			       cram_block *blk, cram_record *cr) {

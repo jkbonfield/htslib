@@ -1947,7 +1947,7 @@ static char *cram_encode_aux(cram_fd *fd, bam_seq_t *b, cram_container *c,
 	    aux+=3;
 	    d = ua_read8((uint64_t *)aux);
 	    d = le_int8(d);
-	    ua_write8((uint64_t *)tmp, v);
+	    ua_write8((uint64_t *)tmp, d);
 	    tmp+=8; aux+=8;
 	    break;
 
