@@ -1094,6 +1094,72 @@ static cram_map *map_find(cram_map **map, unsigned char *key, int id) {
 
 //#define map_find(M,K,I) M[CRAM_MAP(K[0],K[1])];while (m && m->key != I);m= m->next
 
+static int cram_byte_swap_aux(cram_slice *s, cram_record *cr) {
+    char *cp = BLOCK_DATA(s->aux_blk) + cr->aux;
+    int i;
+    
+    for (i = 0; i < cr->ntags; i++) {
+	char tmp;
+	cp+=2;
+	switch (*cp++) {
+	    case 'A': case'C': case 'c':
+	    	cp++;
+		break;
+	    case 'Z': case 'H':
+	        while(*cp++);
+		break;
+	    case 'S': case 's':
+	    	tmp=cp[0];cp[0]=cp[1];cp[1]=tmp;
+		cp+=2;
+		break;
+	    case 'I': case 'i': case 'f':
+	    	tmp=cp[0];cp[0]=cp[3];cp[3]=tmp;
+		tmp=cp[1];cp[1]=cp[2];cp[2]=tmp;
+		cp+=4;
+		break;
+	    case 'd':
+	    	tmp=cp[0];cp[0]=cp[7];cp[7]=tmp;
+		tmp=cp[1];cp[1]=cp[6];cp[6]=tmp;
+	    	tmp=cp[2];cp[2]=cp[5];cp[5]=tmp;
+		tmp=cp[3];cp[3]=cp[4];cp[4]=tmp;
+		cp+=8;
+		break;
+	    case 'B': {
+	        int sub_type=*cp++;
+	    	int count=ua_read4((uint32_t *)cp);
+		count = le_int4(count);
+		ua_write4((uint32_t *)cp, count);
+		cp+=4;
+		switch(sub_type) {
+		    int i;
+		    case 'c': case 'C':
+		        cp+=count;
+			break;
+		    case 's': case 'S':
+		        for (i=0; i<count; i++, cp+=2) {
+		    	    tmp=cp[0];cp[0]=cp[1];cp[1]=tmp;
+		        }
+			break;
+		    case 'i': case 'I': case 'f':
+		        for (i=0; i<count; i++, cp+=4) {
+		    	    tmp=cp[0];cp[0]=cp[3];cp[3]=tmp;
+		    	    tmp=cp[1];cp[1]=cp[2];cp[2]=tmp;
+		        }
+			break;
+		    default:
+		    	fprintf(stderr, "Unknown sub-type '%c' for aux type 'B'\n", sub_type);
+			return -1;
+		}
+		break;
+	    }
+	    default:
+	    	fprintf(stderr, "Uknown aux type '%c'\n", cp[-1]);
+		return -1;
+	}
+    }
+    
+    return 0;
+}
 
 static int cram_decode_aux_1_0(cram_container *c, cram_slice *s,
 			       cram_block *blk, cram_record *cr) {
@@ -1181,6 +1247,11 @@ static int cram_decode_aux(cram_container *c, cram_slice *s,
 	r |= m->codec->decode(s, m->codec, blk, (char *)s->aux_blk, &out_sz);
 	cr->aux_size += out_sz + 3;
     }
+    
+    // Byte swap to local host endianness
+#ifdef SP_BIG_ENDIAN
+    cram_byte_swap_aux(s, cr);
+#endif
     
     return r;
 }

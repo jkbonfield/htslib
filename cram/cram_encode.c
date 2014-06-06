@@ -1801,17 +1801,8 @@ static char *cram_encode_aux_1_0(cram_fd *fd, bam_seq_t *b, cram_container *c,
 
 	case 'B': {
 	    int type = aux[3], blen;
-#ifdef SP_BIG_ENDIAN
-	    uint32_t count = (uint32_t)((((unsigned char *)aux)[7]<< 0) +
-					(((unsigned char *)aux)[6]<< 8) +
-					(((unsigned char *)aux)[5]<<16) +
-					(((unsigned char *)aux)[4]<<24));
-#else
-	    uint32_t count = (uint32_t)((((unsigned char *)aux)[4]<< 0) +
-					(((unsigned char *)aux)[5]<< 8) +
-					(((unsigned char *)aux)[6]<<16) +
-					(((unsigned char *)aux)[7]<<24));
-#endif
+	    uint32_t count = ua_read4((uint32_t *)(aux+4));
+
 	    // skip TN field
 	    aux+=3; //*tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
 
@@ -1863,12 +1854,6 @@ static char *cram_encode_aux_1_0(cram_fd *fd, bam_seq_t *b, cram_container *c,
 #endif
 
     return rg;
-}
-
-static inline int is_big_endian(){
-    int x = 0x01;
-    char *c = (char*)&x;
-    return (c[0] != 0x01);
 }
 
 /*
@@ -1934,6 +1919,9 @@ static char *cram_encode_aux(cram_fd *fd, bam_seq_t *b, cram_container *c,
 	    return NULL;
 
 	switch(aux[2]) {
+	    uint32_t v;
+	    uint64_t d; // actually a double, but byte-swapped as integer type
+	    
 	case 'A': case 'C': case 'c':
 	    aux+=3;
 	    *tmp++=*aux++;
@@ -1941,18 +1929,27 @@ static char *cram_encode_aux(cram_fd *fd, bam_seq_t *b, cram_container *c,
 
 	case 'S': case 's':
 	    aux+=3;
-	    *tmp++=*aux++; *tmp++=*aux++;
+	    v = ua_read2((uint16_t *)aux);
+	    v = le_int2(v);
+	    ua_write2((uint16_t *)tmp, v);
+	    tmp+=2; aux+=2;
 	    break;
 
 	case 'I': case 'i': case 'f':
 	    aux+=3;
-	    *tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
+	    v = ua_read4((uint32_t *)aux);
+	    v = le_int4(v);
+	    ua_write4((uint32_t *)tmp, v);
+	    tmp+=4; aux+=4;
 	    break;
 
 	case 'd':
-	    aux+=3; //*tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
-	    *tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
-	    *tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
+	    aux+=3;
+	    d = ua_read8((uint64_t *)aux);
+	    d = le_int8(d);
+	    ua_write8((uint64_t *)tmp, v);
+	    tmp+=8; aux+=8;
+	    break;
 
 	case 'Z': case 'H':
 	    aux+=3;
@@ -1962,21 +1959,7 @@ static char *cram_encode_aux(cram_fd *fd, bam_seq_t *b, cram_container *c,
 
 	case 'B': {
 	    int type = aux[3], blen;
-	    uint32_t count;
-	    if(is_big_endian())
-	    {
-	        count = (uint32_t)((((unsigned char *)aux)[7]<< 0) +
-				(((unsigned char *)aux)[6]<< 8) +
-				(((unsigned char *)aux)[5]<<16) +
-				(((unsigned char *)aux)[4]<<24));
-	    }
-	    else
-	    {
-	        count = (uint32_t)((((unsigned char *)aux)[4]<< 0) +
-				(((unsigned char *)aux)[5]<< 8) +
-				(((unsigned char *)aux)[6]<<16) +
-				(((unsigned char *)aux)[7]<<24));
-	    }
+	    uint32_t count = ua_read4((uint32_t *)(aux+4));
 	    // skip TN field
 	    aux+=3;
 
@@ -2001,11 +1984,37 @@ static char *cram_encode_aux(cram_fd *fd, bam_seq_t *b, cram_container *c,
 	    tmp += itf8_put(tmp, blen+5);
 
 	    *tmp++=*aux++; // sub-type & length
-	    *tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++; *tmp++=*aux++;
+	    *tmp++=count&0xff;
+	    *tmp++=(count>>8)&0xff;
+	    *tmp++=(count>>16)&0xff;
+	    *tmp++=(count>>24);
+	    aux+=4;
 
+#ifdef SP_LITTLE_ENDIAN
 	    // The tag data itself
 	    memcpy(tmp, aux, blen); tmp += blen; aux += blen;
-
+#else
+	    switch(type) {
+		int i;
+	    case 'c': case 'C':
+	    	memcpy(tmp, aux, blen); tmp += blen; aux += blen;
+		break;
+	    case 's': case 'S':
+	        for (i = 0; i < count; i++, tmp+=2, aux+=2) {
+		    uint16_t v = ua_read2((uint16_t *)aux);
+		    v=le_int2(v);
+		    ua_write2((uint16_t*)tmp, v); 
+		}
+		break;
+	    case 'i': case 'I': case 'f':
+	        for (i = 0; i < count; i++, tmp+=4, aux+=4) {
+		    uint32_t v = ua_read4((uint32_t *)aux);
+		    v=le_int4(v);
+		    ua_write4((uint32_t*)tmp, v); 
+		}
+		break;
+	    }
+#endif
 	    //cram_stats_add(c->aux_B_stats, blen);
 	    break;
 	}

@@ -24,6 +24,8 @@ static inline  int64_t ua_read8s(const int64_t *ip) { return *ip; }
 static inline  int32_t ua_read4s(const int32_t *ip) { return *ip; }
 static inline  int16_t ua_read2s(const int16_t *ip) { return *ip; }
 
+static inline void ua_write_f(float *ip, float v) {*ip=vl}
+static inline void ua_write_d(double *ip, double v) {*ip=d}
 static inline void ua_write8 (uint64_t *ip, uint64_t v) {*ip=v;}
 static inline void ua_write4 (uint32_t *ip, uint32_t v) {*ip=v;}
 static inline void ua_write2 (uint16_t *ip, uint16_t v) {*ip=v;}
@@ -41,6 +43,18 @@ static inline float ua_read_f(const float *ip) {
     return u.f;
 }
 
+static inline void ua_write_f(float *ip, float v) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	float f;
+	unsigned char c[4];
+    } u = {v};
+    cp[0] = u.c[0];
+    cp[1] = u.c[1];
+    cp[2] = u.c[2];
+    cp[3] = u.c[3];
+}
+
 static inline float ua_read_d(const double *ip) {
     unsigned char *cp = (unsigned char *)ip;
     union {
@@ -49,6 +63,22 @@ static inline float ua_read_d(const double *ip) {
     } u = {{cp[0],cp[1],cp[2],cp[3],
 	    cp[4],cp[5],cp[6],cp[7]}};
     return u.d;
+}
+
+static inline void ua_write_d(double *ip, double v) {
+    unsigned char *cp = (unsigned char *)ip;
+    union {
+	double d;
+	unsigned char c[8];
+    } u = {v};
+    cp[0] = u.c[0];
+    cp[1] = u.c[1];
+    cp[2] = u.c[2];
+    cp[3] = u.c[3];
+    cp[4] = u.c[4];
+    cp[5] = u.c[5];
+    cp[6] = u.c[6];
+    cp[7] = u.c[7];
 }
 
 static inline uint64_t ua_read8(const uint64_t *ip) {

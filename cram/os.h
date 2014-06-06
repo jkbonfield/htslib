@@ -231,11 +231,15 @@ extern "C" {
  * trivial.
  */
 #ifdef SP_BIG_ENDIAN
+#define le_int2(x) iswap_int2((x))
 #define le_int4(x) iswap_int4((x))
+#define le_int8(x) iswap_int8((x))
 #endif
 
 #ifdef SP_LITTLE_ENDIAN
+#define le_int2(x) (x)
 #define le_int4(x) (x)
+#define le_int8(x) (x)
 #endif
 
 /*-----------------------------------------------------------------------------

@@ -990,8 +990,7 @@ int sam_format1(const bam_hdr_t *h, const bam1_t *b, kstring_t *str)
 		} else if (type == 'B') {
 			uint8_t sub_type = *(s++);
 			int32_t n;
-			memcpy(&n, s, 4);
-			s += 4; // no point to the start of the array
+			n = ua_read4((uint32_t*)s); s+= 4;
 			if (s + n >= b->data + b->l_data)
 				return -1;
 			kputsn("B:", 2, str); kputc(sub_type, str); // write the typing
