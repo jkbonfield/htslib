@@ -68,23 +68,26 @@ static int bgzip_main_usage(void)
     fprintf(stderr, "Version: %s\n", hts_version());
     fprintf(stderr, "Usage:   bgzip [OPTIONS] [FILE] ...\n");
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "   -b, --offset INT        decompress at virtual file pointer (0-based uncompressed offset)\n");
-    fprintf(stderr, "   -c, --stdout            write on standard output, keep original files unchanged\n");
-    fprintf(stderr, "   -d, --decompress        decompress\n");
-    fprintf(stderr, "   -f, --force             overwrite files without asking\n");
-    fprintf(stderr, "   -h, --help              give this help\n");
-    fprintf(stderr, "   -i, --index             compress and create BGZF index\n");
-    fprintf(stderr, "   -I, --index-name FILE   name of BGZF index file [file.gz.gzi]\n");
-    fprintf(stderr, "   -r, --reindex           (re)index compressed file\n");
-    fprintf(stderr, "   -s, --size INT          decompress INT bytes (uncompressed size)\n");
-    fprintf(stderr, "   -@, --threads INT       number of compression threads to use [1]\n");
+    fprintf(stderr, "   -b, --offset INT            decompress at virtual file pointer (0-based"
+                    "                               uncompressed offset)\n");
+    fprintf(stderr, "   -c, --stdout                write on standard output, keep original"
+                    "                               files unchanged\n");
+    fprintf(stderr, "   -d, --decompress            decompress\n");
+    fprintf(stderr, "   -f, --force                 overwrite files without asking\n");
+    fprintf(stderr, "   -h, --help                  give this help\n");
+    fprintf(stderr, "   -i, --index                 compress and create BGZF index\n");
+    fprintf(stderr, "   -I, --index-name FILE       name of BGZF index file [file.gz.gzi]\n");
+    fprintf(stderr, "   -r, --reindex               (re)index compressed file\n");
+    fprintf(stderr, "   -s, --size INT              decompress INT bytes (uncompressed size)\n");
+    fprintf(stderr, "   -@, --threads INT           number of compression threads to use [1]\n");
+    fprintf(stderr, "   -l, --compress-level INT    compression level\n");
     fprintf(stderr, "\n");
     return 1;
 }
 
 int main(int argc, char **argv)
 {
-    int c, compress, pstdout, is_forced, index = 0, reindex = 0;
+    int c, compress, pstdout, is_forced, index = 0, reindex = 0, compress_level;
     BGZF *fp;
     void *buffer;
     long start, end, size;
@@ -102,13 +105,14 @@ int main(int argc, char **argv)
         {"index-name", required_argument, NULL, 'I'},
         {"reindex", no_argument, NULL, 'r'},
         {"size", required_argument, NULL, 's'},
+        {"compress-level", required_argument, NULL, 'l'},
         {"threads", required_argument, NULL, '@'},
         {"version", no_argument, NULL, 1},
         {NULL, 0, NULL, 0}
     };
 
-    compress = 1; pstdout = 0; start = 0; size = -1; end = -1; is_forced = 0;
-    while((c  = getopt_long(argc, argv, "cdh?fb:@:s:iI:r",loptions,NULL)) >= 0){
+    compress = 1; pstdout = 0; start = 0; size = -1; end = -1; is_forced = 0; compress_level = -1;
+    while((c  = getopt_long(argc, argv, "cdh?fb:@:s:iI:l:r",loptions,NULL)) >= 0){
         switch(c){
         case 'd': compress = 0; break;
         case 'c': pstdout = 1; break;
@@ -124,6 +128,7 @@ int main(int argc, char **argv)
 "bgzip (htslib) %s\n"
 "Copyright (C) 2016 Genome Research Ltd.\n", hts_version());
             return EXIT_SUCCESS;
+        case 'l': compress_level = atol(optarg); break;
         case 'h':
         case '?': return bgzip_main_usage();
         }
@@ -136,6 +141,14 @@ int main(int argc, char **argv)
     if (compress == 1) {
         struct stat sbuf;
         int f_src = fileno(stdin);
+        char out_mode[3], out_mode_forced[4];
+        strcpy(out_mode, "w");
+        if (compress_level >= 0) {
+            out_mode[1] = compress_level + '0';
+            out_mode[2] = '\0';
+        }
+        strcpy(out_mode_forced, out_mode);
+        strcat(out_mode_forced, "x");
 
         if ( argc>optind )
         {
@@ -151,15 +164,15 @@ int main(int argc, char **argv)
             }
 
             if (pstdout)
-                fp = bgzf_open("-", "w");
+                fp = bgzf_open("-", out_mode);
             else
             {
                 char *name = malloc(strlen(argv[optind]) + 5);
                 strcpy(name, argv[optind]);
                 strcat(name, ".gz");
-                fp = bgzf_open(name, is_forced? "w" : "wx");
+                fp = bgzf_open(name, is_forced? out_mode_forced : out_mode);
                 if (fp == NULL && errno == EEXIST && confirm_overwrite(name))
-                    fp = bgzf_open(name, "w");
+                    fp = bgzf_open(name,out_mode);
                 if (fp == NULL) {
                     fprintf(stderr, "[bgzip] can't create %s: %s\n", name, strerror(errno));
                     free(name);
@@ -176,7 +189,7 @@ int main(int argc, char **argv)
             return 1;
         }
         else
-            fp = bgzf_open("-", "w");
+            fp = bgzf_open("-", out_mode);
 
         if (threads > 1)
             bgzf_mt(fp, threads, 256);
