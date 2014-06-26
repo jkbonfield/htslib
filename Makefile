@@ -23,7 +23,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 CC     = gcc
-CXX = g++
 AR     = ar
 RANLIB = ranlib
 
@@ -35,6 +34,7 @@ CPPFLAGS =
 CFLAGS   = -g -Wall -O2
 EXTRA_CFLAGS_PIC = -fpic
 LDFLAGS  =
+<<<<<<< HEAD
 LIBS     =
 
 # For now these don't work too well as samtools also needs to know to
@@ -55,6 +55,9 @@ LIBS     =
 # LIBS     += -llzma
 # endif
 LDLIBS   = -L$(IGZIP_LIB) -ligzip0c
+=======
+LDLIBS   = -L$(IGZIP_LIB) -ligzip0c -lstdc++
+>>>>>>> bgzf.c: Incorporated __x86_64 HW check, Makefile: Reiverted to building with gcc by including stdc++ library, bgzip.c: whitespace edit, igzip_042: Added the igzip_042 directory missing from the last commit
 
 prefix      = /usr/local
 exec_prefix = $(prefix)
@@ -236,7 +239,11 @@ libhts.a: $(LIBHTS_OBJS)
 # file used at runtime (when $LD_LIBRARY_PATH includes the build directory).
 
 libhts.so: $(LIBHTS_OBJS:.o=.pico)
+<<<<<<< HEAD
 	$(CXX) -shared -Wl,-soname,libhts.so.$(LIBHTS_SOVERSION) -pthread $(LDFLAGS) -o $@ $(LIBHTS_OBJS:.o=.pico) $(LDLIBS) -lz -lm $(LIBS)
+=======
+	$(CC) -shared -Wl,-soname,libhts.so.$(LIBHTS_SOVERSION) $(LDFLAGS) -o $@ $(LIBHTS_OBJS:.o=.pico) $(LDLIBS) -lz
+>>>>>>> bgzf.c: Incorporated __x86_64 HW check, Makefile: Reiverted to building with gcc by including stdc++ library, bgzip.c: whitespace edit, igzip_042: Added the igzip_042 directory missing from the last commit
 	ln -sf $@ libhts.so.$(LIBHTS_SOVERSION)
 
 # Similarly this also creates libhts.NN.dylib as a byproduct, so that programs
@@ -296,6 +303,7 @@ cram/zfio.o cram/zfio.pico: cram/zfio.c config.h cram/os.h cram/zfio.h
 
 
 bgzip: bgzip.o libhts.a
+<<<<<<< HEAD
 	$(CXX) -pthread $(LDFLAGS) -o $@ bgzip.o libhts.a $(LDLIBS) -lz $(LIBS)
 
 htsfile: htsfile.o libhts.a
@@ -303,6 +311,12 @@ htsfile: htsfile.o libhts.a
 
 tabix: tabix.o libhts.a
 	$(CXX) -pthread $(LDFLAGS) -o $@ tabix.o libhts.a $(LDLIBS) -lz $(LIBS)
+=======
+	$(CC) -pthread $(LDFLAGS) -o $@ bgzip.o libhts.a $(LDLIBS) -lz
+
+tabix: tabix.o libhts.a
+	$(CC) -pthread $(LDFLAGS) -o $@ tabix.o libhts.a $(LDLIBS) -lz
+>>>>>>> bgzf.c: Incorporated __x86_64 HW check, Makefile: Reiverted to building with gcc by including stdc++ library, bgzip.c: whitespace edit, igzip_042: Added the igzip_042 directory missing from the last commit
 
 bgzip.o: bgzip.c config.h $(htslib_bgzf_h) $(htslib_hts_h)
 htsfile.o: htsfile.c config.h $(htslib_hfile_h) $(htslib_hts_h) $(htslib_sam_h) $(htslib_vcf_h)
@@ -320,6 +334,7 @@ check test: htsfile $(BUILT_TEST_PROGRAMS)
 	cd test && REF_PATH=: ./test.pl
 
 test/fieldarith: test/fieldarith.o libhts.a
+<<<<<<< HEAD
 	$(CXX) -pthread $(LDFLAGS) -o $@ test/fieldarith.o libhts.a $(LDLIBS) -lz $(LIBS)
 
 test/hfile: test/hfile.o libhts.a
@@ -336,6 +351,24 @@ test/test-vcf-api: test/test-vcf-api.o libhts.a
 
 test/test-vcf-sweep: test/test-vcf-sweep.o libhts.a
 	$(CXX) -pthread $(LDFLAGS) -o $@ test/test-vcf-sweep.o libhts.a $(LDLIBS) -lz $(LIBS)
+=======
+	$(CC) -pthread $(LDFLAGS) -o $@ test/fieldarith.o libhts.a $(LDLIBS) -lz
+
+test/hfile: test/hfile.o libhts.a
+	$(CC) $(LDFLAGS) -o $@ test/hfile.o libhts.a $(LDLIBS) -lz
+
+test/sam: test/sam.o libhts.a
+	$(CC) -pthread $(LDFLAGS) -o $@ test/sam.o libhts.a $(LDLIBS) -lz
+
+test/test_view: test/test_view.o libhts.a
+	$(CC) -pthread $(LDFLAGS) -o $@ test/test_view.o libhts.a $(LDLIBS) -lz
+
+test/test-vcf-api: test/test-vcf-api.o libhts.a
+	$(CC) -pthread $(LDFLAGS) -o $@ test/test-vcf-api.o libhts.a $(LDLIBS) -lz
+
+test/test-vcf-sweep: test/test-vcf-sweep.o libhts.a
+	$(CC) -pthread $(LDFLAGS) -o $@ test/test-vcf-sweep.o libhts.a $(LDLIBS) -lz
+>>>>>>> bgzf.c: Incorporated __x86_64 HW check, Makefile: Reiverted to building with gcc by including stdc++ library, bgzip.c: whitespace edit, igzip_042: Added the igzip_042 directory missing from the last commit
 
 test/fieldarith.o: test/fieldarith.c config.h $(htslib_sam_h)
 test/hfile.o: test/hfile.c config.h $(htslib_hfile_h) $(htslib_hts_defs_h)
