@@ -65,7 +65,10 @@
   records the size.
 
 */
-#ifdef USE_IGZIP
+//Enable igzip only on __x86_64 HW which supports SSE 4.2
+#ifdef __x86_64
+#define USE_IGZIP 1
+#define FAST_COMPRESSION 1
 inline bool is_cpuid_ecx_bit_set(int eax, int bitidx) 
 { 
   int ecx = 0, edx = 0, ebx = 0; 
