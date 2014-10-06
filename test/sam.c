@@ -11,7 +11,7 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notices and this permission notice shall be included in
+The above copyright notice and this permission notice shall be included in
 all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
@@ -30,7 +30,6 @@ DEALINGS IN THE SOFTWARE.  */
 
 #include "htslib/sam.h"
 #include "htslib/kstring.h"
-#include "cram/os.h"
 
 int status;
 
@@ -81,6 +80,7 @@ static int aux_fields1(void)
     bam_hdr_t *header = sam_hdr_read(in);
     bam1_t *aln = bam_init1();
     uint8_t *p;
+    uint32_t n;
     kstring_t ks = { 0, 0, NULL };
 
     if (sam_read1(in, header, aln) >= 0) {
@@ -103,11 +103,7 @@ static int aux_fields1(void)
             fail("XH field is \"%s\", expected \"%s\"", bam_aux2Z(p), BEEF);
 
         // TODO Invent and use bam_aux2B()
-#ifdef SP_LITTLE_ENDIAN
-        if ((p = check_bam_aux_get(aln, "XB", 'B')) && memcmp(p, "Bc\3\0\0\0\xfe\x00\x02", 9) != 0)
-#elif defined SP_BIG_ENDIAN
-        if ((p = check_bam_aux_get(aln, "XB", 'B')) && memcmp(p, "Bc\0\0\0\3\xfe\x00\x02", 9) != 0)
-#endif
+        if ((p = check_bam_aux_get(aln, "XB", 'B')) && ! (memcmp(p, "Bc", 2) == 0 && (memcpy(&n, p+2, 4), n) == 3 && memcmp(p+6, "\xfe\x00\x02", 3) == 0))
             fail("XB field is %c,..., expected c,-2,0,+2", p[1]);
 
         if ((p = check_bam_aux_get(aln, "ZZ", 'I')) && bam_aux2i(p) != 1000000)

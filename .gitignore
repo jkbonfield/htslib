@@ -1,5 +1,6 @@
 *.o
 *.pico
+*-uninstalled.pc
 /version.h
 
 lib*.a
@@ -15,6 +16,7 @@ lib*.so.*
 /test/test-vcf-api
 /test/test-vcf-sweep
 /test/test_view
+/test/test-regidx
 /test/*.tmp
 /test/*.tmp.*
 
