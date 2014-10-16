@@ -115,10 +115,12 @@ sub test_cmd
     my ($package, $filename, $line, $test)=caller(1);
     $test =~ s/^.+:://;
 
-    print "$test:\n";
-    print "\t$args{cmd}\n";
+    my $framework = $ENV{TEST_FRAMEWORK} ? "$ENV{TEST_FRAMEWORK} " : '';
 
-    my ($ret,$out) = _cmd("$args{cmd} 2>&1");
+    print "$test:\n";
+    print "\t${framework}$args{cmd}\n";
+
+    my ($ret,$out) = _cmd("${framework}$args{cmd} 2>&1");
     if ( $ret ) { failed($opts,$test); return; }
     if ( $$opts{redo_outputs} && -e "$$opts{path}/$args{out}" )
     {

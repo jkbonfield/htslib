@@ -239,13 +239,14 @@ tabix.o: tabix.c $(htslib_tbx_h) $(htslib_sam_h) $(htslib_vcf_h) htslib/kseq.h $
 
 # For tests that might use it, set $REF_PATH explicitly to use only reference
 # areas within the test suite (or set it to ':' to use no reference areas).
+
 check test: $(BUILT_TEST_PROGRAMS)
-	test/test-regidx
-	test/fieldarith test/fieldarith.sam
-	test/hfile
-	test/sam
-	cd test && REF_PATH=: ./test_view.pl
-	cd test && ./test.pl
+	$(TEST_FRAMEWORK) test/test-regidx
+	$(TEST_FRAMEWORK) test/fieldarith test/fieldarith.sam
+	$(TEST_FRAMEWORK) test/hfile
+	$(TEST_FRAMEWORK) test/sam
+	cd test && REF_PATH=: TEST_FRAMEWORK="$(TEST_FRAMEWORK)" ./test_view.pl
+	cd test && TEST_FRAMEWORK="$(TEST_FRAMEWORK)" ./test.pl
 
 test/fieldarith: test/fieldarith.o libhts.a
 	$(CC) -pthread $(LDFLAGS) -o $@ test/fieldarith.o libhts.a $(LDLIBS) -lz

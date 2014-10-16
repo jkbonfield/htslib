@@ -23,9 +23,11 @@
 # DEALINGS IN THE SOFTWARE.
 use strict;
 use warnings;
+use Getopt::Long;
 
 my $err_count = 0;
 my $suc_count = 0;
+my $framework = $ENV{TEST_FRAMEWORK} ? "$ENV{TEST_FRAMEWORK} " : '';
 
 sub test {
     my ($cmd) = @_;
@@ -48,20 +50,20 @@ foreach my $sam (glob("*#*.sam")) {
     print "\n=== Testing $sam, ref $ref ===\n";
 
     # SAM -> BAM -> SAM
-    test "./test_view -S -b $sam > $bam";
-    test "./test_view $bam > $bam.sam_";
+    test "${framework}./test_view -S -b $sam > $bam";
+    test "${framework}./test_view $bam > $bam.sam_";
     test "./compare_sam.pl $sam $bam.sam_";
 
     # SAM -> CRAM -> SAM
-    test "./test_view -t $ref -S -C $sam > $cram";
-    test "./test_view -D $cram > $cram.sam_";
+    test "${framework}./test_view -t $ref -S -C $sam > $cram";
+    test "${framework}./test_view -D $cram > $cram.sam_";
     test "./compare_sam.pl -nomd $sam $cram.sam_";
 
     # BAM -> CRAM -> BAM -> SAM
     $cram = "$bam.cram";
-    test "./test_view -t $ref -C $bam > $cram";
-    test "./test_view -b -D $cram > $cram.bam";
-    test "./test_view $cram.bam > $cram.bam.sam_";
+    test "${framework}./test_view -t $ref -C $bam > $cram";
+    test "${framework}./test_view -b -D $cram > $cram.bam";
+    test "${framework}./test_view $cram.bam > $cram.bam.sam_";
     test "./compare_sam.pl -nomd $sam $cram.bam.sam_";
 }
 
