@@ -802,7 +802,7 @@ static void hts_idx_save_core(const hts_idx_t *idx, void *fp, int fmt)
                 x = kh_key(bidx, k); idx_write(is_bgzf, fp, ed_swap_4p(&x), 4);
                 if (fmt == HTS_FMT_CSI) {
                     uint64_t y = kh_val(bidx, k).loff;
-                    idx_write(is_bgzf, fp, ed_swap_4p(&y), 8);
+                    idx_write(is_bgzf, fp, ed_swap_8p(&y), 8);
                 }
                 x = p->n; idx_write(is_bgzf, fp, ed_swap_4p(&x), 4);
                 swap_bins(p);
