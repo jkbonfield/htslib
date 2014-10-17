@@ -78,7 +78,8 @@ BUILT_TEST_PROGRAMS = \
 	test/test-regidx \
 	test/test_view \
 	test/test-vcf-api \
-	test/test-vcf-sweep
+	test/test-vcf-sweep \
+	test/test_index
 
 all: lib-static lib-shared $(BUILT_PROGRAMS) $(BUILT_TEST_PROGRAMS)
 
@@ -266,6 +267,7 @@ check test: $(BUILT_TEST_PROGRAMS)
 	$(TEST_FRAMEWORK) test/test-regidx
 	cd test && REF_PATH=: TEST_FRAMEWORK="$(TEST_FRAMEWORK)" ./test_view.pl
 	cd test && TEST_FRAMEWORK="$(TEST_FRAMEWORK)" ./test.pl
+	cd test && TEST_FRAMEWORK="$(TEST_FRAMEWORK)" ./test_index.pl -tidy -fail_early
 
 test/fieldarith: test/fieldarith.o libhts.a
 	$(CC) -pthread $(LDFLAGS) -o $@ test/fieldarith.o libhts.a $(LDLIBS) -lz
@@ -288,6 +290,10 @@ test/test-vcf-api: test/test-vcf-api.o libhts.a
 test/test-vcf-sweep: test/test-vcf-sweep.o libhts.a
 	$(CC) -pthread $(LDFLAGS) -o $@ test/test-vcf-sweep.o libhts.a $(LDLIBS) -lz
 
+test/test_index: test/test_index.o libhts.a
+	$(CC) -pthread $(LDFLAGS) -o $@ test/test_index.o libhts.a $(LDLIBS) -lz
+
+
 test/fieldarith.o: test/fieldarith.c $(htslib_sam_h)
 test/hfile.o: test/hfile.c $(htslib_hfile_h) $(htslib_hts_defs_h)
 test/test-regidx.o: test/test-regidx.c $(htslib_regidx_h)
@@ -295,7 +301,7 @@ test/sam.o: test/sam.c $(htslib_sam_h) htslib/kstring.h
 test/test_view.o: test/test_view.c $(cram_h) $(htslib_sam_h)
 test/test-vcf-api.o: test/test-vcf-api.c $(htslib_hts_h) $(htslib_vcf_h) htslib/kstring.h
 test/test-vcf-sweep.o: test/test-vcf-sweep.c $(htslib_vcf_sweep_h)
-
+test/test_index.o: test/test_index.c $(htslib_sam_h)
 
 install: libhts.a $(BUILT_PROGRAMS) installdirs install-$(SHLIB_FLAVOUR) install-pkgconfig
 	$(INSTALL_PROGRAM) $(BUILT_PROGRAMS) $(DESTDIR)$(bindir)

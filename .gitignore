@@ -17,6 +17,7 @@ lib*.so.*
 /test/test-vcf-api
 /test/test-vcf-sweep
 /test/test_view
+/test/test_index
 /test/*.tmp
 /test/*.tmp.*
 

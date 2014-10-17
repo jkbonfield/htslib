@@ -1,0 +1,41 @@
+@HD	VN:1.4	SO:coordinate
+@SQ	SN:ref1	LN:748055161	M5:00413ba8667dce2233c3e70cad8bc601
+@CO     
+@CO     Copyright (C) 2014 Genome Research Ltd.
+@CO     
+@CO     Permission is hereby granted, free of charge, to any person obtaining
+@CO     a copy of this software and associated documentation files (the
+@CO     "Software"), to deal in the Software without restriction, including
+@CO     without limitation the rights to use, copy, modify, merge, publish,
+@CO     distribute, sublicense, and/or sell copies of the Software, and to
+@CO     permit persons to whom the Software is furnished to do so, subject
+@CO     to the following conditions:
+@CO     
+@CO     The above copyright notice and this permission notice shall be
+@CO     included in all copies or substantial portions of the Software.
+@CO     
+@CO     THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+@CO     EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+@CO     MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+@CO     IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+@CO     CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+@CO     TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+@CO     SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+@CO     
+@CO	
+@CO	Ref 00413ba8667dce2233c3e70cad8bc601 is huge (748MB), and can't be
+@CO	indexed using .bai due to file format limitations.
+@CO	NB: Sequences must not overlap for the test to work!
+@CO	
+r1	0	ref1	1	99	50M	*	0	0	ATCCTCCCCCCCACCACCACCCCAGCATGCAGGCCGCCACCATCTTATCC	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r30957609	0	ref1	30957609	99	50M	*	0	0	CCTGTTCCGCCACTGAGCATGGATTCTTAATCTAGGGATCAATGGACTAA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r109700486	0	ref1	109700486	99	50M	*	0	0	AGACTAACAAGTATCCTTTAATGGTTTGTATGAGATGCCAAATCCTCTGG	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r128521379	0	ref1	128521379	99	50M	*	0	0	CTGGCTTTTAAATAGCCATCAAGGCCAAAAATTTTTTTTCTTAGTTCTAA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r216576788	0	ref1	216576788	99	50M	*	0	0	CACTAGTGGAATGAACTAGTGGAACTAGATGGCATGAGTGGAATCAGGAA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r442538144	0	ref1	442538144	99	50M	*	0	0	AAATGAAACAATCTCTGCCCTCAAGGAGCCTATATTTTTAAAAGGGAAAC	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r523404099	0	ref1	523404099	99	50M	*	0	0	GGGCAGAGCAGAGAAGAGCTAATTATTATTGCTTAGTTACTCAGCAAGCA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r559878844	0	ref1	559878844	99	50M	*	0	0	ATTAAAACACCATAAAAATTTGGCAGCTGACTTGAGTGTTTCATTTAGGA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r643063886	0	ref1	643063886	99	50M	*	0	0	TAAATTGTGCCAAGTGACCTTAACTATTAAAGGTGAAAGTATCAGTGGAA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r689834763	0	ref1	689834763	99	50M	*	0	0	GAACAGAGAATGTCAGAGCTAGAAGAGGCAAAACAGAGGCTATCAAAGGT	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r740690445	0	ref1	740690445	99	50M	*	0	0	TCCTTTTTTTTGCCATTGTTAATTGTCATACAGAGCTGATGGATGAACTA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r748055112	0	ref1	748055112	99	50M	*	0	0	AGGAATCGCTAATGCCTCTGGGGGCTCCGCCAGGGAGAGCCGCCATGTTT	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
