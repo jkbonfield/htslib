@@ -1522,14 +1522,11 @@ static int cram_decode_seq(cram_fd *fd, cram_container *c, cram_slice *s,
     s->ncigar = ncigar;
 
     if (decode_md) {
-	char buf[7];
+    char buf[7];
 	BLOCK_APPEND_CHAR(s->aux_blk, '\0'); // null terminate MD:Z:
 	cr->aux_size += BLOCK_SIZE(s->aux_blk) - orig_aux;
 	buf[0] = 'N'; buf[1] = 'M'; buf[2] = 'I';
-	buf[3] = (nm>> 0) & 0xff;
-	buf[4] = (nm>> 8) & 0xff;
-	buf[5] = (nm>>16) & 0xff;
-	buf[6] = (nm>>24) & 0xff;
+    ua_write4((uint32_t *) (buf + 3), nm);
 	BLOCK_APPEND(s->aux_blk, buf, 7);
 	cr->aux_size += 7;
     }
