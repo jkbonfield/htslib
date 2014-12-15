@@ -13,10 +13,11 @@ lib*.so.*
 /test/fieldarith
 /test/hfile
 /test/sam
+/test/test-regidx
 /test/test-vcf-api
 /test/test-vcf-sweep
 /test/test_view
-/test/test-regidx
+/test/test_index
 /test/*.tmp
 /test/*.tmp.*
 

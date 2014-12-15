@@ -137,7 +137,7 @@ htsFile *hts_open(const char *fn, const char *mode)
     if (strchr(mode, 'r')) {
         unsigned char s[18];
         if (hpeek(hfile, s, 6) == 6 && memcmp(s, "CRAM", 4) == 0 &&
-            s[4] >= 1 && s[4] <= 2 && s[5] <= 1) {
+            s[4] >= 1 && s[4] <= 3 && s[5] <= 1) {
             fp->is_cram = 1;
         }
         else if (hpeek(hfile, s, 18) == 18 && s[0] == 0x1f && s[1] == 0x8b &&
@@ -182,7 +182,6 @@ htsFile *hts_open(const char *fn, const char *mode)
         if (fp->fp.cram == NULL) goto error;
         if (!fp->is_write)
             cram_set_option(fp->fp.cram, CRAM_OPT_DECODE_MD, 1);
-
     }
     else if (fp->is_kstream) {
     #if KS_BGZF
@@ -258,11 +257,26 @@ int hts_close(htsFile *fp)
     return ret;
 }
 
+int hts_set_opt(htsFile *fp, enum cram_option opt, ...) {
+    int r;
+    va_list args;
+
+    if (!fp->is_cram)
+        return 0;
+
+    va_start(args, opt);
+    r = cram_set_voption(fp->fp.cram, opt, args);
+    va_end(args);
+
+    return r;
+}
+
 int hts_set_threads(htsFile *fp, int n)
 {
-    // TODO Plug in CRAM and other threading
     if (fp->is_bin) {
         return bgzf_mt(fp->fp.bgzf, n, 256);
+    } else if (fp->is_cram) {
+        return hts_set_opt(fp, CRAM_OPT_NTHREADS, n);
     }
     else return 0;
 }
@@ -788,7 +802,7 @@ static void hts_idx_save_core(const hts_idx_t *idx, void *fp, int fmt)
                 x = kh_key(bidx, k); idx_write(is_bgzf, fp, ed_swap_4p(&x), 4);
                 if (fmt == HTS_FMT_CSI) {
                     uint64_t y = kh_val(bidx, k).loff;
-                    idx_write(is_bgzf, fp, ed_swap_4p(&y), 8);
+                    idx_write(is_bgzf, fp, ed_swap_8p(&y), 8);
                 }
                 x = p->n; idx_write(is_bgzf, fp, ed_swap_4p(&x), 4);
                 swap_bins(p);

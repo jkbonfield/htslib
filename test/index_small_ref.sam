@@ -1,0 +1,38 @@
+@HD	VN:1.4	SO:coordinate
+@SQ	SN:phiX	LN:5386	M5:c3f78539481dde3e7fb732c446d42d93
+@CO     
+@CO     Copyright (C) 2014 Genome Research Ltd.
+@CO     
+@CO     Permission is hereby granted, free of charge, to any person obtaining
+@CO     a copy of this software and associated documentation files (the
+@CO     "Software"), to deal in the Software without restriction, including
+@CO     without limitation the rights to use, copy, modify, merge, publish,
+@CO     distribute, sublicense, and/or sell copies of the Software, and to
+@CO     permit persons to whom the Software is furnished to do so, subject
+@CO     to the following conditions:
+@CO     
+@CO     The above copyright notice and this permission notice shall be
+@CO     included in all copies or substantial portions of the Software.
+@CO     
+@CO     THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+@CO     EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+@CO     MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+@CO     IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+@CO     CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+@CO     TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+@CO     SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+@CO     
+@CO	
+@CO	NB: Sequences must not overlap for the test to work!
+r1	0	phiX	1	99	50M	*	0	0	GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTG	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r166	0	phiX	166	99	50M	*	0	0	AGAAGCTCTTACTTTGCGACCTTTCGCCATCAACTAACGATTCTGTCAAA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r657	0	phiX	657	99	50M	*	0	0	AACATTCAAACGGCCTGTCTCATCATGGAAGGCGCTGAATTTACGGAAAA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r1239	0	phiX	1239	99	50M	*	0	0	AACAGTGGATTAAGTTCATGAAGGATGGTGTTAATGCCACTCCTCTCCCG	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r1571	0	phiX	1571	99	50M	*	0	0	ATTGACATTATGGGTCTGCAAGCTGCTTATGCTAATTTGCATACTGACCA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r1891	0	phiX	1891	99	50M	*	0	0	TAAAGAGATTCAGTACCTTAACGCTAAAGGTGCTTTGACTTATACCGATA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r1948	0	phiX	1948	99	50M	*	0	0	CGACCCTGTTTTGTATGGCAACTTGCCGCCGCGTGAAATTTCTATGAAGG	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r4209	0	phiX	4209	99	50M	*	0	0	CATAAGGCTGCTTCTGACGTTCGTGATGAGTTTGTATCTGTTACTGAGAA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r4367	0	phiX	4367	99	50M	*	0	0	GAAGACGGTTACGCAGTTTTGCCGCAAGCTGGCTGCTGAACGCCCTCTTA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r4671	0	phiX	4671	99	50M	*	0	0	GTTCTTGCTGCCGAGGGTCGCAAGGCTAATGATTCACACGCCGACTGCTA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r5019	0	phiX	5019	99	50M	*	0	0	TACGTTAACAAAAAGTCAGATATGGACCTTGCTGCTAAAGGTCTAGGAGC	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+r5337	0	phiX	5337	99	50M	*	0	0	CTCAAATTTATGCGCGCTTCGATAAAAATGATTGGCGTATCCAACCTGCA	qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
