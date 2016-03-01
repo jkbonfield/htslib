@@ -312,6 +312,20 @@ int bgzf_compress(void *_dst, size_t *dlen, const void *src, size_t slen, int le
 #endif
 }
 
+static int bgzf_gzip_compress(BGZF *fp, void *_dst, size_t *dlen, const void *src, size_t slen, int level)
+{
+    uint8_t *dst = (uint8_t*)_dst;
+    z_stream *zs = fp->gz_stream;
+    int flush = slen ? Z_NO_FLUSH : Z_FINISH;
+    zs->next_in   = (Bytef*)src;
+    zs->avail_in  = slen;
+    zs->next_out  = dst;
+    zs->avail_out = *dlen;
+    if ( deflate(zs, flush) == Z_STREAM_ERROR ) return -1;
+    *dlen = *dlen - zs->avail_out;
+    return 0;
+}
+
 // Deflate the block in fp->uncompressed_block into fp->compressed_block. Also adds an extra field that stores the compressed block length.
 static int deflate_block(BGZF *fp, int block_length)
 {
