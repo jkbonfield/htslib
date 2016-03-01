@@ -1,6 +1,6 @@
 /*  faidx.c -- FASTA random access.
 
-    Copyright (C) 2008, 2009, 2013, 2014 Genome Research Ltd.
+    Copyright (C) 2008, 2009, 2013-2015 Genome Research Ltd.
     Portions copyright (C) 2011 Broad Institute.
 
     Author: Heng Li <lh3@sanger.ac.uk>
@@ -23,20 +23,19 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.  */
 
-#include "config.h"
+#include <config.h>
 
 #include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <stdint.h>
+#include <inttypes.h>
 
 #include "htslib/bgzf.h"
 #include "htslib/faidx.h"
+#include "htslib/hfile.h"
 #include "htslib/khash.h"
-#ifdef _USE_KNETFILE
-#include "htslib/knetfile.h"
-#endif
+#include "htslib/kstring.h"
 
 typedef struct {
     int32_t line_len, line_blen;
@@ -56,27 +55,46 @@ struct __faidx_t {
 #define kroundup32(x) (--(x), (x)|=(x)>>1, (x)|=(x)>>2, (x)|=(x)>>4, (x)|=(x)>>8, (x)|=(x)>>16, ++(x))
 #endif
 
-static inline void fai_insert_index(faidx_t *idx, const char *name, int len, int line_len, int line_blen, uint64_t offset)
+static inline int fai_insert_index(faidx_t *idx, const char *name, int len, int line_len, int line_blen, uint64_t offset)
 {
-    khint_t k;
-    int ret;
-    faidx1_t t;
-    if (idx->n == idx->m) {
-        idx->m = idx->m? idx->m<<1 : 16;
-        idx->name = (char**)realloc(idx->name, sizeof(char*) * idx->m);
+    if (!name) {
+        fprintf(stderr, "[fai_build_core] malformed line\n");
+        return -1;
     }
-    idx->name[idx->n] = strdup(name);
-    k = kh_put(s, idx->hash, idx->name[idx->n], &ret);
-    t.len = len; t.line_len = line_len; t.line_blen = line_blen; t.offset = offset;
-    kh_value(idx->hash, k) = t;
-    ++idx->n;
+
+    char *name_key = strdup(name);
+    int absent;
+    khint_t k = kh_put(s, idx->hash, name_key, &absent);
+    faidx1_t *v = &kh_value(idx->hash, k);
+
+    if (! absent) {
+        fprintf(stderr, "[fai_build_core] ignoring duplicate sequence \"%s\" at byte offset %"PRIu64"\n", name, offset);
+        free(name_key);
+        return 0;
+    }
+
+    if (idx->n == idx->m) {
+        char **tmp;
+        idx->m = idx->m? idx->m<<1 : 16;
+        if (!(tmp = (char**)realloc(idx->name, sizeof(char*) * idx->m))) {
+            fprintf(stderr, "[fai_build_core] out of memory\n");
+            return -1;
+        }
+        idx->name = tmp;
+    }
+    idx->name[idx->n++] = name_key;
+    v->len = len;
+    v->line_len = line_len;
+    v->line_blen = line_blen;
+    v->offset = offset;
+
+    return 0;
 }
 
 faidx_t *fai_build_core(BGZF *bgzf)
 {
-    char *name;
+    kstring_t name = { 0, 0, NULL };
     int c;
-    int l_name, m_name;
     int line_len, line_blen, state;
     int l1, l2;
     faidx_t *idx;
@@ -85,7 +103,6 @@ faidx_t *fai_build_core(BGZF *bgzf)
 
     idx = (faidx_t*)calloc(1, sizeof(faidx_t));
     idx->hash = kh_init(s);
-    name = 0; l_name = m_name = 0;
     len = line_len = line_blen = -1; state = 0; l1 = l2 = -1; offset = 0;
     while ( (c=bgzf_getc(bgzf))>=0 ) {
         if (c == '\n') { // an empty line
@@ -93,33 +110,31 @@ faidx_t *fai_build_core(BGZF *bgzf)
                 offset = bgzf_utell(bgzf);
                 continue;
             } else if ((state == 0 && len < 0) || state == 2) continue;
+            else if (state == 0) { state = 2; continue; }
         }
         if (c == '>') { // fasta header
-            if (len >= 0)
-                fai_insert_index(idx, name, len, line_len, line_blen, offset);
-            l_name = 0;
-            while ( (c=bgzf_getc(bgzf))>=0 && !isspace(c)) {
-                if (m_name < l_name + 2) {
-                    m_name = l_name + 2;
-                    kroundup32(m_name);
-                    name = (char*)realloc(name, m_name);
-                }
-                name[l_name++] = c;
+            if (len >= 0) {
+                if (fai_insert_index(idx, name.s, len, line_len, line_blen, offset) != 0)
+                    goto fail;
             }
-            name[l_name] = '\0';
+
+            name.l = 0;
+            while ((c = bgzf_getc(bgzf)) >= 0)
+                if (! isspace(c)) kputc_(c, &name);
+                else if (name.l > 0 || c == '\n') break;
+            kputsn("", 0, &name);
+
             if ( c<0 ) {
                 fprintf(stderr, "[fai_build_core] the last entry has no sequence\n");
-                free(name); fai_destroy(idx);
-                return 0;
+                goto fail;
             }
             if (c != '\n') while ( (c=bgzf_getc(bgzf))>=0 && c != '\n');
             state = 1; len = 0;
             offset = bgzf_utell(bgzf);
         } else {
             if (state == 3) {
-                fprintf(stderr, "[fai_build_core] inlined empty line is not allowed in sequence '%s'.\n", name);
-                free(name); fai_destroy(idx);
-                return 0;
+                fprintf(stderr, "[fai_build_core] inlined empty line is not allowed in sequence '%s'.\n", name.s);
+                goto fail;
             }
             if (state == 2) state = 3;
             l1 = l2 = 0;
@@ -128,9 +143,8 @@ faidx_t *fai_build_core(BGZF *bgzf)
                 if (isgraph(c)) ++l2;
             } while ( (c=bgzf_getc(bgzf))>=0 && c != '\n');
             if (state == 3 && l2) {
-                fprintf(stderr, "[fai_build_core] different line length in sequence '%s'.\n", name);
-                free(name); fai_destroy(idx);
-                return 0;
+                fprintf(stderr, "[fai_build_core] different line length in sequence '%s'.\n", name.s);
+                goto fail;
             }
             ++l1; len += l2;
             if (state == 1) line_len = l1, line_blen = l2, state = 0;
@@ -139,15 +153,21 @@ faidx_t *fai_build_core(BGZF *bgzf)
             }
         }
     }
-    if ( name )
-        fai_insert_index(idx, name, len, line_len, line_blen, offset);
-    else
-    {
-        free(idx);
-        return NULL;
+
+    if (len >= 0) {
+        if (fai_insert_index(idx, name.s, len, line_len, line_blen, offset) != 0)
+            goto fail;
+    } else {
+        goto fail;
     }
-    free(name);
+
+    free(name.s);
     return idx;
+
+fail:
+    free(name.s);
+    fai_destroy(idx);
+    return NULL;
 }
 
 void fai_save(const faidx_t *fai, FILE *fp)
@@ -187,7 +207,10 @@ faidx_t *fai_read(FILE *fp)
 #else
         sscanf(p, "%d%lld%d%d", &len, &offset, &line_blen, &line_len);
 #endif
-        fai_insert_index(fai, buf, len, line_len, line_blen, offset);
+        if (fai_insert_index(fai, buf, len, line_len, line_blen, offset) != 0) {
+            free(buf);
+            return NULL;
+        }
     }
     free(buf);
     return fai;
@@ -222,6 +245,7 @@ int fai_build(const char *fn)
     if ( !fai )
     {
         if ( bgzf->is_compressed && bgzf->is_gzip ) fprintf(stderr,"Cannot index files compressed with gzip, please use bgzip\n");
+        bgzf_close(bgzf);
         free(str);
         return -1;
     }
@@ -240,13 +264,12 @@ int fai_build(const char *fn)
     return 0;
 }
 
-#ifdef _USE_KNETFILE
-FILE *download_and_open(const char *fn)
+static FILE *download_and_open(const char *fn)
 {
     const int buf_size = 1 * 1024 * 1024;
     uint8_t *buf;
     FILE *fp;
-    knetFile *fp_remote;
+    hFILE *fp_remote;
     const char *url = fn;
     const char *p;
     int l = strlen(fn);
@@ -260,26 +283,26 @@ FILE *download_and_open(const char *fn)
         return fp;
 
     // If failed, download from remote and open
-    fp_remote = knet_open(url, "rb");
+    fp_remote = hopen(url, "rb");
     if (fp_remote == 0) {
         fprintf(stderr, "[download_from_remote] fail to open remote file %s\n",url);
         return NULL;
     }
     if ((fp = fopen(fn, "wb")) == 0) {
         fprintf(stderr, "[download_from_remote] fail to create file in the working directory %s\n",fn);
-        knet_close(fp_remote);
+        hclose_abruptly(fp_remote);
         return NULL;
     }
     buf = (uint8_t*)calloc(buf_size, 1);
-    while ((l = knet_read(fp_remote, buf, buf_size)) != 0)
+    while ((l = hread(fp_remote, buf, buf_size)) > 0)
         fwrite(buf, 1, l, fp);
     free(buf);
     fclose(fp);
-    knet_close(fp_remote);
+    if (hclose(fp_remote) != 0)
+        fprintf(stderr, "[download_from_remote] fail to close remote file %s\n", url);
 
     return fopen(fn, "r");
 }
-#endif
 
 faidx_t *fai_load(const char *fn)
 {
@@ -289,8 +312,7 @@ faidx_t *fai_load(const char *fn)
     str = (char*)calloc(strlen(fn) + 5, 1);
     sprintf(str, "%s.fai", fn);
 
-#ifdef _USE_KNETFILE
-    if (strstr(fn, "ftp://") == fn || strstr(fn, "http://") == fn)
+    if (hisremote(str))
     {
         fp = download_and_open(str);
         if ( !fp )
@@ -301,8 +323,8 @@ faidx_t *fai_load(const char *fn)
         }
     }
     else
-#endif
         fp = fopen(str, "rb");
+
     if (fp == 0) {
         fprintf(stderr, "[fai_load] build FASTA index.\n");
         fai_build(fn);
@@ -411,14 +433,21 @@ char *fai_fetch(const faidx_t *fai, const char *str, int *len)
     return s;
 }
 
+int faidx_fetch_nseq(const faidx_t *fai)
+{
+    return fai->n;
+}
+
 int faidx_nseq(const faidx_t *fai)
 {
     return fai->n;
 }
+
 const char *faidx_iseq(const faidx_t *fai, int i)
 {
     return fai->name[i];
 }
+
 int faidx_seq_len(const faidx_t *fai, const char *seq)
 {
     khint_t k = kh_get(s, fai->hash, seq);

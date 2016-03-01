@@ -1,6 +1,6 @@
 /*  hfile.h -- buffered low-level input/output streams.
 
-    Copyright (C) 2013-2014 Genome Research Ltd.
+    Copyright (C) 2013-2015 Genome Research Ltd.
 
     Author: John Marshall <jm18@sanger.ac.uk>
 
@@ -43,13 +43,16 @@ typedef struct hFILE {
     char *buffer, *begin, *end, *limit;
     const struct hFILE_backend *backend;
     off_t offset;
-    int at_eof:1;
+    unsigned at_eof:1;
     int has_errno;
 } hFILE;
 
 /*!
   @abstract  Open the named file or URL as a stream
   @return    An hFILE pointer, or NULL (with errno set) if an error occurred.
+  @notes     The usual @c fopen(3) @a mode letters are supported: one of
+    @e r (read), @e w (write), @e a (append), optionally followed by any of
+    @e + (update), @e e (close on @c exec(2)), @e x (create exclusively).
 */
 hFILE *hopen(const char *filename, const char *mode) HTS_RESULT_USED;
 
@@ -59,6 +62,14 @@ hFILE *hopen(const char *filename, const char *mode) HTS_RESULT_USED;
   @notes     For socket descriptors (on Windows), mode should contain 's'.
 */
 hFILE *hdopen(int fd, const char *mode) HTS_RESULT_USED;
+
+/*!
+  @abstract  Report whether the file name or URL denotes remote storage
+  @return    0 if local, 1 if remote.
+  @notes     "Remote" means involving e.g. explicit network access, with the
+    implication that callers may wish to cache such files' contents locally.
+*/
+int hisremote(const char *filename) HTS_RESULT_USED;
 
 /*!
   @abstract  Flush (for output streams) and close the stream

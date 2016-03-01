@@ -1,6 +1,6 @@
 /*  test/sam.c -- SAM/BAM/CRAM API test cases.
 
-    Copyright (C) 2014 Genome Research Ltd.
+    Copyright (C) 2014-2015 Genome Research Ltd.
 
     Author: John Marshall <jm18@sanger.ac.uk>
 
@@ -22,13 +22,21 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.  */
 
+#include <config.h>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
+// Suppress message for faidx_fetch_nseq(), which we're intentionally testing
+#include "htslib/hts_defs.h"
+#undef HTS_DEPRECATED
+#define HTS_DEPRECATED(message)
+
 #include "htslib/sam.h"
+#include "htslib/faidx.h"
 #include "htslib/kstring.h"
 
 int status;
@@ -159,12 +167,49 @@ static void iterators1(void)
     hts_itr_destroy(sam_itr_queryi(NULL, HTS_IDX_NONE, 0, 0));
 }
 
-int main(void)
+static void faidx1(const char *filename)
 {
+    int n, n_exp = 0;
+    char tmpfilename[FILENAME_MAX], line[500];
+    FILE *fin, *fout;
+    faidx_t *fai;
+
+    fin = fopen(filename, "r");
+    if (fin == NULL) fail("can't open %s\n", filename);
+    sprintf(tmpfilename, "%s.tmp", filename);
+    fout = fopen(tmpfilename, "w");
+    if (fout == NULL) fail("can't create temporary %s\n", tmpfilename);
+    while (fgets(line, sizeof line, fin)) {
+        if (line[0] == '>') n_exp++;
+        fputs(line, fout);
+    }
+    fclose(fin);
+    fclose(fout);
+
+    if (fai_build(tmpfilename) < 0) fail("can't index %s", tmpfilename);
+    fai = fai_load(tmpfilename);
+    if (fai == NULL) fail("can't load faidx file %s", tmpfilename);
+
+    n = faidx_fetch_nseq(fai);
+    if (n != n_exp)
+        fail("%s: faidx_fetch_nseq returned %d, expected %d", filename, n, n_exp);
+
+    n = faidx_nseq(fai);
+    if (n != n_exp)
+        fail("%s: faidx_nseq returned %d, expected %d", filename, n, n_exp);
+
+    fai_destroy(fai);
+}
+
+int main(int argc, char **argv)
+{
+    int i;
+
     status = EXIT_SUCCESS;
 
     aux_fields1();
     iterators1();
+    for (i = 1; i < argc; i++) faidx1(argv[i]);
 
     return status;
 }
