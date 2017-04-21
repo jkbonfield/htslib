@@ -29,16 +29,18 @@ install:
   - set PATH=C:/msys64/usr/bin;C:/msys64/mingw64/bin;%PATH%
   - set MINGWPREFIX=x86_64-w64-mingw32
   - "sh -lc \"pacman -S --noconfirm --needed
-      autotools
       autoconf
       automake
       mingw-w64-x86_64-gcc
       mingw-w64-x86_64-ncurses
     \""
 
+# build_script:
+#   - "sh \"autoreconf; ./configure"
+#   - make -j2
+
 build_script:
-  - "sh \"autoreconf; ./configure"
-  - make -j2
+  - make
 
 test_script:
   - make test
