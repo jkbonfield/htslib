@@ -5,9 +5,9 @@ version: 'vers.{build}'
 
 # branches to build
 branches:
-    # Whitelist
-    only:
-      - develop
+    # # Whitelist
+    # only:
+    #   - develop
 
     # Blacklist
     except:
