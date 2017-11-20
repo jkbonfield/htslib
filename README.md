@@ -1,3 +1,13 @@
+| | Develop branch test status |
+|-|----------------------------|
+| Travis   | [![Build Status][travisDevBadge]][travisLink]
+| AppVeyor | [![Build Status][AppveyorDevBadge]][AppveyorLink]
+
+[travisDevBadge]: https://api.travis-ci.org/samtools/htslib.svg?branch=develop "Continuous Integration test suite"
+[travisLink]: https://travis-ci.org/samtools/htslib
+[AppveyorDevBadge]: https://ci.appveyor.com/api/projects/status/qr9r4efdlvjo5n9q/branch/jkb_win?svg=true "Windows test suite"
+[AppveyorLink]: https://ci.appveyor.com/project/samtools/htslib
+
 HTSlib is an implementation of a unified C library for accessing common file
 formats, such as [SAM, CRAM and VCF][1], used for high-throughput sequencing
 data, and is the core library used by [samtools][2] and [bcftools][3].
