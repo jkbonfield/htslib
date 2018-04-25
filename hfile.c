@@ -588,36 +588,102 @@ static const struct hFILE_backend fd_backend =
     fd_read, fd_write, fd_seek, fd_flush, fd_close
 };
 
-static size_t blksize(int fd)
+#ifdef HAVE_MMAP
+#include <sys/mman.h>
+
+typedef struct {
+    hFILE base;
+    void *data;
+    size_t length;
+} hFILE_mmap;
+
+static off_t mmap_seek(hFILE *fpv, off_t offset, int whence)
 {
-#ifdef HAVE_STRUCT_STAT_ST_BLKSIZE
-    struct stat sbuf;
-    if (fstat(fd, &sbuf) != 0) return 0;
-    return sbuf.st_blksize;
-#else
-    return 0;
-#endif
+    errno = EINVAL;
+    return -1;
 }
+
+static int mmap_close(hFILE *fpv)
+{
+    hFILE_mmap *fp = (hFILE_mmap *) fpv;
+
+    // Prevent hfile_destroy() from free()ing buffer as it wasn't malloc()ed
+    fpv->buffer = NULL;
+
+    return munmap(fp->data, fp->length);
+}
+
+static const struct hFILE_backend mmap_backend =
+{
+    NULL, NULL, mmap_seek, NULL, mmap_close
+};
+
+static int prot(const char *mode)
+{
+    int prot = PROT_NONE;
+    const char *s;
+    for (s = mode; *s; s++)
+        switch (*s) {
+        case 'r': prot = PROT_READ;  break;
+        case 'w': prot = PROT_WRITE; break;
+        case 'a': prot = PROT_WRITE; break;
+        case '+': prot = PROT_READ|PROT_WRITE; break;
+        default:  break;
+        }
+    return prot;
+}
+
+#endif
 
 static hFILE *hopen_fd(const char *filename, const char *mode)
 {
-    hFILE_fd *fp = NULL;
     int fd = open(filename, hfile_oflags(mode), 0666);
-    if (fd < 0) goto error;
+    if (fd < 0) return NULL;
 
-    fp = (hFILE_fd *) hfile_init(sizeof (hFILE_fd), mode, blksize(fd));
-    if (fp == NULL) goto error;
+    hFILE *fp = hdopen(fd, mode);
+    if (fp == NULL) { int save = errno; (void) close(fd); errno = save; }
+    return fp;
+}
+
+hFILE *hdopen(int fd, const char *mode)
+{
+    struct stat sbuf;
+    int fstat_ok = (fstat(fd, &sbuf) == 0);
+
+#ifdef HAVE_MMAP
+    size_t length = fstat_ok? sbuf.st_size : 0;
+    void *data;
+    // If 'm' is given, file length is non-trivial (in particular, zero-length
+    // mmap() always fails), and mmap() succeeds, then open as an hFILE_mmap...
+    if (strchr(mode, 'm') && fstat_ok && length >= 1024 &&
+        (data = mmap(NULL, length, prot(mode), MAP_SHARED, fd, 0)) != MAP_FAILED) {
+        hFILE_mmap *fp = (hFILE_mmap *)
+            hfile_init_fixed(sizeof (hFILE_mmap), mode, data, length, length);
+        if (fp == NULL) { (void) munmap(data, length); return NULL; }
+
+        (void) close(fd);
+        fp->data = data;
+        fp->length = length;
+        fp->base.backend = &mmap_backend;
+        return &fp->base;
+    }
+    // ...otherwise fall back to opening as an hFILE_fd.
+#endif
+
+    size_t blocksize = 0;
+#ifdef HAVE_STRUCT_STAT_ST_BLKSIZE
+    if (fstat_ok) blocksize = sbuf.st_blksize;
+#endif
+
+    hFILE_fd *fp = (hFILE_fd *) hfile_init(sizeof (hFILE_fd), mode, blocksize);
+    if (fp == NULL) return NULL;
 
     fp->fd = fd;
-    fp->is_socket = 0;
+    fp->is_socket = (strchr(mode, 's') != NULL);
     fp->base.backend = &fd_backend;
     return &fp->base;
-
-error:
-    if (fd >= 0) { int save = errno; (void) close(fd); errno = save; }
-    hfile_destroy((hFILE *) fp);
-    return NULL;
 }
+
 
 // Loads the contents of filename to produced a read-only, in memory,
 // immobile hfile.  fp is the already opened file.  We always close this
@@ -669,16 +735,6 @@ static hFILE *hopen_preload(const char *url, const char *mode){
     return hpreload(fp);
 }
 
-hFILE *hdopen(int fd, const char *mode)
-{
-    hFILE_fd *fp = (hFILE_fd*) hfile_init(sizeof (hFILE_fd), mode, blksize(fd));
-    if (fp == NULL) return NULL;
-
-    fp->fd = fd;
-    fp->is_socket = (strchr(mode, 's') != NULL);
-    fp->base.backend = &fd_backend;
-    return &fp->base;
-}
 
 static hFILE *hopen_fd_fileuri(const char *url, const char *mode)
 {
