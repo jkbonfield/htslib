@@ -1214,6 +1214,7 @@ int hts_close(htsFile *fp)
     case fastq_format:
     case sam:
     case vcf:
+        if (fp->cd) sam_write1_push(fp, NULL, NULL, 0);
         ret = sam_state_destroy(fp);
 
         if (fp->format.compression != no_compression)

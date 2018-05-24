@@ -94,6 +94,8 @@ static inline void nibble2base(uint8_t *nib, char *seq, int len) {
         seq[i] = seq_nt16_str[bam_seqi(nib, i)];
 }
 
+int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos);
+
 #ifdef __cplusplus
 }
 #endif

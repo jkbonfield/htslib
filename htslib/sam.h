@@ -164,6 +164,8 @@ extern const int8_t bam_cigar_table[256];
 #define BAM_FDUP        1024
 /*! @abstract supplementary alignment */
 #define BAM_FSUPPLEMENTARY 2048
+/*! @abstract a split alignment */
+#define BAM_FSPLIT      4096
 
 /*************************
  *** Alignment records ***
