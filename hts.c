@@ -933,6 +933,7 @@ int hts_close(htsFile *fp)
     case text_format:
     case sam:
     case vcf:
+        if (fp->cd) sam_write1_push(fp, NULL, NULL, 0);
         if (fp->format.compression != no_compression)
             ret = bgzf_close(fp->fp.bgzf);
         else

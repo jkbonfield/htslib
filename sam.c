@@ -1610,8 +1610,299 @@ int sam_format1(const bam_hdr_t *h, const bam1_t *b, kstring_t *str)
     return -1;
 }
 
+// TODO:
+//
+// Create a sorted bam_list that we push items on to.
+// Needs RB-tree style functions:
+//
+// bam_tree_push  // maintain sorted
+// bam_tree_first // left-most
+// bam_tree_next  // next left most
+// bam_tree_pop   // del
+
+#define MAX_SEQ_LEN 31
+#define _cop(c) bam_cigar_op(c)
+#define _cln(c) bam_cigar_oplen(c)
+#ifndef MIN
+#  define MIN(a,b) ((a)<(b)?(a):(b))
+#endif
+
+void dump_cig(char *msg, int ql, int rl, uint32_t *cig, int ncig) {
+    fprintf(stderr, "%s %3d %3d\t", msg, ql, rl);
+    int i;
+    for (i = 0; i < ncig; i++) {
+        fprintf(stderr, " %d%c",
+                bam_cigar_oplen(cig[i]),
+                BAM_CIGAR_STR[bam_cigar_op(cig[i])]);
+    }
+    fprintf(stderr, "\n");
+}
+
+// Taken from samtools/padding.c.
+// FIXME: We should make this an official part of the API and remove from there.
+static void replace_cigar(bam1_t *b, int n, uint32_t *cigar)
+{
+    if (n != b->core.n_cigar) {
+        int o = b->core.l_qname + b->core.n_cigar * 4;
+        if (b->l_data + (n - b->core.n_cigar) * 4 > b->m_data) {
+            b->m_data = b->l_data + (n - b->core.n_cigar) * 4;
+            kroundup32(b->m_data);
+            b->data = (uint8_t*)realloc(b->data, b->m_data);
+        }
+        memmove(b->data + b->core.l_qname + n * 4, b->data + o, b->l_data - o);
+        memcpy(b->data + b->core.l_qname, cigar, n * 4);
+        b->l_data += (n - b->core.n_cigar) * 4;
+        b->core.n_cigar = n;
+    } else memcpy(b->data + b->core.l_qname, cigar, n * 4);
+}
+
+/*
+ * Create a new BAM record based off 'b', using bases from >=qs to <qe and
+ * cigar cig/ncig.
+ */
+bam1_t *bam_frag(const bam1_t *b, int qs, int qe, uint32_t *cig, int ncig) {
+    return NULL; // TODO
+}
+
+// FIXME: make this more efficient, rather than lots of reallocating
+static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *cig,
+                       uint32_t qstart, uint32_t l_qseq) {
+    bam1_t *sub_b = bam_dup1(b); // FIXME error checking
+    replace_cigar(sub_b, ncig, cig); // NB: can grow too
+
+    sub_b->core.pos = b->core.pos + pos;
+    sub_b->core.flag |= BAM_FSPLIT;
+
+    // FIXME: do cigar swapping here too to avoid excessive realloc / moving.
+    uint8_t *seq  = bam_get_seq(sub_b), *cp = seq;
+    uint8_t *qual = bam_get_qual(sub_b);
+    uint8_t *aux  = bam_get_aux(sub_b);
+    uint32_t l_aux = bam_get_l_aux(sub_b);
+
+    // Seq is nasty due to nibble hackery.
+    // FIXME: make this more efficient
+    int i;
+    for (i = 0; i < (l_qseq&~1); i+=2)
+        *cp++ = (bam_seqi(seq, qstart+i)<<4) | (bam_seqi(seq, qstart+i+1)<<0);
+    if (i < l_qseq)
+        *cp++ = (bam_seqi(seq, qstart+i)<<4);
+    sub_b->core.l_qseq = l_qseq;
+
+    memmove(cp, qual+qstart, l_qseq);
+    cp += l_qseq;
+
+    memmove(cp, aux, l_aux);
+    cp += l_aux;
+
+    sub_b->l_data = cp - (uint8_t *)sub_b->data;
+
+    return sub_b;
+}
+
+bam1_t **split_bam(const bam1_t *b, int *nb) {
+    int i, n, qs = 0, qe = 0, rs = 0, re = 0;
+    *nb = (b->core.l_qseq + MAX_SEQ_LEN-1) / MAX_SEQ_LEN*2 + 1; // est. worst case
+    bam1_t **blist = malloc(*nb * sizeof(*blist));
+
+    uint32_t *cig = bam_get_cigar(b);
+    int ln = 0, op = 0;
+    uint32_t *new_cig = malloc((2+b->core.n_cigar+2* *nb) * sizeof(*new_cig)); // FIXME
+    uint32_t new_ncig = 0;
+
+    //dump_cig("**ORIG", 0,0, cig, b->core.n_cigar);
+    for (i = n = 0; n < *nb+1 && i < b->core.n_cigar; i++) {
+        ln = _cln(cig[i]);
+        op = _cop(cig[i]);
+
+        // Don't split half way through indels, even compound ones.
+        int indel = 0;
+        while (i < b->core.n_cigar &&
+               (op == BAM_CDEL ||
+                op == BAM_CREF_SKIP ||
+                op == BAM_CINS ||
+                op == BAM_CPAD ||
+                op == BAM_CBACK)) {
+            new_cig[new_ncig++] = bam_cigar_gen(ln, op);
+            qe += bam_cigar_type(op) & 1 ? ln : 0; // query end.
+            re += bam_cigar_type(op) & 2 ? ln : 0; // ref end.
+            indel = 1;
+            if (++i < b->core.n_cigar) {
+                op = _cop(cig[i]);
+                ln = _cln(cig[i]);
+            }
+        }
+        if (indel) {
+            i--;
+            continue;
+        }
+
+        // Just attach clips to the end of whatever fragment is nearest.
+        if (op == BAM_CSOFT_CLIP ||
+            op == BAM_CHARD_CLIP) {
+            new_cig[new_ncig++] = bam_cigar_gen(ln, op);
+            qe += bam_cigar_type(op) & 1 ? ln : 0;
+            continue;
+        }
+
+        // Otherwise we're in a fragmentable region.
+        do {
+            if (n < *nb-1 &&
+                (qe-qs >= MAX_SEQ_LEN ||
+                 re-rs >= MAX_SEQ_LEN)) {
+                // new fragment from >=qs to <qe
+            
+                // CREATE HERE.
+                if (b->core.l_qseq > qe)
+                    // FIXME: needs to be ref coords...
+                    new_cig[new_ncig++] = bam_cigar_gen(b->core.l_qseq - qe, BAM_CHARD_CLIP/*FIXME*/);
+                //dump_cig("  Frag", qe-qs, re-rs, new_cig, new_ncig);
+                blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs);
+
+                n++;
+                new_ncig = 0;
+                new_cig[new_ncig++] = bam_cigar_gen(qe, BAM_CHARD_CLIP/*FIXME*/);
+                qs = qe;
+                rs = re;
+            }
+
+            int l = MIN(MAX_SEQ_LEN - (re-rs), MIN(MAX_SEQ_LEN - (qe-qs), ln));
+            qe += l;
+            re += l;
+            ln -= l;
+            new_cig[new_ncig++] = bam_cigar_gen(l, op);
+        } while (ln && n < *nb-1);
+    }
+    // ran out of cigar, so entire read dits.
+    if (i == b->core.n_cigar) {
+        // CREATE HERE from qs to qe.
+        //dump_cig("  frag", qe-qs, re-rs, new_cig, new_ncig);
+        blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs);
+        
+        n++;
+        new_ncig = 0;
+
+    } else if (qe < b->core.l_qseq) {
+        // remainder of read
+
+        // CREATE HERE from qe to b->core.l_qseq
+        // ln is remaining size of op (if M).
+        new_cig[new_ncig++] = bam_cigar_gen(ln, op);
+        while (i < b->core.n_cigar)
+            new_cig[new_ncig++] = cig[i++];
+        //dump_cig("  frag", qe-qs, re-rs, new_cig, new_ncig);
+        blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs);
+
+        n++;
+        new_ncig = 0;
+    }
+    *nb = n;
+
+    free(new_cig);
+
+    return blist;
+}
+
+// Noddy for now
+typedef struct sorted_bam_queue {
+    struct sorted_bam_queue *next;
+    const bam_hdr_t *h;
+    bam1_t *b;
+} sorted_bam_queue;
+
+int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
+    sorted_bam_queue *qb = NULL, *qi;
+    int r = 0;
+
+    if (b) {
+        qb = malloc(sizeof(*qb));
+        if (!qb)
+            return -1;
+        qb->b = b;
+        qb->next = NULL;
+        qb->h = h; // FIXME: cache once, not per record!
+    }
+    
+    if (b && !fp->cd) {
+        fp->cd = (char *)qb;
+    } else {
+        qi = (sorted_bam_queue *)fp->cd;
+        if (!qi)
+            return 0;
+
+        h = qi->h;
+
+        if (!b || qi->b->core.tid != b->core.tid) {
+            // flush
+            while (qi) {
+                r |= sam_write1(fp, h, qi->b);
+                bam_destroy1(qi->b); // inefficient; reuse it later
+                sorted_bam_queue *qn = qi->next;
+                free(qi); // inefficient; reuse it later
+                qi = qn;
+            }
+            fp->cd = qb;
+            return r;
+        }
+
+        if (b) {
+            // Insert: FIXME use an RB tree for efficiency
+            sorted_bam_queue *last = NULL;
+            while (qi && qi->b->core.pos < fpos) {
+                r |= sam_write1(fp, h, qi->b);
+                bam_destroy1(qi->b);
+                sorted_bam_queue *qn = qi->next;
+                free(qi);
+                fp->cd = qi = qn;
+            }
+
+            for (; qi; last = qi, qi = qi->next) {
+                if (qi->b->core.pos > b->core.pos)
+                    break;
+            }
+            qb->next = qi;
+            if (last) {
+                last->next = qb;
+            } else {
+                fp->cd = qb;
+            }
+        }
+    }
+
+    return r;
+}
+
+int sam_write1_split(htsFile *fp, const bam_hdr_t *h, const bam1_t *b)
+{
+    bam1_t **blist;
+    int ret = 0, i, nb;
+
+    blist = split_bam(b, &nb);
+    for (i = 0; i < nb; i++) {
+        int r = sam_write1_push(fp, h, blist[i], b->core.pos);
+        if (r < 0) {
+            ret = r;
+            goto err;
+        }
+        ret += r;
+    }
+
+ err:
+    free(blist);
+    return ret;
+}
+
 int sam_write1(htsFile *fp, const bam_hdr_t *h, const bam1_t *b)
 {
+    // NB: this needs to maintain a list of bam structs in flight so we can
+    // emit the fragmented ones in the correct sort order (assuming sorted).
+    // TODO
+
+    if (!(b->core.flag & BAM_FUNMAP)
+        && b->core.l_qseq >= MAX_SEQ_LEN
+        && !(b->core.flag & BAM_FSPLIT)) {
+        return sam_write1_split(fp, h, b);
+    }
+
     switch (fp->format.format) {
     case binary_format:
         fp->format.category = sequence_data;
@@ -2271,9 +2562,6 @@ static inline void mp_free(mempool_t *mp, lbnode_t *p)
  */
 static inline int resolve_cigar2(bam_pileup1_t *p, int32_t pos, cstate_t *s)
 {
-#define _cop(c) ((c)&BAM_CIGAR_MASK)
-#define _cln(c) ((c)>>BAM_CIGAR_SHIFT)
-
     bam1_t *b = p->b;
     bam1_core_t *c = &b->core;
     uint32_t *cigar = bam_get_cigar(b);

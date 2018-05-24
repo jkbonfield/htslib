@@ -175,6 +175,7 @@ typedef struct {
         struct hFILE *hfile;
     } fp;
     htsFormat format;
+    void *cd;
 } htsFile;
 
 // A combined thread pool and queue allocation size.

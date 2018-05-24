@@ -135,6 +135,8 @@ typedef struct {
 #define BAM_FDUP        1024
 /*! @abstract supplementary alignment */
 #define BAM_FSUPPLEMENTARY 2048
+/*! @abstract a split alignment */
+#define BAM_FSPLIT      4096
 
 /*************************
  *** Alignment records ***
