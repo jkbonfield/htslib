@@ -180,19 +180,20 @@ typedef struct {
     bcf_info_t *info;   // INFO
     bcf_fmt_t *fmt;     // FORMAT and individual sample
     variant_t *var;     // $var and $var_type set only when set_variant_types called
-    int n_var, var_type;
+    int n_var, var_type;// type -1 for unset, -2 for error
     int shared_dirty;   // if set, shared.s must be recreated on BCF output
     int indiv_dirty;    // if set, indiv.s must be recreated on BCF output
 } bcf_dec_t;
 
 
-#define BCF_ERR_CTG_UNDEF 1
-#define BCF_ERR_TAG_UNDEF 2
-#define BCF_ERR_NCOLS     4
-#define BCF_ERR_LIMITS    8
-#define BCF_ERR_CHAR     16
+#define BCF_ERR_CTG_UNDEF      1
+#define BCF_ERR_TAG_UNDEF      2
+#define BCF_ERR_NCOLS          4
+#define BCF_ERR_LIMITS         8
+#define BCF_ERR_CHAR          16
 #define BCF_ERR_CTG_INVALID   32
 #define BCF_ERR_TAG_INVALID   64
+#define BCF_ERR_NOMEM        128
 
 /*
     The bcf1_t structure corresponds to one VCF/BCF line. Reading from VCF file
@@ -360,6 +361,8 @@ typedef struct {
      *  Note that bcf_unpack() must be called on the returned copy as if it was
      *  obtained from bcf_read(). Also note that bcf_dup() calls bcf_sync1(src)
      *  internally to reflect any changes made by bcf_update_* functions.
+     *
+     *  Returns NULL on failure.
      */
     bcf1_t *bcf_dup(bcf1_t *src);
     bcf1_t *bcf_copy(bcf1_t *dst, bcf1_t *src);
@@ -395,6 +398,7 @@ typedef struct {
      *  Copy header lines from src to dst if not already present in dst. See also bcf_translate().
      *  Returns 0 on success or sets a bit on error:
      *      1 .. conflicting definitions of tag length
+     *      2 .. insufficient memory
      *      // todo
      */
     int bcf_hdr_combine(bcf_hdr_t *dst, const bcf_hdr_t *src) HTS_DEPRECATED("Please use bcf_hdr_merge instead");
@@ -417,7 +421,16 @@ typedef struct {
 
     /**
      *  bcf_hdr_add_sample() - add a new sample.
-     *  @param sample:  sample name to be added
+     *  @param sample:  (possibly non-nul terminated) sample name to be added
+     *  @param len:     length of sample name; can be zero if nul-terminated
+     *  @return 0 if successful, or negative if an error occurred
+     */
+     int bcf_hdr_add_sample2(bcf_hdr_t *hdr, const char *sample, size_t len);
+
+    /**
+     *  bcf_hdr_add_sample() - add a new sample.
+     *  @param sample:  nul terminated sample name to be added
+     *  @return 0 if successful, or negative if an error occurred
      */
     int bcf_hdr_add_sample(bcf_hdr_t *hdr, const char *sample);
 
@@ -445,7 +458,7 @@ typedef struct {
 
     /** VCF version, e.g. VCFv4.2 */
     const char *bcf_hdr_get_version(const bcf_hdr_t *hdr);
-    void bcf_hdr_set_version(bcf_hdr_t *hdr, const char *version);
+    int bcf_hdr_set_version(bcf_hdr_t *hdr, const char *version);
 
     /**
      *  bcf_hdr_remove() - remove VCF header tag
@@ -490,10 +503,10 @@ typedef struct {
      */
     bcf_hrec_t *bcf_hdr_get_hrec(const bcf_hdr_t *hdr, int type, const char *key, const char *value, const char *str_class);
     bcf_hrec_t *bcf_hrec_dup(bcf_hrec_t *hrec);
-    void bcf_hrec_add_key(bcf_hrec_t *hrec, const char *str, int len);
-    void bcf_hrec_set_val(bcf_hrec_t *hrec, int i, const char *str, int len, int is_quoted);
+    int bcf_hrec_add_key(bcf_hrec_t *hrec, const char *str, int len);
+    int bcf_hrec_set_val(bcf_hrec_t *hrec, int i, const char *str, int len, int is_quoted);
     int bcf_hrec_find_key(bcf_hrec_t *hrec, const char *key);
-    void hrec_add_idx(bcf_hrec_t *hrec, int idx);
+    int hrec_add_idx(bcf_hrec_t *hrec, int idx);
     void bcf_hrec_destroy(bcf_hrec_t *hrec);
 
 
