@@ -128,8 +128,6 @@ HTSLIB_ALL = \
 	$(HTSDIR)/cram/cram_stats.h \
 	$(HTSDIR)/cram/cram_structs.h \
 	$(HTSDIR)/cram/files.c \
-	$(HTSDIR)/cram/mFILE.c \
-	$(HTSDIR)/cram/mFILE.h \
 	$(HTSDIR)/cram/misc.h \
 	$(HTSDIR)/cram/open_trace_file.c \
 	$(HTSDIR)/cram/open_trace_file.h \

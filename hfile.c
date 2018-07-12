@@ -633,7 +633,32 @@ static int prot(const char *mode)
     return prot;
 }
 
+char *hfile_mmap_get_buffer(hFILE *file, size_t *length) {
+    if (file->backend != &mmap_backend) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    hFILE_mmap *fp = (hFILE_mmap *)file;
+    
+    if (length)
+        *length = fp->length;
+
+    return fp->data;
+}
+
 #endif
+
+char *hfile_get_buffer(hFILE *file, size_t *length) {
+    if (file->backend == &mem_backend)
+        return hfile_mem_get_buffer(file, length);
+#ifdef HAVE_MMAP
+    else if (file->backend == &mmap_backend)
+        return hfile_mmap_get_buffer(file, length);
+#endif
+    else
+        return NULL;
+}
 
 static hFILE *hopen_fd(const char *filename, const char *mode)
 {
@@ -887,7 +912,7 @@ char *hfile_mem_get_buffer(hFILE *file, size_t *length) {
     }
 
     if (length)
-        *length = file->buffer - file->limit;
+        *length = file->end - file->buffer;
 
     return file->buffer;
 }

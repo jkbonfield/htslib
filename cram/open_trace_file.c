@@ -168,14 +168,13 @@ char *tokenise_search_path(char *searchpath) {
     return newsearch;
 }
 
-mFILE *find_file_url(char *file, char *url) {
-    char buf[8192], *cp;
-    mFILE *mf = NULL;
-    int maxlen = 8190 - strlen(file), len;
+hFILE *find_file_url(char *file, char *url) {
+    char buf[8192] = "preload:", *cp;
+    int maxlen = 8190 - 8 - strlen(file);
     hFILE *hf;
 
     /* Expand %s for the trace name */
-    for (cp = buf; *url && cp - buf < maxlen; url++) {
+    for (cp = buf + strlen(buf); *url && cp - buf < maxlen; url++) {
         if (*url == '%' && *(url+1) == 's') {
             url++;
             cp += strlen(strcpy(cp, file));
@@ -191,22 +190,7 @@ mFILE *find_file_url(char *file, char *url) {
         return NULL;
     }
 
-    if (NULL == (mf = mfcreate(NULL, 0)))
-        return NULL;
-    while ((len = hread(hf, buf, 8192)) > 0) {
-        if (mfwrite(buf, len, 1, mf) <= 0) {
-            hclose_abruptly(hf);
-            mfdestroy(mf);
-            return NULL;
-        }
-    }
-    if (hclose(hf) < 0 || len < 0) {
-        mfdestroy(mf);
-        return NULL;
-    }
-
-    mrewind(mf);
-    return mf;
+    return hf;
 }
 
 /*
@@ -276,20 +260,28 @@ static char *expand_path(char *file, char *dirname) {
  * it. This also searches for compressed versions of the file in dirname
  * too.
  *
- * Returns mFILE pointer if found
+ * Returns hFILE pointer if found
  *         NULL if not
  */
-static mFILE *find_file_dir(char *file, char *dirname) {
+static hFILE *find_file_dir(char *file, char *dirname) {
     char *path;
-    mFILE *mf = NULL;
+    hFILE *hf = NULL;
 
     path = expand_path(file, dirname);
 
-    if (is_file(path))
-        mf = mfopen(path, "rbm");
+    if (is_file(path)) {
+#ifdef HAVE_MMAP
+        hf = hopen(path, "rbm");
+#else
+        char preload_p[8192];
+        if (snprintf(preload_p, 8192, "preload:%s", path) >= 8191)
+            return NULL;
+        hf = hopen(preload_p, "rb");
+#endif
+    }
 
     free(path);
-    return mf;
+    return hf;
 }
 
 /*
@@ -309,13 +301,13 @@ static mFILE *find_file_dir(char *file, char *dirname) {
  * all of the locations listed in 'path' (which is a colon separated list).
  * If 'path' is NULL it uses the RAWDATA environment variable instead.
  *
- * Returns a mFILE pointer when found.
+ * Returns an hFILE pointer when found.
  *           NULL otherwise.
  */
-mFILE *open_path_mfile(char *file, char *path, char *relative_to) {
+hFILE *open_path_hfile(char *file, char *path, char *relative_to) {
     char *newsearch;
     char *ele;
-    mFILE *fp;
+    hFILE *fp;
 
     /* Use path first */
     if (!path)
@@ -378,9 +370,8 @@ mFILE *open_path_mfile(char *file, char *path, char *relative_to) {
     return NULL;
 }
 
-
 /*
- * As per open_path_mfile, but searching only for local filenames.
+ * As per open_path_hfile, but searching only for local filenames.
  * This is useful as we may avoid doing a full mfopen and loading
  * the entire file into memory.
  *

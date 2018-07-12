@@ -1501,7 +1501,8 @@ char *cram_content_type2str(enum cram_content_type t) {
  */
 static void ref_entry_free_seq(ref_entry *e) {
     if (e->mf)
-        mfclose(e->mf);
+        if (hclose(e->mf) < 0)
+            hts_log_error("Failed to close reference file");
     if (e->seq && !e->mf)
         free(e->seq);
 
@@ -2048,7 +2049,6 @@ static int cram_populate_ref(cram_fd *fd, int id, ref_entry *r) {
     char path[PATH_MAX], path_tmp[PATH_MAX + 64];
     char cache[PATH_MAX], cache_root[PATH_MAX];
     char *local_cache = getenv("REF_CACHE");
-    mFILE *mf;
     int local_path = 0;
 
     hts_log_info("Running cram_populate_ref on fd %p, id %d", (void *)fd, id);
@@ -2124,17 +2124,19 @@ static int cram_populate_ref(cram_fd *fd, int id, ref_entry *r) {
     }
 
 
-    /* Otherwise search full REF_PATH; slower as loads entire file */
-    if ((mf = open_path_mfile(tag->str+3, ref_path, NULL))) {
+    /* Otherwise search full REF_PATH; slower as loads entire file.
+     * If we can (eg local file) we'll mmap the file, which will need
+     * a subsequent hclose to unmap it.  If not (eg url) we'll
+     * open and read the entire contents and create a mem hFILE via
+     * hpreload.
+     *
+     * This means we have the entire reference regardless, and call
+     * hfile_get_buffer to return the mem_backend or mmap_backend
+     * internal pointer.
+     */
+    if ((r->mf = open_path_hfile(tag->str+3, ref_path, NULL))) {
         size_t sz;
-        r->seq = mfsteal(mf, &sz);
-        if (r->seq) {
-            r->mf = NULL;
-        } else {
-            // keep mf around as we couldn't detach
-            r->seq = mf->data;
-            r->mf = mf;
-        }
+        r->seq = hfile_get_buffer(r->mf, &sz);
         r->length = sz;
         r->is_md5 = 1;
     } else {
@@ -2514,7 +2516,7 @@ char *cram_get_ref(cram_fd *fd, int id, int start, int end) {
      * an on-disk filename for it.
      *
      * 19 Sep 2013: Moved the lock here as the cram_populate_ref code calls
-     * open_path_mfile and libcurl, which isn't multi-thread safe unless I
+     * open_path_hfile and libcurl, which isn't multi-thread safe unless I
      * rewrite my code to have one curl handle per thread.
      */
     pthread_mutex_lock(&fd->refs->lock);

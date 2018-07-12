@@ -158,7 +158,6 @@ LIBHTS_OBJS = \
 	cram/cram_samtools.o \
 	cram/cram_stats.o \
 	cram/files.o \
-	cram/mFILE.o \
 	cram/open_trace_file.o \
 	cram/pooled_alloc.o \
 	cram/rANS_static.o \
@@ -174,8 +173,8 @@ cram_misc_h = cram/misc.h $(cram_os_h)
 cram_os_h = cram/os.h $(htslib_hts_endian_h)
 cram_sam_header_h = cram/sam_header.h cram/string_alloc.h cram/pooled_alloc.h $(htslib_khash_h) $(htslib_kstring_h)
 cram_samtools_h = cram/cram_samtools.h $(htslib_sam_h) $(cram_sam_header_h)
-cram_structs_h = cram/cram_structs.h $(htslib_thread_pool_h) cram/string_alloc.h cram/mFILE.h $(htslib_khash_h)
-cram_open_trace_file_h = cram/open_trace_file.h cram/mFILE.h
+cram_structs_h = cram/cram_structs.h $(htslib_thread_pool_h) cram/string_alloc.h $(htslib_hfile_h) $(htslib_khash_h)
+cram_open_trace_file_h = cram/open_trace_file.h $(htslib_hfile_h)
 bcf_sr_sort_h = bcf_sr_sort.h $(htslib_synced_bcf_reader_h) $(htslib_kbitset_h)
 hfile_internal_h = hfile_internal.h $(htslib_hfile_h) $(textutils_internal_h)
 hts_internal_h = hts_internal.h $(htslib_hts_h) $(textutils_internal_h)
@@ -326,7 +325,6 @@ cram/cram_io.o cram/cram_io.pico: cram/cram_io.c config.h os/lzma_stub.h $(cram_
 cram/cram_samtools.o cram/cram_samtools.pico: cram/cram_samtools.c config.h $(cram_h) $(htslib_sam_h)
 cram/cram_stats.o cram/cram_stats.pico: cram/cram_stats.c config.h $(cram_h) $(cram_os_h)
 cram/files.o cram/files.pico: cram/files.c config.h $(cram_misc_h)
-cram/mFILE.o cram/mFILE.pico: cram/mFILE.c config.h $(htslib_hts_log_h) $(cram_os_h) cram/mFILE.h
 cram/open_trace_file.o cram/open_trace_file.pico: cram/open_trace_file.c config.h $(cram_os_h) $(cram_open_trace_file_h) $(cram_misc_h) $(htslib_hfile_h) $(htslib_hts_log_h)
 cram/pooled_alloc.o cram/pooled_alloc.pico: cram/pooled_alloc.c config.h cram/pooled_alloc.h $(cram_misc_h)
 cram/rANS_static.o cram/rANS_static.pico: cram/rANS_static.c config.h cram/rANS_static.h cram/rANS_byte.h
@@ -487,8 +485,10 @@ testclean:
 mostlyclean: testclean
 	-rm -f *.o *.pico cram/*.o cram/*.pico test/*.o test/*.dSYM version.h
 
-clean: mostlyclean clean-$(SHLIB_FLAVOUR)
+clean-link: clean-$(SHLIB_FLAVOUR)
 	-rm -f libhts.a $(BUILT_PROGRAMS) $(BUILT_PLUGINS) $(BUILT_TEST_PROGRAMS) $(BUILT_THRASH_PROGRAMS)
+
+clean: mostlyclean clean-link
 
 distclean maintainer-clean: clean
 	-rm -f config.cache config.h config.log config.mk config.status
@@ -507,6 +507,7 @@ clean-dll:
 clean-dylib:
 	-rm -f libhts.dylib libhts.*.dylib
 
+relink: clean-link all
 
 tags TAGS:
 	ctags -f TAGS *.[ch] cram/*.[ch] htslib/*.h

@@ -64,7 +64,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef _OPEN_TRACE_FILE_H_
 #define _OPEN_TRACE_FILE_H_
 
-#include "cram/mFILE.h"
+#include "htslib/hfile.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -96,20 +96,20 @@ char *tokenise_search_path(char *searchpath);
  * all of the locations listed in 'path' (which is a colon separated list).
  * If 'path' is NULL it uses the RAWDATA environment variable instead.
  *
- * Returns a mFILE pointer when found.
+ * Returns an hFILE pointer when found.
  *           NULL otherwise.
  */
-mFILE *open_path_mfile(char *file, char *path, char *relative_to);
+hFILE *open_path_hfile(char *file, char *path, char *relative_to);
 
 /*
- * Returns a mFILE containing the entire contents of the url;
+ * Returns an hFILE containing the entire contents of the url;
  *         NULL on failure.
  */
-mFILE *find_file_url(char *file, char *url);
+hFILE *find_file_url(char *file, char *url);
 
 
 /*
- * As per open_path_mfile, but searching only for local filenames.
+ * As per open_path_hfile, but searching only for local filenames.
  * This is useful as we may avoid doing a full mfopen and loading
  * the entire file into memory.
  *

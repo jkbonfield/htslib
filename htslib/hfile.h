@@ -276,6 +276,22 @@ hFILE is closed.
 */
 char *hfile_mem_get_buffer(hFILE *file, size_t *length);
 
+/// For hfile_mmap: get the internal buffer and it's size from a hfile
+/** @return  buffer if successful, or NULL if an error occurred
+
+The buffer returned should not be freed as this will happen when the
+hFILE is closed.
+*/
+char *hfile_mmmap_get_buffer(hFILE *file, size_t *length);
+
+/// For hfile_mmap/mem: get the internal buffer and it's size from a hfile
+/** @return  buffer if successful, or NULL if an error occurred
+
+The buffer returned should not be freed as this will happen when the
+hFILE is closed.
+*/
+char *hfile_get_buffer(hFILE *file, size_t *length);
+
 /// For hfile_mem: get the internal buffer and it's size from a hfile.
 /** @return  buffer if successful, or NULL if an error occurred
 
