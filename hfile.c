@@ -719,9 +719,14 @@ static hFILE *hpreload(hFILE *fp) {
     char *buf = NULL;
     off_t buf_sz = 0, buf_a = 0, buf_inc = 8192, len;
 
+#ifdef HAVE_MMAP
     if (fp->backend == &mem_backend || fp->backend == &mmap_backend)
         // mem and mmap are already fully preloaded.
         return fp;
+#else
+    if (fp->backend == &mem_backend)
+        return fp;
+#endif
 
     for (;;) {
         if (buf_a - buf_sz < 5000) {
