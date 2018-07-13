@@ -270,12 +270,12 @@ static hFILE *find_file_dir(char *file, char *dirname) {
     path = expand_path(file, dirname);
 
     if (is_file(path)) {
-#ifdef HAVE_MMAP
-        hf = hopen(path, "rbm");
-#else
         char preload_p[8192];
         if (snprintf(preload_p, 8192, "preload:%s", path) >= 8191)
             return NULL;
+#ifdef HAVE_MMAP
+        hf = hopen(preload_p, "rbm");
+#else
         hf = hopen(preload_p, "rb");
 #endif
     }
