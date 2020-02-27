@@ -250,7 +250,6 @@ typedef struct {
     hts_idx_t *idx;
     const char *fnidx;
     struct sam_hdr_t *bam_header;
-    void *cd;
 } htsFile;
 
 // A combined thread pool and queue allocation size.

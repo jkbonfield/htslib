@@ -2241,6 +2241,12 @@ enum sam_cmd {
     SAM_CLOSE,
 };
 
+// Noddy for now
+typedef struct sorted_bam_queue {
+    struct sorted_bam_queue *next;
+    bam1_t *b;
+} sorted_bam_queue;
+
 typedef struct SAM_state {
     sam_hdr_t *h;
 
@@ -2262,6 +2268,9 @@ typedef struct SAM_state {
     pthread_mutex_t command_m;
     pthread_cond_t command_c;
     enum sam_cmd command;
+
+    // Record queue used during auto-split mode to maintain sort order
+    sorted_bam_queue *qb;
 
     // One of the E* errno codes
     int errcode;
@@ -3387,57 +3396,60 @@ bam1_t **split_bam(const bam1_t *b, int *nb) {
     return blist;
 }
 
-// Noddy for now
-typedef struct sorted_bam_queue {
-    struct sorted_bam_queue *next;
-    const bam_hdr_t *h;
-    bam1_t *b;
-} sorted_bam_queue;
-
 int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
+    SAM_state *state = (SAM_state *)fp->state;
     sorted_bam_queue *qb = NULL, *qi;
     int r = 0;
 
-    if (b) {
+    if (b && !state) {
+        if (!(fp->state = sam_state_create(fp)))
+            return -1;
+        state = (SAM_state *)fp->state;
+        state->h = (sam_hdr_t *)h;
+        state->h->ref_count++; // FIXME: need decrement somewhere...
+    }
+
+    if (!b && !state->qb)  // no record => flush
+        return 0;
+
+    if (b) { // push a new record
         qb = malloc(sizeof(*qb));
         if (!qb)
             return -1;
         qb->b = b;
         qb->next = NULL;
-        qb->h = h; // FIXME: cache once, not per record!
     }
     
-    if (b && !fp->cd) {
-        fp->cd = (char *)qb;
+    if (b && !state->qb) {
+        state->qb = qb;
     } else {
-        qi = (sorted_bam_queue *)fp->cd;
+        qi = state->qb;
         if (!qi)
             return 0;
 
-        h = qi->h;
-
         if (!b || qi->b->core.tid != b->core.tid) {
-            // flush
+            // final flush
             while (qi) {
-                r |= sam_write1(fp, h, qi->b);
-                bam_destroy1(qi->b); // inefficient; reuse it later
+                r |= sam_write1(fp, state->h, qi->b);
+                bam_destroy1(qi->b);
                 sorted_bam_queue *qn = qi->next;
-                free(qi); // inefficient; reuse it later
+                free(qi);
                 qi = qn;
             }
-            fp->cd = qb;
+            state->qb = qb;
+            sam_hdr_destroy(state->h);
             return r;
         }
 
         if (b) {
-            // Insert: FIXME use an RB tree for efficiency
+            // Insert: FIXME use an RB or AVL tree for efficiency
             sorted_bam_queue *last = NULL;
             while (qi && qi->b->core.pos < fpos) {
                 r |= sam_write1(fp, h, qi->b);
-                bam_destroy1(qi->b);
+                bam_destroy1(qi->b); // inefficient; reuse it later
                 sorted_bam_queue *qn = qi->next;
-                free(qi);
-                fp->cd = qi = qn;
+                free(qi); // inefficient; reuse it later
+                state->qb = qi = qn;
             }
 
             for (; qi; last = qi, qi = qi->next) {
@@ -3448,7 +3460,7 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
             if (last) {
                 last->next = qb;
             } else {
-                fp->cd = qb;
+                state->qb = qb;
             }
         }
     }
@@ -3506,7 +3518,7 @@ int sam_write1(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
         fp->format.format = sam;
         /* fall-through */
     case sam:
-        if (fp->state) {
+        if (fp->state && !((SAM_state *)fp->state)->qb) {
             SAM_state *fd = (SAM_state *)fp->state;
 
             // Threaded output
