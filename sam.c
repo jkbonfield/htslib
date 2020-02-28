@@ -3087,7 +3087,7 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         // non-empty queue and current queue head is ready to go.
         if (!bam_copy1(b, qb->b))
             return -1;
-        //b->core.flag &= ~BAM_FSPLIT; // skipf or now or we split again!
+        //b->core.flag &= ~BAM_FSPLIT; // skip or now or we split again!
         fd->qb = qb->next;
 
         bam_destroy1(qb->b); // FIXME: Keep queue of bam structs to reuse.
@@ -3265,10 +3265,11 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         if (qi) {
             // Found, so append to in-flight seq.
             append_bam(qi->b, b);
-            qi->end = bam_endpos(qi->b); // needed?
+            //qi->end = bam_endpos(qi->b); // needed?
         } else {
             // Not found, append to queue.
             // Inefficient in basic struct implementation
+            // Need b_last pointer
             if (qi_last)
                 qi = qi_last->next = calloc(1, sizeof(*qi));
             else
@@ -3276,10 +3277,12 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
             qi->b = bam_dup1(b); // FIXME: dup with known final length
                                  // to avoid reallocs later
             qi->end = bam_endpos(b);
+            uint32_t *cig = bam_get_cigar(b);
+            if (b->core.n_cigar > 1 &&
+                bam_cigar_op(cig[b->core.n_cigar-1]) == BAM_CHARD_CLIP)
+                qi->end += bam_cigar_oplen(cig[b->core.n_cigar-1]);
 
-            if (qb)
-                qb->next = qi;
-            else
+            if (!qb)
                 qb = fd->qb = qi;
         }
     }
