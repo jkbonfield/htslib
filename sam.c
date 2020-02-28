@@ -2245,6 +2245,7 @@ enum sam_cmd {
 typedef struct sorted_bam_queue {
     struct sorted_bam_queue *next;
     bam1_t *b;
+    hts_pos_t end;
 } sorted_bam_queue;
 
 typedef struct SAM_state {
@@ -2272,6 +2273,9 @@ typedef struct SAM_state {
     // Record queue used during auto-split mode to maintain sort order
     sorted_bam_queue *qb;
 
+    // Pos of last record during reading.  Used when merging split-reads.
+    hts_pos_t last_start;
+
     // One of the E* errno codes
     int errcode;
 
@@ -2286,8 +2290,8 @@ static SAM_state *sam_state_create(htsFile *fp) {
     // be a redirect call with an additional 'S' mode.  This in turn would
     // correctly set the designed format to sam instead of a generic
     // text_format.
-    if (fp->format.format != sam && fp->format.format != text_format)
-        return NULL;
+//    if (fp->format.format != sam && fp->format.format != text_format)
+//        return NULL;
 
     SAM_state *fd = calloc(1, sizeof(*fd));
     if (!fd)
@@ -2887,11 +2891,211 @@ int sam_set_threads(htsFile *fp, int nthreads) {
     return 0;
 }
 
+/*
+
+Reading:
+
+For split reads we need to keep multiple in-flight reads in a queue,
+sorted by start position, with knowledge upfront of their end coords
+(so we know when they are complete).
+
+Each sam_read1 call either pops something off the queue and returns
+it, extends an inflight read in the queue, or appends a new item to
+the queue end.  (Repeat until we've returned an item.)
+
+----------------------------------------------------------------------
+
+variable last_start: start pos of last read added to queue (-1 => empty).
+
+retry:
+If queue isn't empty
+    If end of first read in queue <= last_start
+        Return pop(queue)      // data ready to go
+
+Read record
+Last_start = record.pos
+
+If !record.split
+    // Short read
+    If !last_start
+        Return record          // non-split and no queue
+    else
+        Append to end of queue // fast
+
+Else
+    // Long read
+    if read exists in queue    // search, hash?
+        append to it
+    Else
+        Append to end of queue // non-split and no queue
+
+Goto retry
+
+----------------------------------------------------------------------
+
+EOF needs special care.
+
+If we're doing this on a region, take note of EOR (end of region) then
+only add new items to queue if they're extending existing inflight
+ones.  Keep looping until queue is empty and we're at EOR.
+
+ */
+
+/*
+ * Appends BAM record bsrc to BAM record bdst, with the assumption
+ * that bdst and bsrc were originally split from the same long read.
+ *
+ * bdst is grown to accomodate bsrc.  Minimal checks are made on the
+ * validity of this append, only that it succeeds.
+ *
+ * Returns 0 on success,
+ *        -1 on failure
+ */
+static int append_bam(bam1_t *bdst, const bam1_t *bsrc) {
+    uint32_t *bdst_cig = bam_get_cigar(bdst);
+    uint32_t *bsrc_cig = bam_get_cigar(bsrc);
+    if (bdst->core.n_cigar < 2 ||
+        bsrc->core.n_cigar < 2)
+        return -1;
+    if (bam_cigar_op(bdst_cig[bdst->core.n_cigar-1]) != BAM_CHARD_CLIP ||
+        bam_cigar_op(bsrc_cig[0]) != BAM_CHARD_CLIP)
+        return -1;
+
+    //   20M30H + 20H20M10H
+    // = 20M---   ---20M10H   Drop trailing H and leading H
+    // = 40M---   ------10H   Optionally merge cigar ops
+    int32_t cigar_len = bdst->core.n_cigar + bsrc->core.n_cigar - 2;
+    uint32_t cig_shift = 0;
+    int merge_cig = 0;
+    if (bam_cigar_op(bdst_cig[bdst->core.n_cigar-2]) == bam_cigar_op(bsrc_cig[1])) {
+        cigar_len--;
+        merge_cig = 1;
+    }
+
+    // Cases line 20M20H + 20M will shrink cigar_len.
+    // This causes problems for the memmoves below, so we
+    // allocate more space temporarily and then shuffle right
+    // at the end.
+    if (cigar_len < bdst->core.n_cigar) {
+        cig_shift = bdst->core.n_cigar - cigar_len;
+        cigar_len = bdst->core.n_cigar;
+    }
+
+    // Grow memory.
+    // Assume aux tags are replicated (don't check!)
+    // Assume names match (don't check!)
+    // Assume cigar is merge of both (calculate)
+    uint32_t bdst_qlen = bdst->core.l_qseq;
+    uint32_t bsrc_qlen = bsrc->core.l_qseq;
+
+    uint32_t aux_len = bam_get_l_aux(bdst);
+    uint32_t old_len = bdst->l_data;
+    uint32_t new_len = 
+          bdst->core.l_qname         // name
+        + cigar_len * 4              // cigar
+        + (bdst_qlen+bsrc_qlen+1)/2  // seq
+        + bdst_qlen + bsrc_qlen      // qual
+        + aux_len;                   // aux
+    assert(new_len >= old_len);
+ 
+    if (bdst->m_data < new_len) {
+        uint8_t *d = realloc(bdst->data, new_len);
+        if (!d)
+            return -1;
+        bdst->data = d;
+        bdst->m_data = new_len;
+    }
+
+    // So we can merge in situ (in bdst), we start at the end
+    // and work backwards.
+    uint8_t *cp_new = &bdst->data[new_len - aux_len];
+    uint8_t *cp_old = &bdst->data[old_len - aux_len];
+    memmove(cp_new, cp_old, aux_len);                        // aux
+
+    cp_new -= bdst_qlen + bsrc_qlen;
+    cp_old -= bdst_qlen;
+    memmove(cp_new, cp_old, bdst_qlen);                      // qual A
+    memcpy(cp_new+bdst_qlen, bam_get_qual(bsrc), bsrc_qlen); // qual B
+
+    cp_new -= (bdst_qlen + bsrc_qlen + 1)/2;
+    cp_old -= (bdst_qlen+1)/2;
+    memmove(cp_new, cp_old, (bdst_qlen+1)/2);                // seq A
+    // This is tricky if bdst->qlen is odd as we can't just memcpy.
+    if (bdst_qlen % 2 == 0) {                                // seq B
+        memcpy(cp_new + bdst_qlen/2, bam_get_seq(bsrc), (bsrc_qlen+1)/2);
+    } else {
+        int i;
+        uint8_t *seq_n = cp_new + bdst_qlen/2;
+        uint8_t *seq_o = bam_get_seq(bsrc);
+        for (i = 0; i < (bsrc_qlen & ~1); i += 2) {
+            *seq_n++ |= *seq_o >> 4;
+            *seq_n    = *seq_o++ << 4;
+        }
+        if (i < bsrc_qlen)
+            *seq_n   |= *seq_o >> 4;
+    }
+    bdst->core.l_qseq += bsrc->core.l_qseq;
+
+    cp_new -= cigar_len*4;
+    cp_old -= bdst->core.n_cigar*4;
+    assert(cp_new == cp_old);
+    assert(cp_old == (uint8_t *)bam_get_cigar(bdst));
+    //memmove(cp_new, cp_old, bdst->core.n_cigar * 4);         // cigar A
+    uint32_t *cig_dst = (uint32_t *)cp_new;
+    uint32_t *cig_src = bam_get_cigar(bsrc);
+    if (merge_cig) {
+        cig_dst[bdst->core.n_cigar-2] =
+            bam_cigar_gen(bam_cigar_oplen(cig_dst[bdst->core.n_cigar-2])
+                          + bam_cigar_oplen(cig_src[1]),
+                          bam_cigar_op(cig_dst[bdst->core.n_cigar-2]));
+        memcpy(cig_dst + bdst->core.n_cigar - 1, cig_src + 2,// cigar B
+               (bsrc->core.n_cigar-2)*4);
+    } else {
+        memcpy(cig_dst + bdst->core.n_cigar - 1, cig_src + 1,// cigar B
+               (bsrc->core.n_cigar-1)*4);
+    }
+    bdst->l_data = new_len;
+    if (cig_shift) {
+        // shuffle down to remove cig_shift gap
+        memmove(cig_dst + cigar_len-cig_shift,
+                cig_dst + cigar_len,
+                (bdst->core.l_qseq+1)/2 + bdst->core.l_qseq + aux_len);
+        cigar_len -= cig_shift;
+        bdst->l_data -= cig_shift*4;
+    }
+    bdst->core.n_cigar = cigar_len;
+
+    // Names should be in the correct location already
+
+    return 0;
+}
+
 // Returns 0 on success,
 //        -1 on EOF,
 //       <-1 on error
 int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
 {
+    int ret = 0;
+
+    // TODO: make a mem pool of bam1_t and sorted_bam_queue structs.
+
+    SAM_state *fd = (SAM_state *)fp->state;
+    sorted_bam_queue *qb = fd ? fd->qb : NULL;
+
+ next_rec:
+    if (qb && qb->end < fd->last_start) {
+        // non-empty queue and current queue head is ready to go.
+        if (!bam_copy1(b, qb->b))
+            return -1;
+        //b->core.flag &= ~BAM_FSPLIT; // skipf or now or we split again!
+        fd->qb = qb->next;
+
+        bam_destroy1(qb->b); // FIXME: Keep queue of bam structs to reuse.
+        free(qb);            // FIXME: reuse this later.
+        qb = fd->qb;
+        return 0;
+    }
+
     switch (fp->format.format) {
     case bam: {
         int r = bam_read1(fp->fp.bgzf, b);
@@ -2899,28 +3103,38 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
             if (b->core.tid  >= h->n_targets || b->core.tid  < -1 ||
                 b->core.mtid >= h->n_targets || b->core.mtid < -1) {
                 errno = ERANGE;
-                return -3;
+                ret = -3;
             }
         }
-        return r;
+        if (r >= 0 && fd)
+            fd->last_start = b->core.pos; // FIXME: check tid
+        else if (r < 0 && fd && fd->qb) {
+            fd->last_start = HTS_POS_MAX;
+            goto next_rec;
+        } else if (r < 0) {
+            ret = r;
+        }
+        break;
         }
 
     case cram: {
-        int ret = cram_get_bam_seq(fp->fp.cram, &b);
+        ret = cram_get_bam_seq(fp->fp.cram, &b);
         if (ret < 0)
-            return cram_eof(fp->fp.cram) ? -1 : -2;
+            ret = cram_eof(fp->fp.cram) ? -1 : -2;
 
         if (bam_tag2cigar(b, 1, 1) < 0)
-            return -2;
-        return ret;
+            ret = -2;
+        break;
     }
 
     case sam: {
+        // TODO: handle this with new split-reads.
+
         // Consume 1st line after header parsing as it wasn't using peek
         if (fp->line.l != 0) {
-            int ret = sam_parse1(&fp->line, h, b);
+            ret = sam_parse1(&fp->line, h, b);
             fp->line.l = 0;
-            return ret;
+            break;
         }
 
         if (fp->state) {
@@ -2928,7 +3142,6 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
 
             if (fp->format.compression == bgzf && fp->fp.bgzf->seeked) {
                 // We don't support multi-threaded SAM parsing with seeks yet.
-                int ret;
                 if ((ret = sam_state_destroy(fp)) < 0) {
                     errno = -ret;
                     return -2;
@@ -3013,6 +3226,65 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         errno = EFTYPE;
         return -3;
     }
+
+    if (ret < 0)
+        return ret;
+
+    if (!(b->core.flag & BAM_FSPLIT)) {
+        // Short read
+        if (!qb)
+            return 0;
+        else {
+            // queue append.  Inefficient in basic struct implementation
+            sorted_bam_queue *qi;
+            for (qi = qb; qi->next; qi = qi->next)
+                ;
+            qi->next = calloc(1, sizeof(*qi));
+            qi->next->b = bam_dup1(b);
+            qi->next->end = bam_endpos(b);
+        }
+    } else {
+        // Long read
+
+        if (!fd) {
+            if (!(fd = fp->state = sam_state_create(fp)))
+                return -1;
+        }
+
+        // See if read is in queue already.
+        // FIXME: use a search method, eg khash
+        sorted_bam_queue *qi, *qi_last = NULL;
+        for (qi = qb; qi; qi_last = qi, qi = qi->next) {
+            if (strcmp(bam_get_qname(qi->b), bam_get_qname(b)) == 0 &&
+                qi->b->core.flag == b->core.flag && 
+                qi->b->core.tid == b->core.tid) {
+                // && check qb->end+1 matches b->pos?
+                break; // found
+            }
+        }
+        if (qi) {
+            // Found, so append to in-flight seq.
+            append_bam(qi->b, b);
+            qi->end = bam_endpos(qi->b); // needed?
+        } else {
+            // Not found, append to queue.
+            // Inefficient in basic struct implementation
+            if (qi_last)
+                qi = qi_last->next = calloc(1, sizeof(*qi));
+            else
+                qi = fd->qb = calloc(1, sizeof(*qi));
+            qi->b = bam_dup1(b); // FIXME: dup with known final length
+                                 // to avoid reallocs later
+            qi->end = bam_endpos(b);
+
+            if (qb)
+                qb->next = qi;
+            else
+                qb = fd->qb = qi;
+        }
+    }
+
+    goto next_rec;
 }
 
 static int sam_format1_append(const bam_hdr_t *h, const bam1_t *b, kstring_t *str)
@@ -3214,7 +3486,7 @@ int sam_format1(const bam_hdr_t *h, const bam1_t *b, kstring_t *str)
 // bam_tree_next  // next left most
 // bam_tree_pop   // del
 
-#define MAX_SEQ_LEN 31
+#define MAX_SEQ_LEN 500
 #define _cop(c) bam_cigar_op(c)
 #define _cln(c) bam_cigar_oplen(c)
 #ifndef MIN
@@ -3293,7 +3565,7 @@ static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *ci
     return sub_b;
 }
 
-bam1_t **split_bam(const bam1_t *b, int *nb) {
+static bam1_t **split_bam(const bam1_t *b, int *nb) {
     int i, n, qs = 0, qe = 0, rs = 0, re = 0;
     *nb = (b->core.l_qseq + MAX_SEQ_LEN-1) / MAX_SEQ_LEN*2 + 1; // est. worst case
     bam1_t **blist = malloc(*nb * sizeof(*blist));
