@@ -3668,6 +3668,8 @@ static bam1_t **split_bam(const bam1_t *b, int *nb) {
     return blist;
 }
 
+static int sam_write1_(htsFile *fp, const sam_hdr_t *h, const bam1_t *b);
+
 int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
     SAM_state *state = (SAM_state *)fp->state;
     sorted_bam_queue *qb = NULL, *qi;
@@ -3702,7 +3704,7 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
         if (!b || qi->b->core.tid != b->core.tid) {
             // final flush
             while (qi) {
-                r |= sam_write1(fp, state->h, qi->b);
+                r |= sam_write1_(fp, state->h, qi->b);
                 bam_destroy1(qi->b);
                 sorted_bam_queue *qn = qi->next;
                 free(qi);
@@ -3717,7 +3719,7 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
             // Insert: FIXME use an RB or AVL tree for efficiency
             sorted_bam_queue *last = NULL;
             while (qi && qi->b->core.pos < fpos) {
-                r |= sam_write1(fp, h, qi->b);
+                r |= sam_write1_(fp, h, qi->b);
                 bam_destroy1(qi->b); // inefficient; reuse it later
                 sorted_bam_queue *qn = qi->next;
                 free(qi); // inefficient; reuse it later
@@ -3762,18 +3764,11 @@ int sam_write1_split(htsFile *fp, const bam_hdr_t *h, const bam1_t *b)
 
 // Sadly we need to be able to modify the bam_hdr here so we can
 // reference count the structure.
-int sam_write1(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
+//
+// Internal sam_write_ without auto-splitting.  Separated here to
+// avoid looping.
+static int sam_write1_(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
 {
-    // NB: this needs to maintain a list of bam structs in flight so we can
-    // emit the fragmented ones in the correct sort order (assuming sorted).
-    // TODO
-
-    if (!(b->core.flag & BAM_FUNMAP)
-        && b->core.l_qseq >= MAX_SEQ_LEN
-        && !(b->core.flag & BAM_FSPLIT)) {
-        return sam_write1_split(fp, h, b);
-    }
-
     switch (fp->format.format) {
     case binary_format:
         fp->format.category = sequence_data;
@@ -3900,6 +3895,28 @@ int sam_write1(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
         errno = EBADF;
         return -1;
     }
+}
+
+int sam_write1(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
+{
+    // NB: this needs to maintain a list of bam structs in flight so we can
+    // emit the fragmented ones in the correct sort order (assuming sorted).
+    // TODO
+
+    if (!(b->core.flag & BAM_FUNMAP)
+        && b->core.l_qseq >= MAX_SEQ_LEN
+        && !(b->core.flag & BAM_FSPLIT)) {
+        return sam_write1_split(fp, h, b);
+    }
+
+    if (fp->state && !(b->core.flag & BAM_FSPLIT)) {
+        SAM_state *state = (SAM_state *)fp->state;
+        if (state->qb) {
+            return sam_write1_push(fp, h, bam_dup1(b), b->core.pos);
+        }
+    }
+
+    return sam_write1_(fp, h, b);
 }
 
 /************************
