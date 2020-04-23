@@ -289,6 +289,86 @@ static inline uint64_t hts_str2uint(const char *in, char **end, int bits,
     return n;
 }
 
+/// Convert a string to a double, with overflow detection
+/** @param[in]  in     Input string
+    @param[out] end    Returned end pointer
+    @param[out] failed Location of overflow flag
+    @return String value converted to a double
+
+Converts a floating point value string to a double.  The string should
+have the format [+-]?[0-9]*[.]?[0-9]* and no more than 19 characters.
+If the value is too big, the largest possible value will be returned
+and *failed will be set to ERANGE.
+
+The address of the first character following the converted number will
+be stored in *end.
+
+Both end and failed must be non-NULL.
+ */
+
+static inline double hts_str2dbl(const char *in, char **end, int *failed) {
+    uint64_t n = 0;
+    int max_len = 19;
+    const unsigned char *v = (const unsigned char *) in;
+    const unsigned int ascii_zero = '0'; // Prevents conversion to signed
+    int neg, point = -1;
+    double d;
+
+    static double D[] = {1,1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7,
+                         1e8, 1e9, 1e10,1e11,1e12,1e13,1e14,1e15,
+                         1e16,1e17,1e18,1e19,1e20};
+
+    while (isspace(*v))
+        v++;
+
+    switch(*v) {
+    case '-':
+        neg = 1;
+        v++;
+        break;
+    case '+':
+        v++; /* fall through */
+
+    case '0': case '1': case '2': case '3': case '4':
+    case '5': case '6': case '7': case '8': case '9':
+        neg = 0;
+        break;
+
+    default:
+        // Non numbers, like NaN, Inf
+        d = strtod(in, end);
+        if (*end == in)
+            *failed = 1;
+        return d;
+   }
+
+    const unsigned char *start = v;
+
+    while (--max_len && *v>='0' && *v<='9')
+        n = n*10 + *v++ - ascii_zero;
+    if (*v == '.') {
+        point = v - start;
+        v++;
+        while (--max_len && *v>='0' && *v<='9')
+            n = n*10 + *v++ - ascii_zero;
+    }
+    if (point < 0)
+        point = v - start;
+
+    // Outside the scope of this quick and dirty parser.
+    if (!max_len || *v == 'e' || *v == 'E') {
+        d = strtod(in, end);
+        if (*end == in)
+            *failed = 1;
+        return d;
+    }
+
+    *end = (char *)v;
+    d = n / D[v - start - point];
+
+    return neg ? -d : d;
+}
+
 
 #ifdef __cplusplus
 }
