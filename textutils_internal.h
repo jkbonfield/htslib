@@ -1,6 +1,6 @@
 /* textutils_internal.h -- non-bioinformatics utility routines for text etc.
 
-   Copyright (C) 2016,2018,2019 Genome Research Ltd.
+   Copyright (C) 2016,2018-2020 Genome Research Ltd.
 
    Author: John Marshall <jm18@sanger.ac.uk>
 
@@ -308,12 +308,11 @@ Both end and failed must be non-NULL.
 
 static inline double hts_str2dbl(const char *in, char **end, int *failed) {
     uint64_t n = 0;
-    int max_len = 19;
+    int max_len = 15;
     const unsigned char *v = (const unsigned char *) in;
     const unsigned int ascii_zero = '0'; // Prevents conversion to signed
-    int neg, point = -1;
+    int neg = 0, point = -1;
     double d;
-
     static double D[] = {1,1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7,
                          1e8, 1e9, 1e10,1e11,1e12,1e13,1e14,1e15,
                          1e16,1e17,1e18,1e19,1e20};
@@ -321,18 +320,21 @@ static inline double hts_str2dbl(const char *in, char **end, int *failed) {
     while (isspace(*v))
         v++;
 
-    switch(*v) {
-    case '-':
+    if (*v == '-') {
         neg = 1;
         v++;
-        break;
-    case '+':
-        v++; /* fall through */
+    } else if (*v == '+') {
+        v++;
+    }
 
-    case '0': case '1': case '2': case '3': case '4':
+    switch(*v) {
+    case '1': case '2': case '3': case '4':
     case '5': case '6': case '7': case '8': case '9':
-        neg = 0;
         break;
+
+    case '0':
+        if (v[1] != 'x' && v[1] != 'X') break;
+        // else fall through (hex number)
 
     default:
         // Non numbers, like NaN, Inf
@@ -340,13 +342,15 @@ static inline double hts_str2dbl(const char *in, char **end, int *failed) {
         if (*end == in)
             *failed = 1;
         return d;
-   }
+    }
+
+    while (*v == '0') ++v;
 
     const unsigned char *start = v;
 
     while (--max_len && *v>='0' && *v<='9')
         n = n*10 + *v++ - ascii_zero;
-    if (*v == '.') {
+    if (max_len && *v == '.') {
         point = v - start;
         v++;
         while (--max_len && *v>='0' && *v<='9')
