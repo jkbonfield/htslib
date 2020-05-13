@@ -2852,7 +2852,7 @@ int vcf_parse(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v)
             {
                 hts_log_warning("Contig '%s' is not defined in the header. (Quick workaround: index the file with tabix.)", p);
                 v->errcode = BCF_ERR_CTG_UNDEF;
-                if (fix_chromosome(h, d, p) == kh_end(d)) {
+                if ((k = fix_chromosome(h, d, p)) == kh_end(d)) {
                     hts_log_error("Could not add dummy header for contig '%s'", p);
                     v->errcode |= BCF_ERR_CTG_INVALID;
                     goto err;
