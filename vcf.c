@@ -78,6 +78,7 @@ static bcf_idinfo_t bcf_idinfo_def = { .info = { 15, 15, 15 }, .hrec = { NULL, N
 
 #define BCF_IS_64BIT (1<<30)
 
+static int vcf_parse_format_partial(bcf1_t *v);
 
 static const char *dump_char(char *buffer, char c)
 {
@@ -1753,15 +1754,22 @@ int bcf_write(htsFile *hfp, bcf_hdr_t *h, bcf1_t *v)
     if ( h->dirty ) {
         if (bcf_hdr_sync(h) < 0) return -1;
     }
+
+    if ( hfp->format.format == vcf || hfp->format.format == text_format )
+        return vcf_write(hfp,h,v);
+
+    if (v->unpacked & VCF_UN_FMT) {
+        // slow, but round trip test
+        if (vcf_parse_format_partial(v) < 0)
+            return -1;
+    }
+
     if ( bcf_hdr_nsamples(h)!=v->n_sample )
     {
         hts_log_error("Broken VCF record, the number of columns at %s:%"PRIhts_pos" does not match the number of samples (%d vs %d)",
             bcf_seqname(h,v), v->pos+1, v->n_sample, bcf_hdr_nsamples(h));
         return -1;
     }
-
-    if ( hfp->format.format == vcf || hfp->format.format == text_format )
-        return vcf_write(hfp,h,v);
 
     if ( v->errcode )
     {
@@ -2233,7 +2241,7 @@ static int vcf_parse_format(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v, char *p
     char *end = s->s + s->l;
     if ( q>=end )
     {
-        hts_log_error("FORMAT column with no sample columns starting at %s:%"PRIhts_pos"", s->s, v->pos+1);
+        hts_log_error("FORMAT column with no sample columns starting at %s:%"PRIhts_pos"", bcf_hdr_id2name(h, v->rid) /*s->s*/, v->pos+1);
         v->errcode |= BCF_ERR_NCOLS;
         return -1;
     }
@@ -2587,6 +2595,45 @@ static int vcf_parse_format(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v, char *p
     return 0;
 }
 
+// The indiv.s kstring is the textual VCF representation for FORMAT
+// column and all the subsequent SAMPLE columns.
+//
+// We also need the header, and this cannot be passed in as bcf_unpack calls
+// this and it doesn't have the header available.
+// So we also cache a pointer to the header in the first bytes of the
+// kstring too.
+//
+// This packing ensures the data is still in kstring format and amenable
+// to freeing / reuse.  I.e.:
+//
+// s.s      p       q            s.l      s.m
+// |        |       |              |        |
+// <HDR_PTR><FORMAT><SAMPLE\tSAMPLE>.........
+//
+// Returns 0 on success,
+//        <0 on failure.
+static int vcf_parse_format_partial(bcf1_t *v) {
+    if (!(v->unpacked & VCF_UN_FMT))
+        return 0;
+    kstring_t s = v->indiv;
+    const bcf_hdr_t *h = *(const bcf_hdr_t **)s.s;
+    char *p = s.s + sizeof(const bcf_hdr_t *);
+    char *q = p + strlen(p);
+
+    v->indiv.s = NULL;
+    v->indiv.l = v->indiv.m = 0;
+
+    int ret;
+    if ((ret = vcf_parse_format(&s, h, v, p, q) == 0)) {
+        v->unpacked &= ~VCF_UN_FMT;
+        free(s.s);
+        return ret;
+    } else {
+        v->indiv = s;
+        return ret;
+    }
+}
+
 static khint_t fix_chromosome(const bcf_hdr_t *h, vdict_t *d, const char *p) {
     // Simple error recovery for chromosomes not defined in the header. It will not help when VCF header has
     // been already printed, but will enable tools like vcfcheck to proceed.
@@ -2907,7 +2954,19 @@ int vcf_parse(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v)
             }
             if ( v->max_unpack && !(v->max_unpack>>3) ) goto end;
         } else if (i == 8) {// FORMAT
-            return vcf_parse_format(s, h, v, p, q) == 0 ? 0 : -2;
+            // Consider complete copy of s, obtained via ks_release,
+            // and cache of p/q pointers.  This is then a generalised
+            // parse delay that works for any max_unpack value.
+
+            kstring_t *iv = &v->indiv;
+            ks_clear(iv);
+            kputsn((char *)&h, sizeof(&h), iv);
+            kputsn(p, s->s + s->l - p, iv); // check
+
+            v->unpacked |= VCF_UN_FMT;
+
+            return 0;
+            //return vcf_parse_format(s, h, v, p, q) == 0 ? 0 : -2;
         }
     }
 
@@ -3020,6 +3079,12 @@ int bcf_unpack(bcf1_t *b, int which)
         b->unpacked |= BCF_UN_INFO;
     }
     if ((which&BCF_UN_FMT) && b->n_sample && !(b->unpacked&BCF_UN_FMT)) { // FORMAT
+        if (b->unpacked & VCF_UN_FMT) {
+            if (vcf_parse_format_partial(b) < 0)
+                return -1;
+            b->unpacked &= ~VCF_UN_FMT;
+        }
+
         ptr = (uint8_t*)b->indiv.s;
         hts_expand(bcf_fmt_t, b->n_fmt, d->m_fmt, d->fmt);
         for (i = 0; i < d->m_fmt; ++i) d->fmt[i].p_free = 0;
@@ -3091,46 +3156,52 @@ int vcf_format(const bcf_hdr_t *h, const bcf1_t *v, kstring_t *s)
         }
         if ( first ) kputc('.', s);
     } else kputc('.', s);
-    // FORMAT and individual information
-    if (v->n_sample)
-    {
-        int i,j;
-        if ( v->n_fmt)
-        {
-            int gt_i = -1;
-            bcf_fmt_t *fmt = v->d.fmt;
-            int first = 1;
-            for (i = 0; i < (int)v->n_fmt; ++i) {
-                if ( !fmt[i].p ) continue;
-                kputc(!first ? ':' : '\t', s); first = 0;
-                if ( fmt[i].id<0 ) //!bcf_hdr_idinfo_exists(h,BCF_HL_FMT,fmt[i].id) )
-                {
-                    hts_log_error("Invalid BCF, the FORMAT tag id=%d not present in the header", fmt[i].id);
-                    abort();
-                }
-                kputs(h->id[BCF_DT_ID][fmt[i].id].key, s);
-                if (strcmp(h->id[BCF_DT_ID][fmt[i].id].key, "GT") == 0) gt_i = i;
-            }
-            if ( first ) kputs("\t.", s);
-            for (j = 0; j < v->n_sample; ++j) {
-                kputc('\t', s);
-                first = 1;
+
+    if (v->unpacked & VCF_UN_FMT) {
+        size_t l = strlen(v->indiv.s);
+        kputc('\t', s);
+        kputsn(v->indiv.s, l, s);
+        kputc('\t', s);
+        kputsn(v->indiv.s + l+1, v->indiv.l - (l+1), s);
+    } else {
+        // FORMAT and individual information
+        if (v->n_sample) {
+            int i,j;
+            if ( v->n_fmt) {
+                int gt_i = -1;
+                bcf_fmt_t *fmt = v->d.fmt;
+                int first = 1;
                 for (i = 0; i < (int)v->n_fmt; ++i) {
-                    bcf_fmt_t *f = &fmt[i];
-                    if ( !f->p ) continue;
-                    if (!first) kputc(':', s);
-                    first = 0;
-                    if (gt_i == i)
-                        bcf_format_gt(f,j,s);
-                    else
-                        bcf_fmt_array(s, f->n, f->type, f->p + j * (size_t)f->size);
+                    if ( !fmt[i].p ) continue;
+                    kputc(!first ? ':' : '\t', s); first = 0;
+                    if ( fmt[i].id<0 ) { //!bcf_hdr_idinfo_exists(h,BCF_HL_FMT,fmt[i].id) )
+                        hts_log_error("Invalid BCF, the FORMAT tag id=%d not present in the header", fmt[i].id);
+                        abort();
+                    }
+                    kputs(h->id[BCF_DT_ID][fmt[i].id].key, s);
+                    if (strcmp(h->id[BCF_DT_ID][fmt[i].id].key, "GT") == 0) gt_i = i;
                 }
-                if ( first ) kputc('.', s);
+                if ( first ) kputs("\t.", s);
+                for (j = 0; j < v->n_sample; ++j) {
+                    kputc('\t', s);
+                    first = 1;
+                    for (i = 0; i < (int)v->n_fmt; ++i) {
+                        bcf_fmt_t *f = &fmt[i];
+                        if ( !f->p ) continue;
+                        if (!first) kputc(':', s);
+                        first = 0;
+                        if (gt_i == i)
+                            bcf_format_gt(f,j,s);
+                        else
+                            bcf_fmt_array(s, f->n, f->type, f->p + j * (size_t)f->size);
+                    }
+                    if ( first ) kputc('.', s);
+                }
+            } else {
+                for (j=0; j<=v->n_sample; j++)
+                    kputs("\t.", s);
             }
         }
-        else
-            for (j=0; j<=v->n_sample; j++)
-                kputs("\t.", s);
     }
     kputc('\n', s);
     return 0;
