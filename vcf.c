@@ -3111,7 +3111,8 @@ int bcf_unpack(bcf1_t *b, int which)
 int vcf_format(const bcf_hdr_t *h, const bcf1_t *v, kstring_t *s)
 {
     int i;
-    bcf_unpack((bcf1_t*)v, BCF_UN_ALL);
+    bcf_unpack((bcf1_t*)v, (v->unpacked & VCF_UN_FMT)
+               ? BCF_UN_SHR : BCF_UN_ALL);
     kputs(h->id[BCF_DT_CTG][v->rid].key, s); // CHROM
     kputc('\t', s); kputll(v->pos + 1, s); // POS
     kputc('\t', s); kputs(v->d.id ? v->d.id : ".", s); // ID
@@ -3171,11 +3172,12 @@ int vcf_format(const bcf_hdr_t *h, const bcf1_t *v, kstring_t *s)
     } else kputc('.', s);
     // FORMAT and individual information
     if (v->unpacked & VCF_UN_FMT) {
-        size_t l = strlen(v->indiv.s);
+        size_t l = strlen(v->indiv.s + sizeof(bcf_hdr_t *));
         kputc('\t', s);
-        kputsn(v->indiv.s, l, s);
+        kputsn(v->indiv.s + sizeof(bcf_hdr_t *), l, s);
         kputc('\t', s);
-        kputsn(v->indiv.s + l+1, v->indiv.l - (l+1), s);
+        kputsn(v->indiv.s + sizeof(bcf_hdr_t *) + l+1,
+               v->indiv.l - (sizeof(bcf_hdr_t *) + l+1), s);
     } else {
         if (v->n_sample)
         {
