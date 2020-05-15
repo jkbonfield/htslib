@@ -2966,8 +2966,9 @@ int vcf_parse(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v)
 
             kstring_t *iv = &v->indiv;
             ks_clear(iv);
-            kputsn((char *)&h, sizeof(&h), iv);
-            kputsn(p, s->s + s->l - p, iv); // check
+            if (kputsn((char *)&h, sizeof(&h), iv) < 0 ||
+                kputsn(p, s->s + s->l - p, iv) < 0)
+                goto err;
 
             v->unpacked |= VCF_UN_FMT;
 
