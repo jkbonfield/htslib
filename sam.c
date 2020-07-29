@@ -3259,7 +3259,20 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
                 qi->b->core.flag == b->core.flag && 
                 qi->b->core.tid == b->core.tid) {
                 // && check qb->end+1 matches b->pos?
-                break; // found
+                if (b->core.flag & (BAM_FSECONDARY | BAM_FSUPPLEMENTARY)) {
+                    // Non-primary reads need to disambiguate via HI tag
+                    uint8_t *a1, *a2;
+                    if ((a1 = bam_aux_get(b, "HI")) &&
+                        (a2 = bam_aux_get(qi->b, "HI"))) {
+                        if (bam_aux2i(a1) == bam_aux2i(a2))
+                            break;
+                        // otherwise this is a distinct read
+                    } else {
+                        break;
+                    }
+                } else {
+                    break; // found
+                }
             }
         }
         if (qi) {

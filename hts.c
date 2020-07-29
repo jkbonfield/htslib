@@ -1190,10 +1190,12 @@ int hts_close(htsFile *fp)
     case binary_format:
     case bam:
     case bcf:
+        if (fp->state && fp->is_write) sam_write1_push(fp, NULL, NULL, 0);
         ret = bgzf_close(fp->fp.bgzf);
         break;
 
     case cram:
+        if (fp->state && fp->is_write) sam_write1_push(fp, NULL, NULL, 0);
         if (!fp->is_write) {
             switch (cram_eof(fp->fp.cram)) {
             case 2:
