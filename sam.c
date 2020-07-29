@@ -2077,6 +2077,7 @@ int sam_parse1(kstring_t *s, sam_hdr_t *h, bam1_t *b)
         c->l_qseq = p - q - 1;
         hts_pos_t ql = bam_cigar2qlen(c->n_cigar, (uint32_t*)(b->data + c->l_qname));
         _parse_err(c->n_cigar && ql != c->l_qseq, "CIGAR and query sequence are of different length");
+
         i = (c->l_qseq + 1) >> 1;
         _get_mem(uint8_t, &t, b, i);
 
@@ -3088,7 +3089,15 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         if (!bam_copy1(b, qb->b))
             return -1;
 
-        b->core.flag &= ~BAM_FSPLIT;
+        if (b->core.flag & BAM_FSPLIT) {
+            b->core.flag &= ~BAM_FSPLIT;
+
+            uint8_t *tag;
+            if ((tag = bam_aux_get(b, "HS")))
+                bam_aux_del(b, tag);
+            if ((tag = bam_aux_get(b, "HE")))
+                bam_aux_del(b, tag);
+        }
 
         fd->qb = qb->next;
 
@@ -3280,7 +3289,6 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         if (qi) {
             // Found, so append to in-flight seq.
             append_bam(qi->b, b);
-            //qi->end = bam_endpos(qi->b); // needed?
         } else {
             // Not found, append to queue.
             // Inefficient in basic struct implementation
@@ -3291,11 +3299,13 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
                 qi = fd->qb = calloc(1, sizeof(*qi));
             qi->b = bam_dup1(b); // FIXME: dup with known final length
                                  // to avoid reallocs later
-            qi->end = bam_endpos(b);
-            uint32_t *cig = bam_get_cigar(b);
-            if (b->core.n_cigar > 1 &&
-                bam_cigar_op(cig[b->core.n_cigar-1]) == BAM_CHARD_CLIP)
-                qi->end += bam_cigar_oplen(cig[b->core.n_cigar-1]);
+            uint8_t *tag = bam_aux_get(b, "HE");
+            if (!tag) {
+                hts_log_error("No HE tag for split-read %.*s",
+                              b->core.l_qname, bam_get_qname(b));
+                return -1;
+            }
+            qi->end = bam_aux2i(tag);
 
             if (!qb)
                 qb = fd->qb = qi;
@@ -3549,7 +3559,8 @@ bam1_t *bam_frag(const bam1_t *b, int qs, int qe, uint32_t *cig, int ncig) {
 
 // FIXME: make this more efficient, rather than lots of reallocating
 static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *cig,
-                       uint32_t qstart, uint32_t l_qseq) {
+                       uint32_t qstart, uint32_t l_qseq,
+                       uint32_t hit_start, uint32_t hit_end) {
     bam1_t *sub_b = bam_dup1(b); // FIXME error checking
     replace_cigar(sub_b, ncig, cig); // NB: can grow too
 
@@ -3579,6 +3590,12 @@ static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *ci
 
     sub_b->l_data = cp - (uint8_t *)sub_b->data;
 
+    // Add HS (hit-start) and HE (hit-end) tags.
+    if (bam_aux_update_int(sub_b, "HS", hit_start) < 0)
+        return NULL;
+    if (bam_aux_update_int(sub_b, "HE", hit_end) < 0)
+        return NULL;
+
     return sub_b;
 }
 
@@ -3591,6 +3608,8 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
     int ln = 0, op = 0;
     uint32_t *new_cig = malloc((2+b->core.n_cigar+2* *nb) * sizeof(*new_cig)); // FIXME
     uint32_t new_ncig = 0;
+    uint32_t start_pos = b->core.pos+1;
+    uint32_t end_pos = bam_endpos(b);
 
     //dump_cig("**ORIG", 0,0, cig, b->core.n_cigar);
     for (i = n = 0; n < *nb+1 && i < b->core.n_cigar; i++) {
@@ -3639,7 +3658,8 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
                     // FIXME: needs to be ref coords...
                     new_cig[new_ncig++] = bam_cigar_gen(b->core.l_qseq - qe, BAM_CHARD_CLIP/*FIXME*/);
                 //dump_cig("  Frag", qe-qs, re-rs, new_cig, new_ncig);
-                blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs);
+                blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs,
+                                   start_pos, end_pos);
 
                 n++;
                 new_ncig = 0;
@@ -3649,9 +3669,9 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
             }
 
             int l = MIN(max_seq_len - (re-rs), MIN(max_seq_len - (qe-qs), ln));
-            qe += l;
-            re += l;
-            ln -= l;
+            qe += bam_cigar_type(op) & 1 ? l : 0;
+            re += bam_cigar_type(op) & 2 ? l : 0;
+            ln -= l; // maybe only if type&2 so len is N.ref.bases?
             new_cig[new_ncig++] = bam_cigar_gen(l, op);
         } while (ln && n < *nb-1);
     }
@@ -3659,7 +3679,8 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
     if (i == b->core.n_cigar) {
         // CREATE HERE from qs to qe.
         //dump_cig("  frag", qe-qs, re-rs, new_cig, new_ncig);
-        blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs);
+        blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs,
+                           start_pos, end_pos);
         
         n++;
         new_ncig = 0;
@@ -3673,7 +3694,8 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
         while (i < b->core.n_cigar)
             new_cig[new_ncig++] = cig[i++];
         //dump_cig("  frag", qe-qs, re-rs, new_cig, new_ncig);
-        blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs);
+        blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs,
+                           start_pos, end_pos);
 
         n++;
         new_ncig = 0;
