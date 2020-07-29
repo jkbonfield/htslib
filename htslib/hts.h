@@ -250,6 +250,7 @@ typedef struct {
     hts_idx_t *idx;
     const char *fnidx;
     struct sam_hdr_t *bam_header;
+    int max_seq;
 } htsFile;
 
 // A combined thread pool and queue allocation size.
@@ -315,6 +316,7 @@ enum hts_fmt_option {
     HTS_OPT_THREAD_POOL,
     HTS_OPT_CACHE_SIZE,
     HTS_OPT_BLOCK_SIZE,
+    HTS_OPT_MAX_SEQ,
 };
 
 // For backwards compatibility

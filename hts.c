@@ -823,6 +823,10 @@ int hts_opt_add(hts_opt **opts, const char *c_arg) {
              strcmp(o->arg, "LEVEL") == 0)
         o->opt = HTS_OPT_COMPRESSION_LEVEL, o->val.i = strtol(val, NULL, 0);
 
+    else if (strcmp(o->arg, "max_seq") == 0 ||
+             strcmp(o->arg, "MAX_SEQ") == 0)
+        o->opt = HTS_OPT_MAX_SEQ, o->val.i = atoi(val);
+
     else {
         hts_log_error("Unknown option '%s'", o->arg);
         free(o->arg);
@@ -1335,6 +1339,14 @@ int hts_set_opt(htsFile *fp, enum hts_fmt_option opt, ...) {
         va_end(args);
         if (fp->is_bgzf)
             fp->fp.bgzf->compress_level = level;
+        return 0;
+    }
+
+    case HTS_OPT_MAX_SEQ: {
+        va_start(args, opt);
+        fp->max_seq = va_arg(args, int);
+        va_end(args);
+        return 0;
     }
 
     default:

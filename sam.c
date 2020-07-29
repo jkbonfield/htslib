@@ -3087,7 +3087,9 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         // non-empty queue and current queue head is ready to go.
         if (!bam_copy1(b, qb->b))
             return -1;
-        //b->core.flag &= ~BAM_FSPLIT; // skip or now or we split again!
+
+        b->core.flag &= ~BAM_FSPLIT;
+
         fd->qb = qb->next;
 
         bam_destroy1(qb->b); // FIXME: Keep queue of bam structs to reuse.
@@ -3502,7 +3504,6 @@ int sam_format1(const bam_hdr_t *h, const bam1_t *b, kstring_t *str)
 // bam_tree_next  // next left most
 // bam_tree_pop   // del
 
-#define MAX_SEQ_LEN 500
 #define _cop(c) bam_cigar_op(c)
 #define _cln(c) bam_cigar_oplen(c)
 #ifndef MIN
@@ -3581,9 +3582,9 @@ static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *ci
     return sub_b;
 }
 
-static bam1_t **split_bam(const bam1_t *b, int *nb) {
+static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
     int i, n, qs = 0, qe = 0, rs = 0, re = 0;
-    *nb = (b->core.l_qseq + MAX_SEQ_LEN-1) / MAX_SEQ_LEN*2 + 1; // est. worst case
+    *nb = (b->core.l_qseq + max_seq_len-1) / max_seq_len*2 + 1; // est. worst case
     bam1_t **blist = malloc(*nb * sizeof(*blist));
 
     uint32_t *cig = bam_get_cigar(b);
@@ -3629,8 +3630,8 @@ static bam1_t **split_bam(const bam1_t *b, int *nb) {
         // Otherwise we're in a fragmentable region.
         do {
             if (n < *nb-1 &&
-                (qe-qs >= MAX_SEQ_LEN ||
-                 re-rs >= MAX_SEQ_LEN)) {
+                (qe-qs >= max_seq_len ||
+                 re-rs >= max_seq_len)) {
                 // new fragment from >=qs to <qe
             
                 // CREATE HERE.
@@ -3647,7 +3648,7 @@ static bam1_t **split_bam(const bam1_t *b, int *nb) {
                 rs = re;
             }
 
-            int l = MIN(MAX_SEQ_LEN - (re-rs), MIN(MAX_SEQ_LEN - (qe-qs), ln));
+            int l = MIN(max_seq_len - (re-rs), MIN(max_seq_len - (qe-qs), ln));
             qe += l;
             re += l;
             ln -= l;
@@ -3763,7 +3764,7 @@ int sam_write1_split(htsFile *fp, const bam_hdr_t *h, const bam1_t *b)
     bam1_t **blist;
     int ret = 0, i, nb;
 
-    blist = split_bam(b, &nb);
+    blist = split_bam(b, &nb, fp->max_seq);
     for (i = 0; i < nb; i++) {
         int r = sam_write1_push(fp, h, blist[i], b->core.pos);
         if (r < 0) {
@@ -3920,7 +3921,8 @@ int sam_write1(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
     // TODO
 
     if (!(b->core.flag & BAM_FUNMAP)
-        && b->core.l_qseq >= MAX_SEQ_LEN
+        && fp->max_seq
+        && b->core.l_qseq >= fp->max_seq
         && !(b->core.flag & BAM_FSPLIT)) {
         return sam_write1_split(fp, h, b);
     }
