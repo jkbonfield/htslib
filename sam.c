@@ -3097,6 +3097,8 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
                 bam_aux_del(b, tag);
             if ((tag = bam_aux_get(b, "HE")))
                 bam_aux_del(b, tag);
+            if ((tag = bam_aux_get(b, "HN")))
+                bam_aux_del(b, tag);
         }
 
         fd->qb = qb->next;
@@ -3271,10 +3273,10 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
                 qi->b->core.tid == b->core.tid) {
                 // && check qb->end+1 matches b->pos?
                 if (b->core.flag & (BAM_FSECONDARY | BAM_FSUPPLEMENTARY)) {
-                    // Non-primary reads need to disambiguate via HI tag
+                    // Non-primary reads need to disambiguate via HN tag
                     uint8_t *a1, *a2;
-                    if ((a1 = bam_aux_get(b, "HI")) &&
-                        (a2 = bam_aux_get(qi->b, "HI"))) {
+                    if ((a1 = bam_aux_get(b, "HN")) &&
+                        (a2 = bam_aux_get(qi->b, "HN"))) {
                         if (bam_aux2i(a1) == bam_aux2i(a2))
                             break;
                         // otherwise this is a distinct read
@@ -3560,7 +3562,7 @@ bam1_t *bam_frag(const bam1_t *b, int qs, int qe, uint32_t *cig, int ncig) {
 // FIXME: make this more efficient, rather than lots of reallocating
 static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *cig,
                        uint32_t qstart, uint32_t l_qseq,
-                       uint32_t hit_start, uint32_t hit_end) {
+                       uint32_t hit_start, uint32_t hit_end, uint32_t hit_num) {
     bam1_t *sub_b = bam_dup1(b); // FIXME error checking
     replace_cigar(sub_b, ncig, cig); // NB: can grow too
 
@@ -3595,11 +3597,14 @@ static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *ci
         return NULL;
     if (bam_aux_update_int(sub_b, "HE", hit_end) < 0)
         return NULL;
+    if (bam_aux_update_int(sub_b, "HN", hit_num) < 0)
+        return NULL;
 
     return sub_b;
 }
 
-static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
+static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len,
+                          int64_t hit_num) {
     int i, n, qs = 0, qe = 0, rs = 0, re = 0;
     *nb = (b->core.l_qseq + max_seq_len-1) / max_seq_len*2 + 1; // est. worst case
     bam1_t **blist = malloc(*nb * sizeof(*blist));
@@ -3659,7 +3664,7 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
                     new_cig[new_ncig++] = bam_cigar_gen(b->core.l_qseq - qe, BAM_CHARD_CLIP/*FIXME*/);
                 //dump_cig("  Frag", qe-qs, re-rs, new_cig, new_ncig);
                 blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs,
-                                   start_pos, end_pos);
+                                   start_pos, end_pos, hit_num);
 
                 n++;
                 new_ncig = 0;
@@ -3680,7 +3685,7 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
         // CREATE HERE from qs to qe.
         //dump_cig("  frag", qe-qs, re-rs, new_cig, new_ncig);
         blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs,
-                           start_pos, end_pos);
+                           start_pos, end_pos, hit_num);
         
         n++;
         new_ncig = 0;
@@ -3695,7 +3700,7 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len) {
             new_cig[new_ncig++] = cig[i++];
         //dump_cig("  frag", qe-qs, re-rs, new_cig, new_ncig);
         blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs,
-                           start_pos, end_pos);
+                           start_pos, end_pos, hit_num);
 
         n++;
         new_ncig = 0;
@@ -3786,7 +3791,7 @@ int sam_write1_split(htsFile *fp, const bam_hdr_t *h, const bam1_t *b)
     bam1_t **blist;
     int ret = 0, i, nb;
 
-    blist = split_bam(b, &nb, fp->max_seq);
+    blist = split_bam(b, &nb, fp->max_seq, fp->lineno++);
     for (i = 0; i < nb; i++) {
         int r = sam_write1_push(fp, h, blist[i], b->core.pos);
         if (r < 0) {
