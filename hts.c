@@ -1196,6 +1196,7 @@ int hts_close(htsFile *fp)
     case bcf:
         if (fp->state && fp->is_write) sam_write1_push(fp, NULL, NULL, 0);
         ret = bgzf_close(fp->fp.bgzf);
+        if (fp->state) ret |= sam_state_destroy(fp);
         break;
 
     case cram:

@@ -3755,7 +3755,8 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
                 qi = qn;
             }
             state->qb = qb;
-            sam_hdr_destroy(state->h);
+            if (!b)
+                sam_hdr_destroy(state->h);
             return r;
         }
 
