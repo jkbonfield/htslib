@@ -2273,6 +2273,9 @@ typedef struct SAM_state {
 
     // Record queue used during auto-split mode to maintain sort order
     sorted_bam_queue *qb;
+    int unsorted;
+    int32_t last_tid;
+    hts_pos_t last_pos;
 
     // Pos of last record during reading.  Used when merging split-reads.
     hts_pos_t last_start;
@@ -2297,6 +2300,7 @@ static SAM_state *sam_state_create(htsFile *fp) {
     SAM_state *fd = calloc(1, sizeof(*fd));
     if (!fd)
         return NULL;
+    fd->last_pos = -999;
 
     fp->state = fd;
     fd->fp = fp;
@@ -3071,6 +3075,40 @@ static int append_bam(bam1_t *bdst, const bam1_t *bsrc) {
     return 0;
 }
 
+// Pop a completed read off the sorted_bam_queue
+static int sam_read1_pop(SAM_state *fd, sorted_bam_queue *qb, bam1_t *b) {
+    if (!bam_copy1(b, qb->b))
+        return -1;
+
+    if (b->core.flag & BAM_FSPLIT) {
+        b->core.flag &= ~BAM_FSPLIT;
+
+        uint8_t *tag;
+        if ((tag = bam_aux_get(b, "HS")))
+            bam_aux_del(b, tag);
+        if ((tag = bam_aux_get(b, "HE")))
+            bam_aux_del(b, tag);
+        if ((tag = bam_aux_get(b, "HN")))
+            bam_aux_del(b, tag);
+    }
+
+    fd->qb = qb->next;
+
+    bam_destroy1(qb->b); // FIXME: Keep queue of bam structs to reuse.
+    free(qb);            // FIXME: reuse this later.
+
+    if (!fd->unsorted && fd->last_pos > -9) {
+        if ((b->core.tid != -1 && fd->last_tid == -1)
+            || (b->core.pos < fd->last_pos)) {
+            fprintf(stderr, "Set unsorted mode\n");
+            fd->unsorted = 1;
+        }
+    }
+    fd->last_pos = b->core.pos;
+    fd->last_tid = b->core.tid;
+    return 0;
+}
+
 // Returns 0 on success,
 //        -1 on EOF,
 //       <-1 on error
@@ -3086,27 +3124,7 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
  next_rec:
     if (qb && qb->end < fd->last_start) {
         // non-empty queue and current queue head is ready to go.
-        if (!bam_copy1(b, qb->b))
-            return -1;
-
-        if (b->core.flag & BAM_FSPLIT) {
-            b->core.flag &= ~BAM_FSPLIT;
-
-            uint8_t *tag;
-            if ((tag = bam_aux_get(b, "HS")))
-                bam_aux_del(b, tag);
-            if ((tag = bam_aux_get(b, "HE")))
-                bam_aux_del(b, tag);
-            if ((tag = bam_aux_get(b, "HN")))
-                bam_aux_del(b, tag);
-        }
-
-        fd->qb = qb->next;
-
-        bam_destroy1(qb->b); // FIXME: Keep queue of bam structs to reuse.
-        free(qb);            // FIXME: reuse this later.
-        qb = fd->qb;
-        return 0;
+        return sam_read1_pop(fd, qb, b);
     }
 
     switch (fp->format.format) {
@@ -3267,7 +3285,9 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         // See if read is in queue already.
         // FIXME: use a search method, eg khash
         sorted_bam_queue *qi, *qi_last = NULL;
+        int qlen = 0;
         for (qi = qb; qi; qi_last = qi, qi = qi->next) {
+            qlen++;
             if (strcmp(bam_get_qname(qi->b), bam_get_qname(b)) == 0 &&
                 qi->b->core.flag == b->core.flag && 
                 qi->b->core.tid == b->core.tid) {
@@ -3291,7 +3311,14 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         if (qi) {
             // Found, so append to in-flight seq.
             append_bam(qi->b, b);
+            if (fd->unsorted && qi != qb) {
+                // We have another read in the queue so push it out
+                // now as sort order is irrelevant.
+
+                if(0/*tmp*/) return sam_read1_pop(fd, qb, b);
+            }
         } else {
+            fprintf(stderr, "qlen=%d\n", qlen);
             // Not found, append to queue.
             // Inefficient in basic struct implementation
             // Need b_last pointer
@@ -3730,6 +3757,36 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
     if (!b && !state->qb)  // no record => flush
         return 0;
 
+    if (state->unsorted == 0 && state->last_pos  > -9
+        && ( (b->core.tid != -1 && state->last_tid == -1)
+             || (b->core.tid == state->last_tid
+                 && b->core.pos < state->last_pos))) {
+        fprintf(stderr, "Set unsorted mode\n");
+        state->unsorted = 1;
+    }
+    if (!(b->core.flag & BAM_FSPLIT))
+        state->last_pos = b->core.pos;
+    state->last_tid = b->core.tid;
+
+    // Unsorted: just emit as we go.
+    if (state->unsorted) {
+        if (state->qb) {
+            qi = state->qb;
+            while (qi) {
+                r |= sam_write1_(fp, state->h, qi->b);
+                bam_destroy1(qi->b);
+                sorted_bam_queue *qn = qi->next;
+                free(qi);
+                qi = qn;
+            }
+            state->qb = NULL;
+        }
+
+        r |= sam_write1_(fp, state->h, b);
+        bam_destroy1(b);
+        return r;
+    }
+
     if (b) { // push a new record
         qb = malloc(sizeof(*qb));
         if (!qb)
@@ -3737,7 +3794,8 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
         qb->b = b;
         qb->next = NULL;
     }
-    
+
+    // Sorted: insert in order.
     if (b && !state->qb) {
         state->qb = qb;
     } else {
@@ -3829,9 +3887,9 @@ static int sam_write1_(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
         fp->format.category = sequence_data;
         fp->format.format = sam;
         /* fall-through */
-    case sam:
-        if (fp->state && !((SAM_state *)fp->state)->qb) {
-            SAM_state *fd = (SAM_state *)fp->state;
+    case sam: ;
+        SAM_state *fd = (SAM_state *)fp->state;
+        if (fd && (fd->h == NULL || (fd->h != NULL && fd->dispatcher))) {
 
             // Threaded output
             if (!fd->h) {
