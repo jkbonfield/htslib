@@ -51,6 +51,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include "header.h"
 
 #include "htslib/khash.h"
+#include "kavl.h"
 KHASH_DECLARE(s2i, kh_cstr_t, int64_t)
 
 #ifndef EFTYPE
@@ -2242,12 +2243,274 @@ enum sam_cmd {
     SAM_CLOSE,
 };
 
+#define SPLIT_FAST
+//#define KAVL_READ // NB: differs / buggy
+
 // Noddy for now
 typedef struct sorted_bam_queue {
+    struct sorted_bam_queue *next_name;
     struct sorted_bam_queue *next;
     bam1_t *b;
     hts_pos_t end;
+#ifdef KAVL_READ
+    KAVL_HEAD(struct sorted_bam_queue) kavl_head;
+#endif
 } sorted_bam_queue;
+
+// +ve is p>q, -ve if p<q, 0 if p==q
+#define bam_queue_cmp(p, q)                                     \
+    ( (p)->b->core.tid == (q)->b->core.tid                      \
+      ? (p)->b->core.pos - (q)->b->core.pos                     \
+      : ((q)->b->core.tid == -1                                 \
+         ? 1                                                    \
+         : (p)->b->core.tid - (q)->b->core.tid                  \
+        )                                                       \
+    )
+
+#ifdef SPLIT_FAST
+//KHASH_DECLARE(s2b, kh_cstr_t, sorted_bam_queue *)
+KHASH_MAP_INIT_STR(s2b, struct sorted_bam_queue *)
+#ifdef KAVL_READ
+KAVL_INIT(QB, sorted_bam_queue, kavl_head, bam_queue_cmp);
+#endif
+#endif
+
+#if 0
+sorted_bam_queue *kavl_find_QB(const sorted_bam_queue *root, const sorted_bam_queue *x, unsigned *cnt_) {
+    const sorted_bam_queue *p = root;
+    unsigned cnt = 0;
+    while (p != 0) {
+	int cmp;
+	cmp = ( (x)->b->core.tid == (p)->b->core.tid ? (x)->b->core.pos - (p)->b->core.pos : ((p)->b->core.tid == -1 ? 1 : (x)->b->core.tid - (p)->b->core.tid ) );
+	if (cmp >= 0) cnt += ((p)->kavl_head.p[(0)]? (p)->kavl_head.p[(0)]->kavl_head.size : 0) + 1;
+	if (cmp < 0) p = p->kavl_head.p[0];
+	else if (cmp > 0) p = p->kavl_head.p[1];
+	else break;
+    }
+    if (cnt_) *cnt_ = cnt;
+    return (sorted_bam_queue*)p;
+}
+
+static inline sorted_bam_queue *kavl_rotate1_QB(sorted_bam_queue *p, int dir) {
+    int opp = 1 - dir;
+    sorted_bam_queue *q = p->kavl_head.p[opp];
+    unsigned size_p = p->kavl_head.size;
+    p->kavl_head.size -= q->kavl_head.size - ((q)->kavl_head.p[(dir)]? (q)->kavl_head.p[(dir)]->kavl_head.size : 0);
+    q->kavl_head.size = size_p;
+    p->kavl_head.p[opp] = q->kavl_head.p[dir];
+    q->kavl_head.p[dir] = p;
+    return q;
+}
+
+static inline sorted_bam_queue *kavl_rotate2_QB(sorted_bam_queue *p, int dir) {
+    int b1, opp = 1 - dir;
+    sorted_bam_queue *q = p->kavl_head.p[opp], *r = q->kavl_head.p[dir];
+    unsigned size_x_dir = ((r)->kavl_head.p[(dir)]? (r)->kavl_head.p[(dir)]->kavl_head.size : 0);
+    r->kavl_head.size = p->kavl_head.size;
+    p->kavl_head.size -= q->kavl_head.size - size_x_dir;
+    q->kavl_head.size -= size_x_dir + 1;
+    p->kavl_head.p[opp] = r->kavl_head.p[dir];
+    r->kavl_head.p[dir] = p;
+    q->kavl_head.p[dir] = r->kavl_head.p[opp];
+    r->kavl_head.p[opp] = q;
+    b1 = dir == 0? +1 : -1;
+    if (r->kavl_head.balance == b1) q->kavl_head.balance = 0, p->kavl_head.balance = -b1;
+    else if (r->kavl_head.balance == 0) q->kavl_head.balance = p->kavl_head.balance = 0;
+    else q->kavl_head.balance = b1, p->kavl_head.balance = 0;
+    r->kavl_head.balance = 0;
+    return r;
+}
+
+sorted_bam_queue *kavl_insert_QB(sorted_bam_queue **root_, sorted_bam_queue *x, unsigned *cnt_) {
+    unsigned char stack[64];
+    sorted_bam_queue *path[64];
+    sorted_bam_queue *bp, *bq;
+    sorted_bam_queue *p, *q, *r = 0;
+    int i, which = 0, top, b1, path_len;
+    unsigned cnt = 0;
+    bp = *root_, bq = 0;
+    for (p = bp, q = bq, top = path_len = 0;
+	 p;
+	 q = p, p = p->kavl_head.p[which]) {
+	int cmp;
+	cmp = ( (x)->b->core.tid == (p)->b->core.tid ? (x)->b->core.pos - (p)->b->core.pos : ((p)->b->core.tid == -1 ? 1 : (x)->b->core.tid - (p)->b->core.tid ) );
+	if (cmp >= 0) cnt += ((p)->kavl_head.p[(0)]? (p)->kavl_head.p[(0)]->kavl_head.size : 0) + 1;
+	if (cmp == 0) {
+	    if (cnt_) *cnt_ = cnt;
+	    return p;
+	}
+
+	if (p->kavl_head.balance != 0) bq = q, bp = p, top = 0;
+	stack[top++] = which = (cmp > 0);
+	path[path_len++] = p;
+    }
+
+    if (cnt_) *cnt_ = cnt;
+    x->kavl_head.balance = 0, x->kavl_head.size = 1, x->kavl_head.p[0] = x->kavl_head.p[1] = 0;
+    if (q == 0) *root_ = x;
+    else q->kavl_head.p[which] = x;
+    if (bp == 0) return x;
+    for (i = 0; i < path_len; ++i)
+	++path[i]->kavl_head.size;
+    for (p = bp, top = 0; p != x; p = p->kavl_head.p[stack[top]], ++top)
+	if (stack[top] == 0)
+	    --p->kavl_head.balance;
+	else
+	    ++p->kavl_head.balance;
+
+    if (bp->kavl_head.balance > -2 && bp->kavl_head.balance < 2) return x;
+    which = (bp->kavl_head.balance < 0);
+    b1 = which == 0? +1 : -1;
+    q = bp->kavl_head.p[1 - which];
+    if (q->kavl_head.balance == b1) {
+	r = kavl_rotate1_QB(bp, which);
+	q->kavl_head.balance = bp->kavl_head.balance = 0;
+    }
+    else r = kavl_rotate2_QB(bp, which);
+    if (bq == 0) *root_ = r;
+    else bq->kavl_head.p[bp != bq->kavl_head.p[0]] = r;
+
+    return x;
+}
+
+sorted_bam_queue *kavl_erase_QB(sorted_bam_queue **root_, const sorted_bam_queue *x, unsigned *cnt_) {
+    sorted_bam_queue *p, *path[64], fake;
+    unsigned char dir[64];
+    int i, d = 0, cmp;
+    unsigned cnt = 0;
+    fake.kavl_head.p[0] = *root_, fake.kavl_head.p[1] = 0;
+    if (cnt_) *cnt_ = 0;
+    if (x) {
+	for (cmp = -1, p = &fake;
+	     cmp;
+	     cmp = ( (x)->b->core.tid == (p)->b->core.tid ? (x)->b->core.pos - (p)->b->core.pos : ((p)->b->core.tid == -1 ? 1 : (x)->b->core.tid - (p)->b->core.tid ) )) {
+	    int which = (cmp > 0);
+	    if (cmp > 0) cnt += ((p)->kavl_head.p[(0)]? (p)->kavl_head.p[(0)]->kavl_head.size : 0) + 1;
+	    dir[d] = which;
+	    path[d++] = p;
+	    p = p->kavl_head.p[which];
+	    if (p == 0) {
+		if (cnt_) *cnt_ = 0;
+		return 0;
+	    }
+	}
+	cnt += ((p)->kavl_head.p[(0)]? (p)->kavl_head.p[(0)]->kavl_head.size : 0) + 1;
+    }
+    else {
+	for (p = &fake, cnt = 1; p; p = p->kavl_head.p[0])
+	    dir[d] = 0, path[d++] = p;
+	p = path[--d];
+    }
+
+    if (cnt_) *cnt_ = cnt;
+    for (i = 1; i < d; ++i)
+	--path[i]->kavl_head.size;
+    if (p->kavl_head.p[1] == 0) {
+	path[d-1]->kavl_head.p[dir[d-1]] = p->kavl_head.p[0];
+    } else {
+	sorted_bam_queue *q = p->kavl_head.p[1];
+	if (q->kavl_head.p[0] == 0) {
+	    q->kavl_head.p[0] = p->kavl_head.p[0];
+	    q->kavl_head.balance = p->kavl_head.balance;
+	    path[d-1]->kavl_head.p[dir[d-1]] = q;
+	    path[d] = q, dir[d++] = 1;
+	    q->kavl_head.size = p->kavl_head.size - 1;
+	} else {
+	    sorted_bam_queue *r;
+	    int e = d++;
+	    for (; ; ) {
+		dir[d] = 0;
+		path[d++] = q;
+		r = q->kavl_head.p[0];
+		if (r->kavl_head.p[0] == 0) break;
+		q = r;
+	    }
+
+	    r->kavl_head.p[0] = p->kavl_head.p[0];
+	    q->kavl_head.p[0] = r->kavl_head.p[1];
+	    r->kavl_head.p[1] = p->kavl_head.p[1];
+	    r->kavl_head.balance = p->kavl_head.balance;
+	    path[e-1]->kavl_head.p[dir[e-1]] = r;
+	    path[e] = r, dir[e] = 1;
+	    for (i = e + 1; i < d; ++i)
+		--path[i]->kavl_head.size;
+	    r->kavl_head.size = p->kavl_head.size - 1;
+	}
+    }
+
+    while (--d > 0) {
+	sorted_bam_queue *q = path[d];
+	int which, other, b1 = 1, b2 = 2;
+	which = dir[d], other = 1 - which;
+	if (which) b1 = -b1, b2 = -b2;
+	q->kavl_head.balance += b1;
+	if (q->kavl_head.balance == b1) break;
+	else if (q->kavl_head.balance == b2) {
+	    sorted_bam_queue *r = q->kavl_head.p[other];
+	    if (r->kavl_head.balance == -b1) {
+		path[d-1]->kavl_head.p[dir[d-1]] = kavl_rotate2_QB(q, which);
+	    }
+	    else {
+		path[d-1]->kavl_head.p[dir[d-1]] = kavl_rotate1_QB(q, which);
+		if (r->kavl_head.balance == 0) {
+		    r->kavl_head.balance = -b1;
+		    q->kavl_head.balance = b1;
+		    break;
+		} else
+		    r->kavl_head.balance = q->kavl_head.balance = 0;
+	    }
+	}
+   
+    }
+    *root_ = fake.kavl_head.p[0];
+    return p;
+}
+
+struct kavl_itr_QB {
+    const sorted_bam_queue *stack[64], **top, *right;
+};
+
+void kavl_itr_first_QB(const sorted_bam_queue *root, struct kavl_itr_QB *itr) {
+    const sorted_bam_queue *p;
+    for (itr->top = itr->stack - 1, p = root;
+	 p;
+	 p = p->kavl_head.p[0])
+	*++itr->top = p;
+    itr->right = (*itr->top)->kavl_head.p[1];
+}
+
+int kavl_itr_find_QB(const sorted_bam_queue *root, const sorted_bam_queue *x, struct kavl_itr_QB *itr) {
+    const sorted_bam_queue *p = root;
+    itr->top = itr->stack - 1;
+    while (p != 0) {
+	int cmp;
+	cmp = ( (x)->b->core.tid == (p)->b->core.tid ? (x)->b->core.pos - (p)->b->core.pos : ((p)->b->core.tid == -1 ? 1 : (x)->b->core.tid - (p)->b->core.tid ) );
+	if (cmp < 0) *++itr->top = p, p = p->kavl_head.p[0];
+	else if (cmp > 0) p = p->kavl_head.p[1];
+	else break;
+    }
+
+    if (p) {
+	*++itr->top = p;
+	itr->right = p->kavl_head.p[1];
+	return 1;
+    } else if (itr->top >= itr->stack) {
+	itr->right = (*itr->top)->kavl_head.p[1];
+	return 0;
+    } else return 0;
+}
+
+int kavl_itr_next_QB(struct kavl_itr_QB *itr) {
+    for (;;) {
+	const sorted_bam_queue *p;
+	for (p = itr->right, --itr->top; p; p = p->kavl_head.p[0])
+	    *++itr->top = p;
+	if (itr->top < itr->stack) return 0;
+	itr->right = (*itr->top)->kavl_head.p[1];
+	return 1;
+    }
+}
+#endif
 
 typedef struct SAM_state {
     sam_hdr_t *h;
@@ -2272,13 +2535,21 @@ typedef struct SAM_state {
     enum sam_cmd command;
 
     // Record queue used during auto-split mode to maintain sort order
-    sorted_bam_queue *qb;
+    sorted_bam_queue *qb, *qb_tail;
     int unsorted;
     int32_t last_tid;
     hts_pos_t last_pos;
 
+    // TODO: add b_free list of bam1_t objects to avoid bam1_dup calls.
+    //bam1_t *b_free;
+
     // Pos of last record during reading.  Used when merging split-reads.
     hts_pos_t last_start;
+
+#ifdef SPLIT_FAST
+    // Name hash used for merging during read.
+    khash_t(s2b) *nameh;
+#endif
 
     // One of the E* errno codes
     int errcode;
@@ -3075,12 +3346,30 @@ static int append_bam(bam1_t *bdst, const bam1_t *bsrc) {
     return 0;
 }
 
+#if defined(SPLIT_FAST) && defined(KAVL_READ)
+static inline sorted_bam_queue *qb_lowest(SAM_state *fd) {
+    kavl_itr_t(QB) itr;
+    kavl_itr_first(QB, fd->qb, &itr);
+    return (sorted_bam_queue *)kavl_at(&itr);
+}
+#else
+static inline sorted_bam_queue *qb_lowest(SAM_state *fd) {
+//**    fprintf(stderr, "lowest=%p\t%.16s at %ld\n", fd->qb,
+//**            fd->qb?bam_get_qname(fd->qb->b) : "",
+//**            fd->qb?fd->qb->b->core.pos : -1);
+    return fd->qb;
+}
+#endif
+
+
 // Pop a completed read off the sorted_bam_queue
 static int sam_read1_pop(SAM_state *fd, sorted_bam_queue *qb, bam1_t *b) {
     if (!bam_copy1(b, qb->b))
         return -1;
 
-    if (b->core.flag & BAM_FSPLIT) {
+    int split = b->core.flag & BAM_FSPLIT;
+
+    if (split) {
         b->core.flag &= ~BAM_FSPLIT;
 
         uint8_t *tag;
@@ -3092,7 +3381,58 @@ static int sam_read1_pop(SAM_state *fd, sorted_bam_queue *qb, bam1_t *b) {
             bam_aux_del(b, tag);
     }
 
+#ifdef SPLIT_FAST
+    if (split) {
+        khiter_t k;
+        k = kh_get(s2b, fd->nameh, bam_get_qname(b));
+//**        fprintf(stderr, "Search %.16s at %ld => %d of %d\n",
+//**                bam_get_qname(b), b->core.pos, k, kh_end(fd->nameh));
+        assert(k != kh_end(fd->nameh)); // not in hash afterall!
+
+        // Asssumption: list of in-flight reads with the same name is small.
+        // qi == qb at end and ql->next == qb.
+        sorted_bam_queue *qi, *ql = NULL;
+        for (qi = kh_value(fd->nameh, k); qi; ql = qi, qi = qi->next_name)
+            if (qi == qb)
+                break;
+        assert(qi);
+
+        if (ql) {
+            // not first in hash chain, so unlink it
+            assert(ql->next_name == qb);
+            ql->next_name = qb->next_name;
+        } else {
+            if (qb->next_name)
+                // first item in a list
+                kh_value(fd->nameh, k) = qb->next_name;
+            else {
+                // only item, so delete from hash
+//**                fprintf(stderr, "Del %.16s from hash\n", bam_get_qname(b));
+                free((void *)kh_key(fd->nameh, k));
+                kh_del(s2b, fd->nameh, k);
+            }
+        }
+    }
+
+    // Also remove from the kavl tree.
+    // Assumption: sam_read1_pop only ever called with qb as the lowest
+    // pos value in the tree.
+#ifdef KAVL_READ
+//**    fprintf(stderr, "Del %.16s from kavl\n", bam_get_qname(qb_lowest(fd)->b));
+    kavl_erase_first(QB, &fd->qb);
+#else
+//**    fprintf(stderr, "Del %.16s from fd->qb (next %.16s)\n",
+//**            bam_get_qname(fd->qb->b),
+//**            fd->qb->next ? bam_get_qname(fd->qb->next->b): "");
+    //assert(fd->qb == qi);
+    fd->qb = fd->qb->next;
+    if (!fd->qb) fd->qb_tail = NULL;
+#endif
+
+#else
+    // unlink from fd->qb linked list
     fd->qb = qb->next;
+#endif
 
     bam_destroy1(qb->b); // FIXME: Keep queue of bam structs to reuse.
     free(qb);            // FIXME: reuse this later.
@@ -3106,8 +3446,26 @@ static int sam_read1_pop(SAM_state *fd, sorted_bam_queue *qb, bam1_t *b) {
     }
     fd->last_pos = b->core.pos;
     fd->last_tid = b->core.tid;
+//**            fprintf(stderr, "Return2 read %.16s at %ld\n", bam_get_qname(b), b->core.pos);
     return 0;
 }
+
+#if 0
+void validate_khash(khash_t(s2b) *h) {
+    khiter_t k;
+    for (k = kh_begin(h); k != kh_end(h); k++) {
+        if (!kh_exist(h, k))
+            continue;
+
+        sorted_bam_queue *kb = kh_value(h, k);
+        const char *key = kh_key(h, k);
+        while (kb) {
+            assert(strcmp(key, bam_get_qname(kb->b)) == 0);
+            kb = kb->next_name;
+        }
+    }
+}
+#endif
 
 // Returns 0 on success,
 //        -1 on EOF,
@@ -3119,7 +3477,7 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
     // TODO: make a mem pool of bam1_t and sorted_bam_queue structs.
 
     SAM_state *fd = (SAM_state *)fp->state;
-    sorted_bam_queue *qb = fd ? fd->qb : NULL;
+    sorted_bam_queue *qb = fd ? qb_lowest(fd) : NULL;
 
  next_rec:
     if (qb && qb->end < fd->last_start) {
@@ -3127,6 +3485,7 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         return sam_read1_pop(fd, qb, b);
     }
 
+    // FIXME: move to sam_read1_core to simplify this function.
     switch (fp->format.format) {
     case bam: {
         int r = bam_read1(fp->fp.bgzf, b);
@@ -3139,7 +3498,7 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         }
         if (r >= 0 && fd)
             fd->last_start = b->core.pos; // FIXME: check tid
-        else if (r < 0 && fd && fd->qb) {
+        else if (r < 0 && fd && qb) {
             fd->last_start = HTS_POS_MAX;
             goto next_rec;
         } else if (r < 0) {
@@ -3262,17 +3621,33 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
         return ret;
 
     if (!(b->core.flag & BAM_FSPLIT)) {
+//**            fprintf(stderr, "Short read %.16s at %ld, qb=%p,%p\n", bam_get_qname(b), b->core.pos, qb, fd->qb);
         // Short read
-        if (!qb)
+        if (!qb) {
+//**            fprintf(stderr, "Return1 read %.16s at %ld\n", bam_get_qname(b), b->core.pos);
             return 0;
+        }
         else {
-            // queue append.  Inefficient in basic struct implementation
+#ifdef KAVL_READ
+            sorted_bam_queue *qi = calloc(1, sizeof(*qi));
+            qi->b = bam_dup1(b);
+            qi->end = bam_endpos(b);
+            kavl_insert(QB, &fd->qb, qi, NULL);
+                   
+#else
+//            // queue append.  Inefficient in basic struct implementation
             sorted_bam_queue *qi;
+#ifdef SPLIT_FAST
+            qi = fd->qb_tail;
+#else
             for (qi = qb; qi->next; qi = qi->next)
                 ;
-            qi->next = calloc(1, sizeof(*qi));
+#endif
+            fd->qb_tail = qi->next = calloc(1, sizeof(*qi));
             qi->next->b = bam_dup1(b);
             qi->next->end = bam_endpos(b);
+//**            fprintf(stderr, "Append short %.16s at %ld to list\n", bam_get_qname(b), b->core.pos);
+#endif
         }
     } else {
         // Long read
@@ -3282,6 +3657,147 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
                 return -1;
         }
 
+#ifdef SPLIT_FAST
+        // Hash lookup to get a linked list of records with the same name
+        if (!fd->nameh) {
+            fd->nameh = kh_init(s2b);
+            if (!fd->nameh)
+                return -1;
+        }
+        khiter_t k;
+
+        // We have multiple sorted_bam_queues per read name (which
+        // for simplicity aren't actually sorted - we should rename
+        // the type to be just bam_queue).
+        sorted_bam_queue *qi;
+        int qlen = 0;
+        int kret;
+//        {
+//            int z = kh_get(s2b, fd->nameh, bam_get_qname(b));
+//            fprintf(stderr, "1: z=%d/%d del=%d\n",
+//                    z, kh_end(fd->nameh),
+//                    z == kh_end(fd->nameh)?-1:__ac_isdel(fd->nameh->flags, z));
+//        }
+
+        //validate_khash(fd->nameh);
+        k = kh_put(s2b, fd->nameh, bam_get_qname(b), &kret);
+//**        fprintf(stderr, "Put %.16s @ %ld => %d\n", bam_get_qname(b), b->core.pos, kret);
+//
+//        {
+//            int z = kh_get(s2b, fd->nameh, bam_get_qname(b));
+//            int d = z == kh_end(fd->nameh)?-1:__ac_isdel(fd->nameh->flags, z);
+//            fprintf(stderr, "2: z=%d/%d del=%d\n",
+//                    z, kh_end(fd->nameh), d);
+//        }
+        // kret 0: key present,  1: key never used,  2: previously deleted
+
+        // Three possibilities:
+        // kret == 1: no read with this name
+        // kret == 2: name previously existed, but since deleted
+        // kret == 0: name found, but note it may be another original
+        //            fragment so check HN and treat as unfound if no match).
+        //
+        // Turn these into simple found (qi) and not found (!qi).
+        if (kret != 0) {
+            qi = NULL;
+            //kh_value(fd->nameh, k) = NULL; validate_khash(fd->nameh);
+        } else {
+            // Present, but there may be multiple in-flight reads for the
+            // same name.
+            //validate_khash(fd->nameh);
+            for (qi = kh_value(fd->nameh, k); qi; qi = qi->next_name) {
+                qlen++;
+                if (!(qi->b->core.flag == b->core.flag && 
+                      qi->b->core.tid == b->core.tid))
+                    continue;
+
+                if (!(b->core.flag & (BAM_FSECONDARY | BAM_FSUPPLEMENTARY)))
+                    break; // found it
+
+                // Non-primary reads need to disambiguate via HN tag
+                uint8_t *a1, *a2;
+                if ((a1 = bam_aux_get(b, "HN")) &&
+                    (a2 = bam_aux_get(qi->b, "HN"))) {
+                    if (bam_aux2i(a1) == bam_aux2i(a2))
+                        break;
+                    // otherwise this is a distinct read
+                } else {
+                    break;
+                }
+            }
+            //validate_khash(fd->nameh);
+        }
+
+        if (!qi) {
+            // Not found, so add to kavl-tree and hash.
+            if (!(qi = calloc(1, sizeof(*qi))))
+                return -1;
+
+            if (kret == 0)
+                // hash list exists, but different frag chain
+                qi->next_name = kh_value(fd->nameh, k);
+
+            uint8_t *tag = bam_aux_get(b, "HE");
+            if (!tag) {
+                hts_log_error("No HE tag for split-read %.*s",
+                              b->core.l_qname, bam_get_qname(b));
+                return -1;
+            }
+            qi->b = bam_dup1(b); // FIXME: dup with known final length
+                                 // to avoid reallocs later
+            qi->end = bam_aux2i(tag);
+//**            fprintf(stderr, "Add %.16s at %ld to hash\n", bam_get_qname(qi->b), qi->b->core.pos);
+            //validate_khash(fd->nameh);
+            kh_key(fd->nameh, k) = strdup(bam_get_qname(qi->b));
+            kh_value(fd->nameh, k) = qi;
+
+            // CHECK: are all keys a linked list with the same name?
+            //validate_khash(fd->nameh);
+
+//            fprintf(stderr, "Add %.16s to kavl\n", bam_get_qname(qi->b));
+#ifdef KAVL_READ
+            sorted_bam_queue *kb = kavl_insert(QB, &fd->qb, qi, NULL);
+//            fprintf(stderr, "%p %p\t%.16s\n", kb, qi, bam_get_qname(qi->b));
+            // If kb != qi then there is a read at this tid/pos already.
+            // In this case append to the list (kb->next = qi).
+            //
+            // We also need to update kavl_erase to remove, either unlinking
+            // from a list or deleting head node and reinserting next one
+            // along.
+#else
+            {
+                if (fd->qb) {
+#ifdef SPLIT_FAST
+                    fd->qb_tail->next = qi;
+                    fd->qb_tail = qi;
+#else
+                    sorted_bam_queue *bq = fd->qb;
+                    while (bq && bq->next)
+                        bq = bq->next;
+                    assert(bq->next == NULL);
+                    bq->next = qi;
+#endif
+//**                    fprintf(stderr, "Append %.16s to fd->qb\n",
+//**                            bam_get_qname(qi->b));
+                } else {
+//**                    fprintf(stderr, "Init fd->qb to %.16s\n",
+//**                            bam_get_qname(qi->b));
+                    fd->qb = fd->qb_tail = qi;
+                }
+            }
+#endif
+        } else {
+            // Otherwise append to our previously found bam object
+            append_bam(qi->b, b);
+            if (fd->unsorted && qi != qb) {
+                // We have another read in the queue so push it out
+                // now as sort order is irrelevant.
+
+                if(0/*tmp*/) return sam_read1_pop(fd, qb, b);
+            }
+        }
+        qb = fd ? qb_lowest(fd) : NULL;
+#else
         // See if read is in queue already.
         // FIXME: use a search method, eg khash
         sorted_bam_queue *qi, *qi_last = NULL;
@@ -3318,7 +3834,7 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
                 if(0/*tmp*/) return sam_read1_pop(fd, qb, b);
             }
         } else {
-            fprintf(stderr, "qlen=%d\n", qlen);
+            //fprintf(stderr, "qlen=%d\n", qlen);
             // Not found, append to queue.
             // Inefficient in basic struct implementation
             // Need b_last pointer
@@ -3339,6 +3855,7 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
             if (!qb)
                 qb = fd->qb = qi;
         }
+#endif
     }
 
     goto next_rec;
@@ -3757,16 +4274,18 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
     if (!b && !state->qb)  // no record => flush
         return 0;
 
-    if (state->unsorted == 0 && state->last_pos  > -9
-        && ( (b->core.tid != -1 && state->last_tid == -1)
-             || (b->core.tid == state->last_tid
-                 && b->core.pos < state->last_pos))) {
-        fprintf(stderr, "Set unsorted mode\n");
-        state->unsorted = 1;
+    if (b) {
+        if (state->unsorted == 0 && state->last_pos  > -9
+            && ( (b->core.tid != -1 && state->last_tid == -1)
+                 || (b->core.tid == state->last_tid
+                     && b->core.pos < state->last_pos))) {
+            fprintf(stderr, "Set unsorted mode\n");
+            state->unsorted = 1;
+        }
+        if (!(b->core.flag & BAM_FSPLIT))
+            state->last_pos = b->core.pos;
+        state->last_tid = b->core.tid;
     }
-    if (!(b->core.flag & BAM_FSPLIT))
-        state->last_pos = b->core.pos;
-    state->last_tid = b->core.tid;
 
     // Unsorted: just emit as we go.
     if (state->unsorted) {
