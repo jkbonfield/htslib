@@ -3358,6 +3358,22 @@ int hts_itr_next(BGZF *fp, hts_itr_t *iter, void *r, void *data)
     // A NULL iter->off should always be accompanied by iter->finished.
     assert(iter->off != NULL);
     for (;;) {
+        // FIXME: with split reads this can terminate early.
+        // Our entire read isn't within this region so it's not been returned
+        // yet.
+        // We either need to expose the iter->end to sam_read1 so it can
+        // track that it won't get called again and return the partial reads,
+        // or this needs to keep repeating until the actual start pos of a
+        // read is out of bounds.  Maybe via a flag to indicate more
+        // partials to come?
+        //
+        // Ideally the sam_read1_pop would just return the partials
+        // without reading needless data.  BUT: what if we have
+        // off1 (gap) off2 and have fragmented reads that span off1 to off2?
+        // Do we return two reads, or merge with a hole?
+        //
+        // Could maybe pass back meta-data in the previous read to indicate
+        // more are coming, but this is all void*.
         if (iter->curr_off == 0 || iter->curr_off >= iter->off[iter->i].v) { // then jump to the next chunk
             if (iter->i == iter->n_off - 1) { ret = -1; break; } // no more chunks
             if (iter->i < 0 || iter->off[iter->i].v != iter->off[iter->i+1].u) { // not adjacent chunks; then seek
@@ -3371,6 +3387,7 @@ int hts_itr_next(BGZF *fp, hts_itr_t *iter, void *r, void *data)
             }
             ++iter->i;
         }
+        end = iter->off[iter->i].v; // hint to readrec func where end is.
         if ((ret = iter->readrec(fp, data, r, &tid, &beg, &end)) >= 0) {
             iter->curr_off = bgzf_tell(fp);
             if (tid != iter->tid || beg >= iter->end) { // no need to proceed

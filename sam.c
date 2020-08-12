@@ -952,12 +952,16 @@ int sam_idx_save(htsFile *fp) {
     return 0;
 }
 
+static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
+                          hts_pos_t file_end);
+
 static int sam_readrec(BGZF *ignored, void *fpv, void *bv, int *tid, hts_pos_t *beg, hts_pos_t *end)
 {
     htsFile *fp = (htsFile *)fpv;
     bam1_t *b = bv;
     fp->line.l = 0;
-    int ret = sam_read1(fp, fp->bam_header, b);
+    //int ret = sam_read1(fp, fp->bam_header, b); 
+    int ret = sam_read1_frag(fp, fp->bam_header, b, *end);
     if (ret >= 0) {
         *tid = b->core.tid;
         *beg = b->core.pos;
@@ -3467,10 +3471,12 @@ void validate_khash(khash_t(s2b) *h) {
 }
 #endif
 
+
 // Returns 0 on success,
 //        -1 on EOF,
 //       <-1 on error
-int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
+static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
+                          hts_pos_t file_end)
 {
     int ret = 0;
 
@@ -3480,7 +3486,19 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
     sorted_bam_queue *qb = fd ? qb_lowest(fd) : NULL;
 
  next_rec:
-    if (qb && qb->end < fd->last_start) {
+    if (qb && (qb->end < fd->last_start
+               || (file_end && qb->end >= file_end))) {
+        // Still not sufficient.  I expect it was the previous read that
+        // pushed it beyond.  The only hack I can think of atm is to
+        // recognise when the last read makes bgzf_tell >= file_end,
+        // and then artificially do a seek back 1 byte to fool it
+        // (iff we have partial reads) and set a flag that drains this
+        // queue here.  The last one of these will then read 1 byte
+        // forward to simulate bgzf_tell being at the proper end.
+        //
+        // Ugh!
+        fprintf(stderr, "Pop with cond %d\n", file_end && qb->end >= file_end);
+
         // non-empty queue and current queue head is ready to go.
         return sam_read1_pop(fd, qb, b);
     }
@@ -3489,6 +3507,8 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
     switch (fp->format.format) {
     case bam: {
         int r = bam_read1(fp->fp.bgzf, b);
+        fprintf(stderr, "Bam_read1 => tell %ld, itr end %ld\n",
+                bgzf_tell(fp->fp.bgzf), file_end);
         if (h && r >= 0) {
             if (b->core.tid  >= h->n_targets || b->core.tid  < -1 ||
                 b->core.mtid >= h->n_targets || b->core.mtid < -1) {
@@ -3859,6 +3879,10 @@ int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b)
     }
 
     goto next_rec;
+}
+
+int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b) {
+    return sam_read1_frag(fp, h, b, 0);
 }
 
 static int sam_format1_append(const bam_hdr_t *h, const bam1_t *b, kstring_t *str)
