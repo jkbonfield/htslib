@@ -953,7 +953,8 @@ int sam_idx_save(htsFile *fp) {
 }
 
 static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
-                          hts_pos_t file_end);
+                          int32_t tid, hts_pos_t reg_end,
+                          int64_t file_end);
 
 static int sam_readrec(BGZF *ignored, void *fpv, void *bv, int *tid, hts_pos_t *beg, hts_pos_t *end)
 {
@@ -961,7 +962,7 @@ static int sam_readrec(BGZF *ignored, void *fpv, void *bv, int *tid, hts_pos_t *
     bam1_t *b = bv;
     fp->line.l = 0;
     //int ret = sam_read1(fp, fp->bam_header, b); 
-    int ret = sam_read1_frag(fp, fp->bam_header, b, *end);
+    int ret = sam_read1_frag(fp, fp->bam_header, b, *tid, *beg, *end);
     if (ret >= 0) {
         *tid = b->core.tid;
         *beg = b->core.pos;
@@ -2549,6 +2550,9 @@ typedef struct SAM_state {
 
     // Pos of last record during reading.  Used when merging split-reads.
     hts_pos_t last_start;
+    // Bgzf_tell is used for iterators to know when to seek.
+    // We may hijack this to permit flushing of partial reads
+    int64_t saved_bgzf_tell;
 
 #ifdef SPLIT_FAST
     // Name hash used for merging during read.
@@ -3476,7 +3480,8 @@ void validate_khash(khash_t(s2b) *h) {
 //        -1 on EOF,
 //       <-1 on error
 static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
-                          hts_pos_t file_end)
+                          int32_t tid, hts_pos_t reg_end,
+                          int64_t file_end)
 {
     int ret = 0;
 
@@ -3486,18 +3491,20 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
     sorted_bam_queue *qb = fd ? qb_lowest(fd) : NULL;
 
  next_rec:
-    if (qb && (qb->end < fd->last_start
-               || (file_end && qb->end >= file_end))) {
-        // Still not sufficient.  I expect it was the previous read that
-        // pushed it beyond.  The only hack I can think of atm is to
-        // recognise when the last read makes bgzf_tell >= file_end,
-        // and then artificially do a seek back 1 byte to fool it
-        // (iff we have partial reads) and set a flag that drains this
-        // queue here.  The last one of these will then read 1 byte
-        // forward to simulate bgzf_tell being at the proper end.
-        //
-        // Ugh!
-        fprintf(stderr, "Pop with cond %d\n", file_end && qb->end >= file_end);
+    if (qb && (qb->end < fd->last_start || fd->saved_bgzf_tell
+               || (reg_end && qb->b->core.tid == tid && bam_endpos(qb->b) > reg_end))) {
+        // If last one and we've saved the bgzf tell, reset it back
+        // so we hit end of region after returning this record.
+        if (fd->saved_bgzf_tell
+            && (!qb->next || qb->next->end >= fd->last_start)) {
+            fprintf(stderr, "Resetting tell to %ld\n", fd->saved_bgzf_tell);
+            fp->fp.bgzf->block_address = fd->saved_bgzf_tell >> 16;
+            fp->fp.bgzf->block_offset  = fd->saved_bgzf_tell & 0xffff;
+        }
+
+//        fprintf(stderr, "Pop %s at %ld..%ld; r-end %ld; saved %ld\n",
+//                bam_get_qname(qb->b), qb->b->core.pos, bam_endpos(qb->b),
+//                reg_end, fd->saved_bgzf_tell);
 
         // non-empty queue and current queue head is ready to go.
         return sam_read1_pop(fd, qb, b);
@@ -3506,9 +3513,28 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
     // FIXME: move to sam_read1_core to simplify this function.
     switch (fp->format.format) {
     case bam: {
+        int64_t last_bgzf_tell = bgzf_tell(fp->fp.bgzf);
         int r = bam_read1(fp->fp.bgzf, b);
-        fprintf(stderr, "Bam_read1 => tell %ld, itr end %ld\n",
-                bgzf_tell(fp->fp.bgzf), file_end);
+        if (file_end) {
+            int64_t curr_tell = bgzf_tell(fp->fp.bgzf);
+            if (curr_tell >= file_end
+                && fd && (fd->qb || b->core.flag & BAM_FSPLIT)) {
+                // make bgzf_tell return last_bgzf_tell
+                fd->saved_bgzf_tell = curr_tell;
+                fp->fp.bgzf->block_address = last_bgzf_tell >> 16;
+                fp->fp.bgzf->block_offset  = last_bgzf_tell & 0xffff;
+                // Why does this never trigger?
+                // I assume it is because start pos goes beyond it first?
+                fprintf(stderr, "Going beyond end; changing tell from %ld to %ld\n", curr_tell, last_bgzf_tell);
+            } else if (fd) {
+                fd->saved_bgzf_tell = 0;
+            }
+        } else if (fd) {
+            fd->saved_bgzf_tell = 0;
+        }
+
+//        fprintf(stderr, "Bam_read1 %s at %ld => tell %ld, itr end %ld\n",
+//                bam_get_qname(b), b->core.pos, bgzf_tell(fp->fp.bgzf), file_end);
         if (h && r >= 0) {
             if (b->core.tid  >= h->n_targets || b->core.tid  < -1 ||
                 b->core.mtid >= h->n_targets || b->core.mtid < -1) {
@@ -3882,7 +3908,7 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
 }
 
 int sam_read1(htsFile *fp, sam_hdr_t *h, bam1_t *b) {
-    return sam_read1_frag(fp, h, b, 0);
+    return sam_read1_frag(fp, h, b, 0, 0, 0);
 }
 
 static int sam_format1_append(const bam_hdr_t *h, const bam1_t *b, kstring_t *str)

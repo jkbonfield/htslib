@@ -3387,6 +3387,8 @@ int hts_itr_next(BGZF *fp, hts_itr_t *iter, void *r, void *data)
             }
             ++iter->i;
         }
+        tid = iter->tid; // -1 if want full reads.
+        beg = iter->end;
         end = iter->off[iter->i].v; // hint to readrec func where end is.
         if ((ret = iter->readrec(fp, data, r, &tid, &beg, &end)) >= 0) {
             iter->curr_off = bgzf_tell(fp);
