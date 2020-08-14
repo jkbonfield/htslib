@@ -2541,7 +2541,8 @@ typedef struct SAM_state {
     enum sam_cmd command;
 
     // Record queue used during auto-split mode to maintain sort order
-    sorted_bam_queue *qb, *qb_tail;
+    sorted_bam_queue *qb, *qb_tail, *qb_free;
+    bam1_t *bam_free;
     int unsorted;
     int32_t last_tid;
     hts_pos_t last_pos;
@@ -2694,6 +2695,13 @@ int sam_state_destroy(htsFile *fp) {
         // before sam_close without triggering decode errors
         // in the background threads.
         bam_hdr_destroy(fd->h);
+    }
+
+    sorted_bam_queue *p = fd->qb_free, *q;
+    while (p) {
+        q = p->next;
+        free(p);
+        p = q;
     }
 
     free(fp->state);
@@ -4138,24 +4146,6 @@ void dump_cig(char *msg, int ql, int rl, uint32_t *cig, int ncig) {
     fprintf(stderr, "\n");
 }
 
-// Taken from samtools/padding.c.
-// FIXME: We should make this an official part of the API and remove from there.
-static void replace_cigar(bam1_t *b, int n, uint32_t *cigar)
-{
-    if (n != b->core.n_cigar) {
-        int o = b->core.l_qname + b->core.n_cigar * 4;
-        if (b->l_data + (n - b->core.n_cigar) * 4 > b->m_data) {
-            b->m_data = b->l_data + (n - b->core.n_cigar) * 4;
-            kroundup32(b->m_data);
-            b->data = (uint8_t*)realloc(b->data, b->m_data);
-        }
-        memmove(b->data + b->core.l_qname + n * 4, b->data + o, b->l_data - o);
-        memcpy(b->data + b->core.l_qname, cigar, n * 4);
-        b->l_data += (n - b->core.n_cigar) * 4;
-        b->core.n_cigar = n;
-    } else memcpy(b->data + b->core.l_qname, cigar, n * 4);
-}
-
 /*
  * Create a new BAM record based off 'b', using bases from >=qs to <qe and
  * cigar cig/ncig.
@@ -4164,24 +4154,42 @@ bam1_t *bam_frag(const bam1_t *b, int qs, int qe, uint32_t *cig, int ncig) {
     return NULL; // TODO
 }
 
-// FIXME: make this more efficient, rather than lots of reallocating
-static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *cig,
-                       uint32_t qstart, uint32_t l_qseq,
-                       uint32_t hit_start, uint32_t hit_end, uint32_t hit_num) {
-    bam1_t *sub_b = bam_dup1(b); // FIXME error checking
-    replace_cigar(sub_b, ncig, cig); // NB: can grow too
 
+static bam1_t *sub_bam(const bam1_t *b, int32_t pos,
+                       uint32_t ncig, uint32_t *cig,
+                       uint32_t qstart, uint32_t l_qseq,
+                       uint32_t hit_start, uint32_t hit_end,
+                       uint32_t hit_num) {
+    // Compute expected size of sub_b->data;
+    bam1_t *sub_b = bam_init1();
+    if (!sub_b)
+        return NULL;
+    sub_b->m_data = b->core.l_qname+4 + ncig*4 +
+        (l_qseq+1)/2 + l_qseq +
+        bam_get_l_aux(b) +
+        3*(2+1+4); // HS, HE, HN tags
+    sub_b->data = malloc(sub_b->m_data);
+    if (!sub_b->data) {
+        free(sub_b);
+        return NULL;
+    }
+
+    // Core
+    memcpy(&sub_b->core, &b->core, sizeof(b->core));
     sub_b->core.pos = b->core.pos + pos;
     sub_b->core.flag |= BAM_FSPLIT;
+    sub_b->core.l_qseq = l_qseq;
 
-    // FIXME: do cigar swapping here too to avoid excessive realloc / moving.
-    uint8_t *seq  = bam_get_seq(sub_b), *cp = seq;
-    uint8_t *qual = bam_get_qual(sub_b);
-    uint8_t *aux  = bam_get_aux(sub_b);
-    uint32_t l_aux = bam_get_l_aux(sub_b);
+    // Name
+    memcpy(bam_get_qname(sub_b), bam_get_qname(b), sub_b->core.l_qname);
 
-    // Seq is nasty due to nibble hackery.
+    // Cigar
+    memcpy(bam_get_cigar(sub_b), cig, ncig * sizeof(*cig));
+    sub_b->core.n_cigar = ncig;
+
+    // Seq; is nasty due to nibble hackery.
     // FIXME: make this more efficient
+    uint8_t *seq  = bam_get_seq(b), *cp = bam_get_seq(sub_b);
     int i;
     for (i = 0; i < (l_qseq&~1); i+=2)
         *cp++ = (bam_seqi(seq, qstart+i)<<4) | (bam_seqi(seq, qstart+i+1)<<0);
@@ -4189,13 +4197,13 @@ static bam1_t *sub_bam(const bam1_t *b, int32_t pos, uint32_t ncig, uint32_t *ci
         *cp++ = (bam_seqi(seq, qstart+i)<<4);
     sub_b->core.l_qseq = l_qseq;
 
-    memmove(cp, qual+qstart, l_qseq);
-    cp += l_qseq;
+    // Qual
+    memcpy(bam_get_qual(sub_b), bam_get_qual(b)+qstart, l_qseq);
 
-    memmove(cp, aux, l_aux);
-    cp += l_aux;
-
-    sub_b->l_data = cp - (uint8_t *)sub_b->data;
+    // Aux
+    memcpy(bam_get_aux(sub_b), bam_get_aux(b), bam_get_l_aux(b));
+    sub_b->l_data = bam_get_aux(sub_b) + bam_get_l_aux(b)
+        - (uint8_t *)sub_b->data;
 
     // Add HS (hit-start) and HE (hit-end) tags.
     if (bam_aux_update_int(sub_b, "HS", hit_start) < 0)
@@ -4317,6 +4325,23 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len,
     return blist;
 }
 
+static sorted_bam_queue *bq_alloc(SAM_state *fd) {
+    sorted_bam_queue *q;
+    if (fd->qb_free) {
+        q = fd->qb_free;
+        fd->qb_free = q->next;
+        return q;
+    }
+
+    q = malloc(sizeof(*q));
+    return q;
+}
+
+static void bq_free(SAM_state *fd, sorted_bam_queue *bq) {
+    bq->next = fd->qb_free;
+    fd->qb_free = bq;
+}
+
 static int sam_write1_(htsFile *fp, const sam_hdr_t *h, const bam1_t *b);
 
 int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
@@ -4368,7 +4393,7 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
     }
 
     if (b) { // push a new record
-        qb = malloc(sizeof(*qb));
+        qb = bq_alloc(state);
         if (!qb)
             return -1;
         qb->b = b;
@@ -4389,7 +4414,7 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
                 bam_destroy1(qi->b); // FIXME: reuse
                 sorted_bam_queue *tmp = qi;
                 qi = qi->next;
-                free(tmp); // FIXME: reuse
+                bq_free(state, tmp);
             } while (qi);
         } while (kavl_itr_next(QB, &itr));
     }
@@ -4417,7 +4442,7 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
                     next = p->next;
                     if (p != q) {
                         bam_destroy1(p->b); // FIXME: reuse
-                        free(p); // FIXME: reuse
+                        bq_free(state, p);
                     }
                     p = next;
                 } while (p);
@@ -4425,7 +4450,7 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
                 kavl_erase(QB, &state->qb, q, NULL); // unlink from AVL
                 kavl_itr_first(QB, state->qb, &itr); // NB: accesses q / q->b
                 bam_destroy1(q->b); // FIXME: reuse
-                free(q); // FIXME: reuse
+                bq_free(state, q);
             }
         }
 
