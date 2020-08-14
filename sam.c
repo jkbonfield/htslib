@@ -2249,6 +2249,7 @@ enum sam_cmd {
 };
 
 #define SPLIT_FAST
+#define KAVL_WRITE
 //#define KAVL_READ // NB: differs / buggy
 
 // Noddy for now
@@ -2257,7 +2258,7 @@ typedef struct sorted_bam_queue {
     struct sorted_bam_queue *next;
     bam1_t *b;
     hts_pos_t end;
-#ifdef KAVL_READ
+#if defined(KAVL_READ) || defined(KAVL_WRITE)
     KAVL_HEAD(struct sorted_bam_queue) kavl_head;
 #endif
 } sorted_bam_queue;
@@ -2275,7 +2276,7 @@ typedef struct sorted_bam_queue {
 #ifdef SPLIT_FAST
 //KHASH_DECLARE(s2b, kh_cstr_t, sorted_bam_queue *)
 KHASH_MAP_INIT_STR(s2b, struct sorted_bam_queue *)
-#ifdef KAVL_READ
+#if defined(KAVL_READ) || defined(KAVL_WRITE)
 KAVL_INIT(QB, sorted_bam_queue, kavl_head, bam_queue_cmp);
 #endif
 #endif
@@ -3361,12 +3362,22 @@ static inline sorted_bam_queue *qb_lowest(SAM_state *fd) {
     return (sorted_bam_queue *)kavl_at(&itr);
 }
 #else
+#ifdef KAVL_WRITE
+static inline sorted_bam_queue *qb_lowest(SAM_state *fd) {
+    if (!fd->qb)
+        return NULL;
+    kavl_itr_t(QB) itr;
+    kavl_itr_first(QB, fd->qb, &itr);
+    return (sorted_bam_queue *)kavl_at(&itr);
+}
+#else
 static inline sorted_bam_queue *qb_lowest(SAM_state *fd) {
 //**    fprintf(stderr, "lowest=%p\t%.16s at %ld\n", fd->qb,
 //**            fd->qb?bam_get_qname(fd->qb->b) : "",
 //**            fd->qb?fd->qb->b->core.pos : -1);
     return fd->qb;
 }
+#endif
 #endif
 
 
@@ -4365,6 +4376,69 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
     }
 
     // Sorted: insert in order.
+#ifdef KAVL_WRITE
+    qi = qb_lowest(state);
+    if (qi && (!b || qi->b->core.tid != b->core.tid)) {
+        // final flush for this tid
+        kavl_itr_t(QB) itr;
+        kavl_itr_first(QB, state->qb, &itr);
+        do {
+            qi = (sorted_bam_queue *)kavl_at(&itr);
+            do {
+                r |= sam_write1_(fp, state->h, qi->b);
+                bam_destroy1(qi->b); // FIXME: reuse
+                sorted_bam_queue *tmp = qi;
+                qi = qi->next;
+                free(tmp); // FIXME: reuse
+            } while (qi);
+        } while (kavl_itr_next(QB, &itr));
+    }
+
+    if (b) {
+        // Pull records off the start of the sorted bam queue until
+        // we're beyond fpos.
+        //
+        // TODO: we only need to do this for the first read
+        // in each split set.  Eg if adding at P, P+100, P+200, P+300
+        // then we have one round of pulling off front and 4 rounds of
+        // kavl_insertion.
+        if (qb_lowest(state)) {
+            kavl_itr_t(QB) itr;
+            kavl_itr_first(QB, state->qb, &itr);
+            sorted_bam_queue *q;
+            while ((q = (sorted_bam_queue *)kavl_at(&itr))) {
+                if (q->b->core.pos >= fpos)
+                    break;
+
+                sorted_bam_queue *p = q, *next;
+                // Loop through all recs with this position
+                do {
+                    r |= sam_write1_(fp, state->h, p->b);
+                    next = p->next;
+                    if (p != q) {
+                        bam_destroy1(p->b); // FIXME: reuse
+                        free(p); // FIXME: reuse
+                    }
+                    p = next;
+                } while (p);
+
+                kavl_erase(QB, &state->qb, q, NULL); // unlink from AVL
+                kavl_itr_first(QB, state->qb, &itr); // NB: accesses q / q->b
+                bam_destroy1(q->b); // FIXME: reuse
+                free(q); // FIXME: reuse
+            }
+        }
+
+        // Add this new read
+        sorted_bam_queue *kb = kavl_insert(QB, &state->qb, qb, NULL);
+        if (kb != qb) {
+            // Already present at this pos.  Add to end of linked list instead.
+            while (kb->next)
+                kb = kb->next;
+            kb->next = qb;
+        }
+    }
+#else
     if (b && !state->qb) {
         state->qb = qb;
     } else {
@@ -4398,6 +4472,9 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
                 state->qb = qi = qn;
             }
 
+            // Bulk of CPU time is here.  This needs tree.
+            // Remaining time is excess malloc/free rather than
+            // object reuse.
             for (; qi; last = qi, qi = qi->next) {
                 if (qi->b->core.pos > b->core.pos)
                     break;
@@ -4410,6 +4487,7 @@ int sam_write1_push(htsFile *fp, const bam_hdr_t *h, bam1_t *b, int32_t fpos) {
             }
         }
     }
+#endif
 
     return r;
 }
