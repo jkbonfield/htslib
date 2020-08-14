@@ -44,6 +44,7 @@ sub check {
     return unless (/(?:\.[ch]|\.pl|\.sh)$/);
 
     my %allow_tabs = map { ("$root/$_", 1) } (
+'kavl.h',
 'kfunc.c',
 'knetfile.c',
 'kstring.c',

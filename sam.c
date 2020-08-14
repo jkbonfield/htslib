@@ -961,7 +961,7 @@ static int sam_readrec(BGZF *ignored, void *fpv, void *bv, int *tid, hts_pos_t *
     htsFile *fp = (htsFile *)fpv;
     bam1_t *b = bv;
     fp->line.l = 0;
-    //int ret = sam_read1(fp, fp->bam_header, b); 
+    //int ret = sam_read1(fp, fp->bam_header, b);
     int ret = sam_read1_frag(fp, fp->bam_header, b, *tid, *beg, *end);
     if (ret >= 0) {
         *tid = b->core.tid;
@@ -2250,7 +2250,6 @@ enum sam_cmd {
 
 #define SPLIT_FAST
 #define KAVL_WRITE
-//#define KAVL_READ // NB: differs / buggy
 
 // Noddy for now
 typedef struct sorted_bam_queue {
@@ -2258,7 +2257,7 @@ typedef struct sorted_bam_queue {
     struct sorted_bam_queue *next;
     bam1_t *b;
     hts_pos_t end;
-#if defined(KAVL_READ) || defined(KAVL_WRITE)
+#if defined(KAVL_WRITE)
     KAVL_HEAD(struct sorted_bam_queue) kavl_head;
 #endif
 } sorted_bam_queue;
@@ -2274,248 +2273,11 @@ typedef struct sorted_bam_queue {
     )
 
 #ifdef SPLIT_FAST
-//KHASH_DECLARE(s2b, kh_cstr_t, sorted_bam_queue *)
 KHASH_MAP_INIT_STR(s2b, struct sorted_bam_queue *)
-#if defined(KAVL_READ) || defined(KAVL_WRITE)
-KAVL_INIT(QB, sorted_bam_queue, kavl_head, bam_queue_cmp);
+#if defined(KAVL_WRITE)
+KAVL_INIT(QB, sorted_bam_queue, kavl_head, bam_queue_cmp)
+// #include "_kavl_QB.h" // debug version
 #endif
-#endif
-
-#if 0
-sorted_bam_queue *kavl_find_QB(const sorted_bam_queue *root, const sorted_bam_queue *x, unsigned *cnt_) {
-    const sorted_bam_queue *p = root;
-    unsigned cnt = 0;
-    while (p != 0) {
-	int cmp;
-	cmp = ( (x)->b->core.tid == (p)->b->core.tid ? (x)->b->core.pos - (p)->b->core.pos : ((p)->b->core.tid == -1 ? 1 : (x)->b->core.tid - (p)->b->core.tid ) );
-	if (cmp >= 0) cnt += ((p)->kavl_head.p[(0)]? (p)->kavl_head.p[(0)]->kavl_head.size : 0) + 1;
-	if (cmp < 0) p = p->kavl_head.p[0];
-	else if (cmp > 0) p = p->kavl_head.p[1];
-	else break;
-    }
-    if (cnt_) *cnt_ = cnt;
-    return (sorted_bam_queue*)p;
-}
-
-static inline sorted_bam_queue *kavl_rotate1_QB(sorted_bam_queue *p, int dir) {
-    int opp = 1 - dir;
-    sorted_bam_queue *q = p->kavl_head.p[opp];
-    unsigned size_p = p->kavl_head.size;
-    p->kavl_head.size -= q->kavl_head.size - ((q)->kavl_head.p[(dir)]? (q)->kavl_head.p[(dir)]->kavl_head.size : 0);
-    q->kavl_head.size = size_p;
-    p->kavl_head.p[opp] = q->kavl_head.p[dir];
-    q->kavl_head.p[dir] = p;
-    return q;
-}
-
-static inline sorted_bam_queue *kavl_rotate2_QB(sorted_bam_queue *p, int dir) {
-    int b1, opp = 1 - dir;
-    sorted_bam_queue *q = p->kavl_head.p[opp], *r = q->kavl_head.p[dir];
-    unsigned size_x_dir = ((r)->kavl_head.p[(dir)]? (r)->kavl_head.p[(dir)]->kavl_head.size : 0);
-    r->kavl_head.size = p->kavl_head.size;
-    p->kavl_head.size -= q->kavl_head.size - size_x_dir;
-    q->kavl_head.size -= size_x_dir + 1;
-    p->kavl_head.p[opp] = r->kavl_head.p[dir];
-    r->kavl_head.p[dir] = p;
-    q->kavl_head.p[dir] = r->kavl_head.p[opp];
-    r->kavl_head.p[opp] = q;
-    b1 = dir == 0? +1 : -1;
-    if (r->kavl_head.balance == b1) q->kavl_head.balance = 0, p->kavl_head.balance = -b1;
-    else if (r->kavl_head.balance == 0) q->kavl_head.balance = p->kavl_head.balance = 0;
-    else q->kavl_head.balance = b1, p->kavl_head.balance = 0;
-    r->kavl_head.balance = 0;
-    return r;
-}
-
-sorted_bam_queue *kavl_insert_QB(sorted_bam_queue **root_, sorted_bam_queue *x, unsigned *cnt_) {
-    unsigned char stack[64];
-    sorted_bam_queue *path[64];
-    sorted_bam_queue *bp, *bq;
-    sorted_bam_queue *p, *q, *r = 0;
-    int i, which = 0, top, b1, path_len;
-    unsigned cnt = 0;
-    bp = *root_, bq = 0;
-    for (p = bp, q = bq, top = path_len = 0;
-	 p;
-	 q = p, p = p->kavl_head.p[which]) {
-	int cmp;
-	cmp = ( (x)->b->core.tid == (p)->b->core.tid ? (x)->b->core.pos - (p)->b->core.pos : ((p)->b->core.tid == -1 ? 1 : (x)->b->core.tid - (p)->b->core.tid ) );
-	if (cmp >= 0) cnt += ((p)->kavl_head.p[(0)]? (p)->kavl_head.p[(0)]->kavl_head.size : 0) + 1;
-	if (cmp == 0) {
-	    if (cnt_) *cnt_ = cnt;
-	    return p;
-	}
-
-	if (p->kavl_head.balance != 0) bq = q, bp = p, top = 0;
-	stack[top++] = which = (cmp > 0);
-	path[path_len++] = p;
-    }
-
-    if (cnt_) *cnt_ = cnt;
-    x->kavl_head.balance = 0, x->kavl_head.size = 1, x->kavl_head.p[0] = x->kavl_head.p[1] = 0;
-    if (q == 0) *root_ = x;
-    else q->kavl_head.p[which] = x;
-    if (bp == 0) return x;
-    for (i = 0; i < path_len; ++i)
-	++path[i]->kavl_head.size;
-    for (p = bp, top = 0; p != x; p = p->kavl_head.p[stack[top]], ++top)
-	if (stack[top] == 0)
-	    --p->kavl_head.balance;
-	else
-	    ++p->kavl_head.balance;
-
-    if (bp->kavl_head.balance > -2 && bp->kavl_head.balance < 2) return x;
-    which = (bp->kavl_head.balance < 0);
-    b1 = which == 0? +1 : -1;
-    q = bp->kavl_head.p[1 - which];
-    if (q->kavl_head.balance == b1) {
-	r = kavl_rotate1_QB(bp, which);
-	q->kavl_head.balance = bp->kavl_head.balance = 0;
-    }
-    else r = kavl_rotate2_QB(bp, which);
-    if (bq == 0) *root_ = r;
-    else bq->kavl_head.p[bp != bq->kavl_head.p[0]] = r;
-
-    return x;
-}
-
-sorted_bam_queue *kavl_erase_QB(sorted_bam_queue **root_, const sorted_bam_queue *x, unsigned *cnt_) {
-    sorted_bam_queue *p, *path[64], fake;
-    unsigned char dir[64];
-    int i, d = 0, cmp;
-    unsigned cnt = 0;
-    fake.kavl_head.p[0] = *root_, fake.kavl_head.p[1] = 0;
-    if (cnt_) *cnt_ = 0;
-    if (x) {
-	for (cmp = -1, p = &fake;
-	     cmp;
-	     cmp = ( (x)->b->core.tid == (p)->b->core.tid ? (x)->b->core.pos - (p)->b->core.pos : ((p)->b->core.tid == -1 ? 1 : (x)->b->core.tid - (p)->b->core.tid ) )) {
-	    int which = (cmp > 0);
-	    if (cmp > 0) cnt += ((p)->kavl_head.p[(0)]? (p)->kavl_head.p[(0)]->kavl_head.size : 0) + 1;
-	    dir[d] = which;
-	    path[d++] = p;
-	    p = p->kavl_head.p[which];
-	    if (p == 0) {
-		if (cnt_) *cnt_ = 0;
-		return 0;
-	    }
-	}
-	cnt += ((p)->kavl_head.p[(0)]? (p)->kavl_head.p[(0)]->kavl_head.size : 0) + 1;
-    }
-    else {
-	for (p = &fake, cnt = 1; p; p = p->kavl_head.p[0])
-	    dir[d] = 0, path[d++] = p;
-	p = path[--d];
-    }
-
-    if (cnt_) *cnt_ = cnt;
-    for (i = 1; i < d; ++i)
-	--path[i]->kavl_head.size;
-    if (p->kavl_head.p[1] == 0) {
-	path[d-1]->kavl_head.p[dir[d-1]] = p->kavl_head.p[0];
-    } else {
-	sorted_bam_queue *q = p->kavl_head.p[1];
-	if (q->kavl_head.p[0] == 0) {
-	    q->kavl_head.p[0] = p->kavl_head.p[0];
-	    q->kavl_head.balance = p->kavl_head.balance;
-	    path[d-1]->kavl_head.p[dir[d-1]] = q;
-	    path[d] = q, dir[d++] = 1;
-	    q->kavl_head.size = p->kavl_head.size - 1;
-	} else {
-	    sorted_bam_queue *r;
-	    int e = d++;
-	    for (; ; ) {
-		dir[d] = 0;
-		path[d++] = q;
-		r = q->kavl_head.p[0];
-		if (r->kavl_head.p[0] == 0) break;
-		q = r;
-	    }
-
-	    r->kavl_head.p[0] = p->kavl_head.p[0];
-	    q->kavl_head.p[0] = r->kavl_head.p[1];
-	    r->kavl_head.p[1] = p->kavl_head.p[1];
-	    r->kavl_head.balance = p->kavl_head.balance;
-	    path[e-1]->kavl_head.p[dir[e-1]] = r;
-	    path[e] = r, dir[e] = 1;
-	    for (i = e + 1; i < d; ++i)
-		--path[i]->kavl_head.size;
-	    r->kavl_head.size = p->kavl_head.size - 1;
-	}
-    }
-
-    while (--d > 0) {
-	sorted_bam_queue *q = path[d];
-	int which, other, b1 = 1, b2 = 2;
-	which = dir[d], other = 1 - which;
-	if (which) b1 = -b1, b2 = -b2;
-	q->kavl_head.balance += b1;
-	if (q->kavl_head.balance == b1) break;
-	else if (q->kavl_head.balance == b2) {
-	    sorted_bam_queue *r = q->kavl_head.p[other];
-	    if (r->kavl_head.balance == -b1) {
-		path[d-1]->kavl_head.p[dir[d-1]] = kavl_rotate2_QB(q, which);
-	    }
-	    else {
-		path[d-1]->kavl_head.p[dir[d-1]] = kavl_rotate1_QB(q, which);
-		if (r->kavl_head.balance == 0) {
-		    r->kavl_head.balance = -b1;
-		    q->kavl_head.balance = b1;
-		    break;
-		} else
-		    r->kavl_head.balance = q->kavl_head.balance = 0;
-	    }
-	}
-   
-    }
-    *root_ = fake.kavl_head.p[0];
-    return p;
-}
-
-struct kavl_itr_QB {
-    const sorted_bam_queue *stack[64], **top, *right;
-};
-
-void kavl_itr_first_QB(const sorted_bam_queue *root, struct kavl_itr_QB *itr) {
-    const sorted_bam_queue *p;
-    for (itr->top = itr->stack - 1, p = root;
-	 p;
-	 p = p->kavl_head.p[0])
-	*++itr->top = p;
-    itr->right = (*itr->top)->kavl_head.p[1];
-}
-
-int kavl_itr_find_QB(const sorted_bam_queue *root, const sorted_bam_queue *x, struct kavl_itr_QB *itr) {
-    const sorted_bam_queue *p = root;
-    itr->top = itr->stack - 1;
-    while (p != 0) {
-	int cmp;
-	cmp = ( (x)->b->core.tid == (p)->b->core.tid ? (x)->b->core.pos - (p)->b->core.pos : ((p)->b->core.tid == -1 ? 1 : (x)->b->core.tid - (p)->b->core.tid ) );
-	if (cmp < 0) *++itr->top = p, p = p->kavl_head.p[0];
-	else if (cmp > 0) p = p->kavl_head.p[1];
-	else break;
-    }
-
-    if (p) {
-	*++itr->top = p;
-	itr->right = p->kavl_head.p[1];
-	return 1;
-    } else if (itr->top >= itr->stack) {
-	itr->right = (*itr->top)->kavl_head.p[1];
-	return 0;
-    } else return 0;
-}
-
-int kavl_itr_next_QB(struct kavl_itr_QB *itr) {
-    for (;;) {
-	const sorted_bam_queue *p;
-	for (p = itr->right, --itr->top; p; p = p->kavl_head.p[0])
-	    *++itr->top = p;
-	if (itr->top < itr->stack) return 0;
-	itr->right = (*itr->top)->kavl_head.p[1];
-	return 1;
-    }
-}
 #endif
 
 typedef struct SAM_state {
@@ -3283,14 +3045,14 @@ static int append_bam(bam1_t *bdst, const bam1_t *bsrc) {
 
     uint32_t aux_len = bam_get_l_aux(bdst);
     uint32_t old_len = bdst->l_data;
-    uint32_t new_len = 
+    uint32_t new_len =
           bdst->core.l_qname         // name
         + cigar_len * 4              // cigar
         + (bdst_qlen+bsrc_qlen+1)/2  // seq
         + bdst_qlen + bsrc_qlen      // qual
         + aux_len;                   // aux
     assert(new_len >= old_len);
- 
+
     if (bdst->m_data < new_len) {
         uint8_t *d = realloc(bdst->data, new_len);
         if (!d)
@@ -3363,13 +3125,6 @@ static int append_bam(bam1_t *bdst, const bam1_t *bsrc) {
     return 0;
 }
 
-#if defined(SPLIT_FAST) && defined(KAVL_READ)
-static inline sorted_bam_queue *qb_lowest(SAM_state *fd) {
-    kavl_itr_t(QB) itr;
-    kavl_itr_first(QB, fd->qb, &itr);
-    return (sorted_bam_queue *)kavl_at(&itr);
-}
-#else
 #ifdef KAVL_WRITE
 static inline sorted_bam_queue *qb_lowest(SAM_state *fd) {
     if (!fd->qb)
@@ -3385,7 +3140,6 @@ static inline sorted_bam_queue *qb_lowest(SAM_state *fd) {
 //**            fd->qb?fd->qb->b->core.pos : -1);
     return fd->qb;
 }
-#endif
 #endif
 
 
@@ -3444,17 +3198,12 @@ static int sam_read1_pop(SAM_state *fd, sorted_bam_queue *qb, bam1_t *b) {
     // Also remove from the kavl tree.
     // Assumption: sam_read1_pop only ever called with qb as the lowest
     // pos value in the tree.
-#ifdef KAVL_READ
-//**    fprintf(stderr, "Del %.16s from kavl\n", bam_get_qname(qb_lowest(fd)->b));
-    kavl_erase_first(QB, &fd->qb);
-#else
 //**    fprintf(stderr, "Del %.16s from fd->qb (next %.16s)\n",
 //**            bam_get_qname(fd->qb->b),
 //**            fd->qb->next ? bam_get_qname(fd->qb->next->b): "");
     //assert(fd->qb == qi);
     fd->qb = fd->qb->next;
     if (!fd->qb) fd->qb_tail = NULL;
-#endif
 
 #else
     // unlink from fd->qb linked list
@@ -3516,7 +3265,6 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
         // so we hit end of region after returning this record.
         if (fd->saved_bgzf_tell
             && (!qb->next || qb->next->end >= fd->last_start)) {
-            fprintf(stderr, "Resetting tell to %ld\n", fd->saved_bgzf_tell);
             fp->fp.bgzf->block_address = fd->saved_bgzf_tell >> 16;
             fp->fp.bgzf->block_offset  = fd->saved_bgzf_tell & 0xffff;
         }
@@ -3544,7 +3292,6 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
                 fp->fp.bgzf->block_offset  = last_bgzf_tell & 0xffff;
                 // Why does this never trigger?
                 // I assume it is because start pos goes beyond it first?
-                fprintf(stderr, "Going beyond end; changing tell from %ld to %ld\n", curr_tell, last_bgzf_tell);
             } else if (fd) {
                 fd->saved_bgzf_tell = 0;
             }
@@ -3693,13 +3440,6 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
             return 0;
         }
         else {
-#ifdef KAVL_READ
-            sorted_bam_queue *qi = calloc(1, sizeof(*qi));
-            qi->b = bam_dup1(b);
-            qi->end = bam_endpos(b);
-            kavl_insert(QB, &fd->qb, qi, NULL);
-                   
-#else
 //            // queue append.  Inefficient in basic struct implementation
             sorted_bam_queue *qi;
 #ifdef SPLIT_FAST
@@ -3712,7 +3452,6 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
             qi->next->b = bam_dup1(b);
             qi->next->end = bam_endpos(b);
 //**            fprintf(stderr, "Append short %.16s at %ld to list\n", bam_get_qname(b), b->core.pos);
-#endif
         }
     } else {
         // Long read
@@ -3772,7 +3511,7 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
             //validate_khash(fd->nameh);
             for (qi = kh_value(fd->nameh, k); qi; qi = qi->next_name) {
                 qlen++;
-                if (!(qi->b->core.flag == b->core.flag && 
+                if (!(qi->b->core.flag == b->core.flag &&
                       qi->b->core.tid == b->core.tid))
                     continue;
 
@@ -3820,16 +3559,6 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
             //validate_khash(fd->nameh);
 
 //            fprintf(stderr, "Add %.16s to kavl\n", bam_get_qname(qi->b));
-#ifdef KAVL_READ
-            sorted_bam_queue *kb = kavl_insert(QB, &fd->qb, qi, NULL);
-//            fprintf(stderr, "%p %p\t%.16s\n", kb, qi, bam_get_qname(qi->b));
-            // If kb != qi then there is a read at this tid/pos already.
-            // In this case append to the list (kb->next = qi).
-            //
-            // We also need to update kavl_erase to remove, either unlinking
-            // from a list or deleting head node and reinserting next one
-            // along.
-#else
             {
                 if (fd->qb) {
 #ifdef SPLIT_FAST
@@ -3850,7 +3579,6 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
                     fd->qb = fd->qb_tail = qi;
                 }
             }
-#endif
         } else {
             // Otherwise append to our previously found bam object
             append_bam(qi->b, b);
@@ -3870,7 +3598,7 @@ static int sam_read1_frag(htsFile *fp, sam_hdr_t *h, bam1_t *b,
         for (qi = qb; qi; qi_last = qi, qi = qi->next) {
             qlen++;
             if (strcmp(bam_get_qname(qi->b), bam_get_qname(b)) == 0 &&
-                qi->b->core.flag == b->core.flag && 
+                qi->b->core.flag == b->core.flag &&
                 qi->b->core.tid == b->core.tid) {
                 // && check qb->end+1 matches b->pos?
                 if (b->core.flag & (BAM_FSECONDARY | BAM_FSUPPLEMENTARY)) {
@@ -4270,7 +3998,7 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len,
                 (qe-qs >= max_seq_len ||
                  re-rs >= max_seq_len)) {
                 // new fragment from >=qs to <qe
-            
+
                 // CREATE HERE.
                 if (b->core.l_qseq > qe)
                     // FIXME: needs to be ref coords...
@@ -4299,7 +4027,7 @@ static bam1_t **split_bam(const bam1_t *b, int *nb, unsigned int max_seq_len,
         //dump_cig("  frag", qe-qs, re-rs, new_cig, new_ncig);
         blist[n] = sub_bam(b, rs, new_ncig, new_cig, qs, qe-qs,
                            start_pos, end_pos, hit_num);
-        
+
         n++;
         new_ncig = 0;
 
