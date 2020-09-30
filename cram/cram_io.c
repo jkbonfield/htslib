@@ -73,11 +73,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "os.h"
 #include "../htslib/hts.h"
 #include "open_trace_file.h"
-#include "../htscodecs/rANS_static.h"
-#include "../htscodecs/rANS_static4x16.h"
-#include "../htscodecs/arith_dynamic.h"
-#include "../htscodecs/tokenise_name3.h"
-#include "../htscodecs/fqzcomp_qual.h"
+#include "htscodecs/rANS_static.h"
+#include "htscodecs/rANS_static4x16.h"
+#include "htscodecs/arith_dynamic.h"
+#include "htscodecs/tokenise_name3.h"
+#include "htscodecs/fqzcomp_qual.h"
 
 //#define REF_DEBUG
 
