@@ -816,7 +816,7 @@ static int cram_compress_slice(cram_fd *fd, cram_container *c, cram_slice *s) {
             method_arith |=
                   (1<<ARITH_PR64)  | (1<<ARITH_PR9)
                 | (1<<ARITH_PR128) | (1<<ARITH_PR129)
-                | (1<<ARITH_PR192) | (1<<ARITH_PR193);
+                | (1<<ARITH_PR192) | (1u<<ARITH_PR193);
     }
     if (fd->use_arith && v31_or_above) {
         methodF |= method_arith;

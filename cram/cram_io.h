@@ -246,8 +246,10 @@ static inline int block_append(cram_block *b, const void *s, size_t len) {
     if (block_grow(b, len) < 0)
         return -1;
 
-    memcpy(BLOCK_END(b), s, len);
-    BLOCK_SIZE(b) += len;
+    if (len) {
+        memcpy(BLOCK_END(b), s, len);
+        BLOCK_SIZE(b) += len;
+    }
 
     return 0;
 }

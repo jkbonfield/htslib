@@ -645,10 +645,12 @@ static int64_t safe_itf8_get(char **cp, const char *endp, int *err) {
         return ((up[0]<<16) | (up[1]<< 8) |  up[2])             & 0x1fffff;
     } else if (up[0] < 0xf0) {
         (*cp)+=4;
-        return ((up[0]<<24) | (up[1]<<16) | (up[2]<<8) | up[3]) & 0x0fffffff;
+        uint32_t uv = (((uint32_t)up[0]<<24) | (up[1]<<16) | (up[2]<<8) | up[3]) & 0x0fffffff;
+        return (int32_t)uv;
     } else {
         (*cp)+=5;
-        return ((up[0] & 0x0f)<<28) | (up[1]<<20) | (up[2]<<12) | (up[3]<<4) | (up[4] & 0x0f);
+        uint32_t uv = (((uint32_t)up[0] & 0x0f)<<28) | (up[1]<<20) | (up[2]<<12) | (up[3]<<4) | (up[4] & 0x0f);
+        return (int32_t)uv;
     }
 }
 
@@ -1956,7 +1958,7 @@ int cram_compress_block2(cram_fd *fd, cram_slice *s,
             }
 
             // Compress this block using the best method
-            if (unpackable) {
+            if (unpackable && CRAM_MAJOR_VERS(fd->version) > 3) {
                 // No point trying bit-pack if 17+ symbols.
                 if (method & (1<<RANS_PR128))
                     method = (method|(1<<RANS_PR0))&~(1<<RANS_PR128);
@@ -1973,8 +1975,8 @@ int cram_compress_block2(cram_fd *fd, cram_slice *s,
                     method = (method|(1<<ARITH_PR1))&~(1<<ARITH_PR129);
                 if (method & (1<<ARITH_PR192))
                     method = (method|(1<<ARITH_PR64))&~(1<<ARITH_PR192);
-                if (method & (1<<ARITH_PR193))
-                    method = (method|(1<<ARITH_PR64)|(1<<ARITH_PR1))&~(1<<ARITH_PR193);
+                if (method & (1u<<ARITH_PR193))
+                    method = (method|(1<<ARITH_PR64)|(1<<ARITH_PR1))&~(1u<<ARITH_PR193);
             }
 
             // Libdeflate doesn't have a Z_RLE strategy.
@@ -1988,7 +1990,7 @@ int cram_compress_block2(cram_fd *fd, cram_slice *s,
             pthread_mutex_unlock(&fd->metrics_lock);
 
             for (m = 0; m < CRAM_MAX_METHOD; m++) {
-                if (method & (1<<m)) {
+                if (method & (1u<<m)) {
                     int lvl = level;
                     switch (m) {
                     case GZIP:     strat = Z_FILTERED; break;
@@ -2099,7 +2101,7 @@ int cram_compress_block2(cram_fd *fd, cram_slice *s,
                 } // else cost is ignored
 
                 for (m = 0; m < CRAM_MAX_METHOD; m++) {
-                    if ((!metrics->sz[m]) || (!(method & (1<<m))))
+                    if ((!metrics->sz[m]) || (!(method & (1u<<m))))
                         continue;
 
                     if (best_sz > metrics->sz[m])
@@ -2143,12 +2145,12 @@ int cram_compress_block2(cram_fd *fd, cram_slice *s,
                         int mul = 1+(fd->level>=7);
                         if (++metrics->cnt[m] >= MAXFAILS*mul &&
                             (metrics->extra[m] += r) >= MAXDELTA*mul)
-                            method &= ~(1<<m);
+                            method &= ~(1u<<m);
 
                         // Special case for fqzcomp as it rarely changes
                         if (m == FQZ || m == FQZ_b || m == FQZ_c || m == FQZ_d) {
                             if (metrics->sz[m] > best_sz)
-                                method &= ~(1<<m);
+                                method &= ~(1u<<m);
                         }
                     }
                 }
