@@ -182,7 +182,7 @@ arm_ubuntu_task:
 macosx_task:
   name: macosx + clang
   macos_instance:
-    image: ghcr.io/cirruslabs/macos-ventura-base:latest
+    image: ghcr.io/cirruslabs/macos-ventura-xcode:14
 
   environment:
     CC: clang
