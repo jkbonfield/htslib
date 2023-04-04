@@ -1,6 +1,55 @@
 Noteworthy changes in release a.b
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+The primary reason for this point release is fixing a CRAM index-query
+bug and making the CRAM 3.1 specification official (removing the
+warning message).  Other bug fixes that have occurred since 1.17 have
+also been included.
+
+Updates:
+
+* Using CRAM 3.1 no longer gives a warning about the specification
+  being draft.  Note CRAM 3.0 is still the default output format.
+  (PR#1583)
+
+* Replaced use of sprintf with snprintf, to silence potential warnings
+  from Apple's compilers and those who implement similar checks.
+  (PR#1594, fixes #1586. Reported by Oleksii Nikolaienko)
+
+Bug fixes:
+
+* Fix a major CRAM index querying bug where one container has start
+  and end coordinates entirely contained within a previous container.
+  This would occasionally miss data, and sometimes return much more
+  than required.  When triggered, this could also read beyond the
+  ends of an index array.  The bug affected versions 1.11 to 1.17,
+  although the change in 1.11 was fixing multi-threaded index queries.
+  (PR#1574. Fixes #1569, samtools/samtools#1808, samtools/samtools#1819.
+  Reported by @xuxif and Jens Reeder)
+
+* Htscodecs SIMD code now works with Apple multiarch binaries.
+  (PR#1587, HTSlib fix for samtools/htscodecs#76. Reported by John Marshall)
+
+* Fix crypt4gh redirection so it works in conjunction with non-file
+  IO, such as using htsget. (PR#1577)
+
+* Improve error checking for the VCF POS column, when facing invalid
+  data. (PR#1575, replaces #1570 originally reported and fixed
+  by Colin Nolan.)
+
+* Improved error checking on VCF indexing to validate the data is BGZF
+  compressed. (PR#1581)
+
+* Improve portability of "expr" usage in version.sh.
+  (PR#1593, fixes #1592.  Reported by John Marshall)
+
+* Backport attractivechaos/klib#78 (by Pall Melsted) to HTSlib.
+  (PR#1582, fixes #1579.  Reported by Goran Vinterhalter)
+
+* Remove a compilation warning on systems with newer libcurl releases.
+  (PR#1572)
+
+
 Noteworthy changes in release 1.17 (21st February 2023)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
