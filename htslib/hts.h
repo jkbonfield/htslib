@@ -36,6 +36,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include "hts_log.h"
 #include "kstring.h"
 #include "kroundup.h"
+#include "bgzf2.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -253,6 +254,7 @@ typedef struct htsFile {
         BGZF *bgzf;
         struct cram_fd *cram;
         struct hFILE *hfile;
+        bgzf2 *bgzf2;
     } fp;
     void *state;  // format specific state information
     htsFormat format;
