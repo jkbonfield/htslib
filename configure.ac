@@ -33,6 +33,7 @@ m4_include([m4/hts_prog_cc_warnings.m4])
 m4_include([m4/hts_check_compile_flags_needed.m4])
 m4_include([m4/hts_hide_dynamic_syms.m4])
 m4_include([m4/pkg.m4])
+m4_include([m4/ax_with_zstd.m4])
 
 dnl Copyright notice to be copied into the generated configure script
 AC_COPYRIGHT([Portions copyright (C) 2020-2021 Genome Research Ltd.
@@ -218,6 +219,9 @@ AC_ARG_WITH([libdeflate],
   [AS_HELP_STRING([--with-libdeflate],
                   [use libdeflate for faster crc and deflate algorithms])],
   [], [with_libdeflate=check])
+
+
+AX_WITH_ZSTD
 
 AC_ARG_WITH([plugin-dir],
   [AS_HELP_STRING([--with-plugin-dir=DIR],
