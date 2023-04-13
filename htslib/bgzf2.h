@@ -82,6 +82,7 @@ typedef struct {
 
 #define BGZF2_DEFAULT_BLOCK_SIZE 256000
 #define BGZF2_DEFAULT_LEVEL 5
+#define BGZF2_MAX_BLOCK_SIZE (1<<30)
 
 /*
  * Opens a bgzf2 file 'fn' for read ("r") or write ("w", or "w1" to "w19").
