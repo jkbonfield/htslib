@@ -130,6 +130,12 @@ int main(int argc, char **argv) {
                 blk_size <<= 20;
             else if (*unit == 'g' || *unit == 'G')
                 blk_size <<= 30;
+
+            if (blk_size > BGZF2_MAX_BLOCK_SIZE) {
+                fprintf(stderr, "Block size is too large, limit is %d bytes\n",
+                        BGZF2_MAX_BLOCK_SIZE);
+                return 1;
+            }
             break;
         }
         case '0': case '1': case '2': case '3': case '4':
