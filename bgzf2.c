@@ -529,3 +529,141 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
 
     return decoded;
 }
+
+/*
+ * Loads a seekable index from a bgzf2 file.
+ *
+ * Returns 0 on success,
+ *        -1 on error,
+ *        -2 on non-seekable stream.
+ *        -3 if no index found.
+ */
+int load_seekable_index(bgzf2 *fp) {
+    // Look for and validate index footer
+    off_t off = hseek(fp->hfp, -9, SEEK_END);
+    if (off < 0)
+	return -1 - (errno == ESPIPE);
+
+    char footer[9];
+    if (9 != hread(fp->hfp, footer, 9))
+	return -1;
+
+    if (le_to_u32(footer+5) != 0x8F92EAB1 || (footer[4] & 0x7C != 0))
+	return -3;
+    int has_chksum = footer[4] & 0x80;
+
+    // Read entire index frame
+    uint32_t nframes = le_to_u32(footer);
+    size_t sz = 9 + nframes*4*(2+has_chksum) + 8;
+    off = hseek(fp->hfp, -sz, SEEK_END);
+    if (off < 0)
+	return -1;
+
+    bgzf2_index_t *idx = NULL;
+    char *buf = malloc(sz);
+    if (!buf)
+	return -1;
+
+    if (sz != hread(fp->hfp, buf, sz))
+	goto err;
+    if (le_to_u32(buf) != 0x184D2A5E)
+	return -3;
+    if (le_to_u32(buf+4) != sz-8)
+	return -3;
+
+    // Decode index
+    fp->index = idx = malloc(nframes * sizeof(*idx));
+    fp->nindex = fp->aindex = nframes;
+    if (!idx)
+	goto err;
+
+    uint32_t i;
+    uint64_t pos = 0, cpos = 0;
+    char *idxp = buf + 8;
+    for (i = 0; i < nframes; i++) {
+	idx[i].pos    = pos;
+	idx[i].cpos   = cpos;
+	idx[i].comp   = le_to_u32(idxp);
+	idx[i].uncomp = le_to_u32(idxp+4);
+	idxp += 4*(2+has_chksum);
+	pos += idx[i].uncomp;
+	cpos += idx[i].comp;
+    }
+
+    // rewind
+    if (hseek(fp->hfp, 0, SEEK_SET) < 0)
+	goto err;
+
+    free(buf);
+    return 0;
+
+ err:
+    free(buf);
+    free(idx);
+    return -1;
+}
+
+/*
+ * Binary search the index for the first block that covers uncompressed
+ * position upos.  If the index has pzstd skippable frames, we point to
+ * that element.  This ensures we know the size of the next data container.
+ *
+ * Returns an index entry on success,
+ *         NULL on failure (errno==ERANGE if beyond end of file)
+ */
+bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos) {
+    int idx_start = 0;
+    int idx_end = fp->nindex;
+    bgzf2_index_t *idx = fp->index;
+
+    while (idx_start < idx_end) {
+	int mid = (idx_start + idx_end) / 2;
+	if (upos < idx[mid].pos)
+	    idx_end = mid;
+	else if (upos >= idx[mid].pos + idx[mid].uncomp)
+	    idx_start = mid;
+	else {
+	    idx_start = mid;
+	    break;
+	}
+    }
+
+//    fprintf(stderr, "Found %ld at %d: %ld + %ld\n",
+//	    (long)upos, idx_start, idx[idx_start].pos, idx[idx_start].uncomp);
+
+    // Skip back including skippable frames
+    while (idx_start > 0 && idx[idx_start-1].uncomp == 0)
+	idx_start--;
+
+    return &idx[idx_start];
+}
+
+/*
+ * Seeks to uncompressed position upos in a bgzf file opened for read.
+ *
+ * Returns 0 on success,
+ *        -1 on failure
+ *
+ * TODO: consider "whence" and returning off_t, like lseek?
+ */
+int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
+    // Query in index
+    bgzf2_index_t *idx = index_query(fp, upos);
+    if (!idx)
+	return -1;
+    assert(upos >= idx->pos);
+    //assert(upos < idx->pos + idx->uncomp); // can fail due to skippable
+
+    // Load the relevant block
+    if (idx->cpos != hseek(fp->hfp, idx->cpos, SEEK_SET))
+	return -1;
+
+    if (bgzf2_read_block(fp) < 0)
+	return -1;
+
+    // Skip past any partial data
+    fp->buffer_pos = upos - idx->pos;
+
+    return 0;
+}
+
