@@ -57,6 +57,7 @@ typedef struct {
     off_t pos;     // cumulative uncompressed position prior to this
     size_t uncomp; // uncompressed size of this block
     size_t comp;   // compressed size of this block
+    off_t cpos;    // cumulative compression poisition in file
 } bgzf2_index_t;
 
 // INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
@@ -136,7 +137,17 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz);
  */
 int bgzf2_flush(bgzf2 *fp);
 
+/*
+ * Loads a seekable index from a bgzf2 file.
+ *
+ * Returns 0 on success,
+ *        -1 on error,
+ *        -2 on non-seekable stream.
+ *        -3 if no index found.
+ */
+int load_seekable_index(bgzf2 *fp);
 
+int bgzf2_seek(bgzf2 *fp, uint64_t upos);
 
 #ifdef __cplusplus
 }

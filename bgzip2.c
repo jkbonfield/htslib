@@ -31,6 +31,10 @@
 #include "htslib/bgzf2.h"
 #include "htslib/hfile.h"
 
+#ifndef MIN
+#  define MIN(a,b) ((a)<(b)?(a):(b))
+#endif
+
 #define BUFSZ 65536
 
 static int convert(char *in, char *out, int level, long block_size) {
@@ -73,19 +77,36 @@ static int convert(char *in, char *out, int level, long block_size) {
 
 
 // TODO: specify a region
-static int decode(char *in, char *out) {
+static int decode(char *in, char *out, uint64_t start, uint64_t end) {
     char buffer[BUFSZ];
     bgzf2 *fp_in = NULL;
     hFILE *fp_out = NULL;
     int ret = 1;
+    size_t remaining = end ? end - start : INT64_MAX;
 
     fp_in = bgzf2_open(in, "r");
     fp_out = hopen(out, "w");
 
-    size_t n;
-    while ((n = bgzf2_read(fp_in, buffer, BUFSZ)) > 0) {
-        if (hwrite(fp_out, buffer, n) != n)
+    if (end) {
+        int err = load_seekable_index(fp_in);
+        if (err < -2)
+            fprintf(stderr, "BGZF2 seekable-index not found\n");
+
+        if (err < 0)
             goto err;
+
+        if (bgzf2_seek(fp_in, start) < 0) {
+            fprintf(stderr, "Failed to seek in bgzf2 file\n");
+            goto err;
+        }
+    }
+
+    size_t n;
+    while (remaining > 0 && (n = bgzf2_read(fp_in, buffer, BUFSZ)) > 0) {
+        if (hwrite(fp_out, buffer, MIN(n, remaining)) != n)
+            goto err;
+
+        remaining -= n;
     }
 
     if (n == 0)
@@ -110,8 +131,9 @@ int main(int argc, char **argv) {
     int compress = 1;
     char *infn = NULL;
     char *outfn = NULL;
+    uint64_t start = 0, end = 0;
 
-    while ((c = getopt(argc, argv, "cdhb:0123456789")) >= 0) {
+    while ((c = getopt(argc, argv, "cdhb:0123456789r:")) >= 0) {
         switch(c) {
         case 'c': // stdout
             outfn = "-";
@@ -144,6 +166,43 @@ int main(int argc, char **argv) {
             level = level*10 + c-'0';
             break;
 
+        case 'r': {
+            // range from X-Y
+            // X or Y may be absent which is 0 to Y or X to END
+            // Also supports k, m and g suffixes.
+            char *endp;
+            start = strtol(optarg, &endp, 0);
+            if (*endp == 'k' || *endp == 'K')
+                start <<= 10, endp++;
+            else if (*endp == 'm' || *endp == 'M')
+                start <<= 20, endp++;
+            else if (*endp == 'g' || *endp == 'G')
+                start <<= 30, endp++;
+
+            if (start < 0) {
+                // 0 to Y
+                end = start;
+                start = 0;
+            } else if (*endp == '-' && endp[1] != 0) {
+                end = strtol(endp+1, &endp, 0);
+                if (*endp == 'k' || *endp == 'K')
+                    end <<= 10, endp++;
+                else if (*endp == 'm' || *endp == 'M')
+                    end <<= 20, endp++;
+                else if (*endp == 'g' || *endp == 'G')
+                    end <<= 30, endp++;
+            } else {
+                // X to EOF
+                end = INT64_MAX;
+            }
+
+            if (end < start) {
+                fprintf(stderr, "Illegal range '%s'\n", optarg);
+                return 1;
+            }
+            break;
+        }
+
         case 'h':
             usage(stdout);
         default:
@@ -162,6 +221,6 @@ int main(int argc, char **argv) {
     if (compress) {
         return convert(infn, outfn, level, blk_size);
     } else {
-        return decode(infn, outfn);
+        return decode(infn, outfn, start, end);
     }
 }
