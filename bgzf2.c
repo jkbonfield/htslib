@@ -410,11 +410,90 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
  * This can work on both non-random access zstd compressed files (TODO)
  * as well as block compressed ones.
  *
- * Returns 0 on success,
- *        -1 on failure
+ * This fills out fp->buffer and resets to fp->buffer_pos/sz to be
+ * the start/end of decoded size.
+ *
+ * TODO: just use the standard zstd API if not pzstd framed
+ * We may wish to just switch to streaming mode, but we'll want to push
+ * data back to the buffer first?
+ *
+ * Returns >0 on success (number of bytes read),
+ *          0 on EOF,
+ *         -1 on failure
+ *         -2 on switch to stream mode
  */
 static int bgzf2_read_block(bgzf2 *fp) {
-    return 0;
+    uint8_t buf[12];
+    size_t n;
+
+ next_block:
+    if (8 != (n = hread(fp->hfp, buf, 8)))
+	return n == 0 ? 0 : -1;
+
+    uint32_t fsize = le_to_u32(buf+4);
+
+    // Check if it's a pzstd format frame.
+    if (le_to_u32(buf) != 0x184D2A50 || le_to_u32(buf+4) != 4) {
+	if (le_to_u32(buf) >= 0x184D2A50 && le_to_u32(buf) <= 0x184D2A5F) {
+	    // Another skippable frame, so skip it
+	    char tmp[8192];
+	    size_t n, c = fsize;
+	    while (c > 0 && (n = hread(fp->hfp, tmp, MIN(8192, c))) > 0)
+		c -= n;
+
+	    if (c)
+		return -1;
+
+	    goto next_block;
+	}
+	return -2;
+    } else {
+	// remainder of pzstd skippable frame, now we know it is one
+	if (4 != hread(fp->hfp, buf+8, 4))
+	    return -1;
+    }
+
+    // Load compressed data
+    fp->comp_sz = le_to_u32(buf+8);
+    if (fp->comp_alloc < fp->comp_sz) {
+	fp->comp_alloc = fp->comp_sz;
+	char *tmp = realloc(fp->comp, fp->comp_alloc);
+	if (!tmp)
+	    return -1;
+	fp->comp = tmp;
+    }
+    if (fp->comp_sz != hread(fp->hfp, fp->comp, fp->comp_sz))
+	return -1;
+
+    // Get decompressed size and allocate
+    size_t usize = ZSTD_getFrameContentSize(fp->comp, fp->comp_sz);
+    if (usize == ZSTD_CONTENTSIZE_UNKNOWN)
+	return -2;
+    if (usize == ZSTD_CONTENTSIZE_ERROR)
+	return -1;
+    if (usize == 0)
+	return 0; // empty frame => skip to next
+
+    if (usize > BGZF2_MAX_BLOCK_SIZE)
+	return -1; // protect against extreme memory size attacks
+    if (fp->buffer_alloc < usize) {
+	fp->buffer_alloc = usize;
+	char *tmp = realloc(fp->buffer, usize);
+	if (!tmp)
+	    return -1;
+	fp->buffer = tmp;
+    }
+
+    // Uncompress
+    if (ZSTD_decompress(fp->buffer, usize, fp->comp, fp->comp_sz) != usize) {
+	// Embedded size mismatches the stream
+	return -1;
+    }
+
+    fp->buffer_sz = usize;
+    fp->buffer_pos = 0;
+
+    return usize;
 }
 
 /*
@@ -424,6 +503,8 @@ static int bgzf2_read_block(bgzf2 *fp) {
  *        -1 on failure
  */
 int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
+    size_t decoded = 0;
+
     // loop:
     //    fill buffer if empty
     //        read a block to comp, decompress it, store in buffer
@@ -431,8 +512,11 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
     while (buf_sz) {
 	if (fp->buffer_pos == fp->buffer_sz) {
 	    // out of buffered content, fetch some more
-	    if (bgzf2_read_block(fp) < 0)
+	    size_t n = bgzf2_read_block(fp);
+	    if (n < 0)
 		return -1;
+	    else if (n == 0)
+		return decoded; // EOF
 	}
 
 	size_t n = MIN(buf_sz, fp->buffer_sz - fp->buffer_pos);
@@ -440,7 +524,8 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
 	buf += n;
 	buf_sz -= n;
 	fp->buffer_pos += n;
+	decoded += n;
     }
 
-    return 0;
+    return decoded;
 }
