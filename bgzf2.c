@@ -105,6 +105,36 @@ other header meta-data.
 #  define MIN(a,b) ((a)<(b)?(a):(b))
 #endif
 
+// INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
+// a blank one here)
+typedef struct {
+    off_t pos;     // cumulative uncompressed position prior to this
+    size_t uncomp; // uncompressed size of this block
+    size_t comp;   // compressed size of this block
+    off_t cpos;    // cumulative compression poisition in file
+} bgzf2_index_t;
+
+// INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
+// a blank one here)
+struct bgzf2 {
+    struct hFILE *hfp;    // actual file handle
+    int format;           // encoding format (unused, but zlib, zstd, bsc, ...)
+    int level;            // compression level
+    int is_write;         // open for write
+    int block_size;       // ideal block size
+    bgzf2_index_t *index; // index entries
+    int nindex;           // used size of index array
+    int aindex;           // allocated size of index array
+
+    char *buffer;         // uncompressed data
+    size_t buffer_sz;     // used size of buffer
+    size_t buffer_alloc;  // allocated size of buffer
+    size_t buffer_pos;    // index into current buffer
+    char *comp;           // compressed data block
+    size_t comp_sz;       // size of compressed data
+    size_t comp_alloc;    // allocated size of compressed block
+};
+
 /*
  * Write an index in the format expected by zstd seekable-format
  * https://github.com/facebook/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md
@@ -544,11 +574,11 @@ int load_seekable_index(bgzf2 *fp) {
     if (off < 0)
 	return -1 - (errno == ESPIPE);
 
-    char footer[9];
+    uint8_t footer[9];
     if (9 != hread(fp->hfp, footer, 9))
 	return -1;
 
-    if (le_to_u32(footer+5) != 0x8F92EAB1 || (footer[4] & 0x7C != 0))
+    if (le_to_u32(footer+5) != 0x8F92EAB1 || (footer[4] & 0x7C) != 0)
 	return -3;
     int has_chksum = footer[4] & 0x80;
 
@@ -560,7 +590,7 @@ int load_seekable_index(bgzf2 *fp) {
 	return -1;
 
     bgzf2_index_t *idx = NULL;
-    char *buf = malloc(sz);
+    uint8_t *buf = malloc(sz);
     if (!buf)
 	return -1;
 
@@ -579,7 +609,7 @@ int load_seekable_index(bgzf2 *fp) {
 
     uint32_t i;
     uint64_t pos = 0, cpos = 0;
-    char *idxp = buf + 8;
+    uint8_t *idxp = buf + 8;
     for (i = 0; i < nframes; i++) {
 	idx[i].pos    = pos;
 	idx[i].cpos   = cpos;
