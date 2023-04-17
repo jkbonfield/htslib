@@ -38,7 +38,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#include "hts_defs.h"
+#include "htslib/hts_defs.h"
+#include "htslib/thread_pool.h"
 
 // Ensure ssize_t exists within this header. All #includes must precede this,
 // and ssize_t must be undefined again at the end of this header.
@@ -120,6 +121,17 @@ int bgzf2_flush(bgzf2 *fp);
 int load_seekable_index(bgzf2 *fp);
 
 int bgzf2_seek(bgzf2 *fp, uint64_t upos);
+
+/**
+ * Enable multi-threading via a shared thread pool.  This means
+ * both encoder and decoder can balance usage across a single pool
+ * of worker jobs.
+ *
+ * @param fp          BGZF file handler
+ * @param pool        The thread pool (see hts_create_threads)
+ * @param qsize       Size of job queue, 0 for auto
+ */
+int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize);
 
 #ifdef __cplusplus
 }

@@ -99,7 +99,9 @@ other header meta-data.
 
 #include "htslib/hfile.h"
 #include "htslib/hts_endian.h"
+#include "htslib/thread_pool.h"
 #include "htslib/bgzf2.h"
+#include "cram/pooled_alloc.h"
 
 #ifndef MIN
 #  define MIN(a,b) ((a)<(b)?(a):(b))
@@ -133,46 +135,25 @@ struct bgzf2 {
     char *comp;           // compressed data block
     size_t comp_sz;       // size of compressed data
     size_t comp_alloc;    // allocated size of compressed block
+
+    // Multi-threading support
+    pthread_t io_task;
+    pthread_mutex_t job_pool_m; // when updating jobs_pending
+    int jobs_pending;
+    int flush_pending;
+    hts_tpool *pool;
+    hts_tpool_process *out_queue;
+    int hit_eof;
+    pool_alloc_t *job_pool;
+    int job_num; // debugging
+
+    pthread_mutex_t command_m; // when updating this struct
+    pthread_cond_t command_c;
 };
 
-/*
- * Write an index in the format expected by zstd seekable-format
- * https://github.com/facebook/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md
- *
- * We don't add checksums as these are already part of zstd.
- * This index must come last in the file if we wish seekable-format to
- * be able to process this file.
- *
- * Returns 0 on success,
- *        <0 on failure
+/*----------------------------------------------------------------------
+ * Utility functions shared by both single and multi-threaded implementations
  */
-static int write_seekable_index(bgzf2 *fp) {
-    bgzf2_index_t *idx = fp->index;
-    int nidx = fp->nindex;
-
-    uint8_t *buf = malloc(4+4+nidx*8+9);
-    int off = 0;
-    if (!buf)
-	return -1;
-
-    // header
-    u32_to_le(0x184D2A5E, buf);
-    u32_to_le(nidx*8+9, buf+4);
-
-    // Index entries
-    int i;
-    for (off = 8, i = 0; i < nidx; i++, off += 8) {
-	u32_to_le(idx[i].comp, buf+off);
-	u32_to_le(idx[i].uncomp, buf+off+4);
-    }
-
-    // Index footer
-    u32_to_le(nidx, buf+off); off += 4;
-    buf[off++] = 0; // no checksums
-    u32_to_le(0x8F92EAB1, buf+off); off += 4;
-
-    return off == hwrite(fp->hfp, buf, off) ? 0 : -1;
-}
 
 /*
  * Compresses a block of data.
@@ -218,6 +199,45 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
     ZSTD_freeCStream(zcs);
 
     return ZSTD_isError(csize) ? -1 : csize;
+}
+
+/*
+ * Write an index in the format expected by zstd seekable-format
+ * https://github.com/facebook/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md
+ *
+ * We don't add checksums as these are already part of zstd.
+ * This index must come last in the file if we wish seekable-format to
+ * be able to process this file.
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+static int write_seekable_index(bgzf2 *fp) {
+    bgzf2_index_t *idx = fp->index;
+    int nidx = fp->nindex;
+
+    uint8_t *buf = malloc(4+4+nidx*8+9);
+    int off = 0;
+    if (!buf)
+	return -1;
+
+    // header
+    u32_to_le(0x184D2A5E, buf);
+    u32_to_le(nidx*8+9, buf+4);
+
+    // Index entries
+    int i;
+    for (off = 8, i = 0; i < nidx; i++, off += 8) {
+	u32_to_le(idx[i].comp, buf+off);
+	u32_to_le(idx[i].uncomp, buf+off+4);
+    }
+
+    // Index footer
+    u32_to_le(nidx, buf+off); off += 4;
+    buf[off++] = 0; // no checksums
+    u32_to_le(0x8F92EAB1, buf+off); off += 4;
+
+    return off == hwrite(fp->hfp, buf, off) ? 0 : -1;
 }
 
 /*
@@ -268,6 +288,197 @@ static int write_pzstd_skippable(bgzf2 *fp, uint32_t comp_sz) {
     return ret ? -1 : 0;
 }
 
+/*----------------------------------------------------------------------
+ * Multi-threaded implementation.
+ *
+ * Encode: the main thread copies data into a block (main thread).  When full
+ * this calls bgzf2_flush to compress and write it out.
+ * The bgzf2_flush function is where things fork, with bgzf2_write_block
+ * performing these operations within the main thread and bgzf2_write_block_mt
+ * creating an encode job to dispatch to the pool of workers.
+ *
+ * The thread pool workers all call bgzf2_encode_func, whose only task is
+ * the data compression step.
+ *
+ * bgzf2_mt_write is a dedicated I/O thread (not in the pool) whose sole
+ * purpoise is to asynchronously take the result of the compression jobs off
+ * fp->out_queue and hwrite them to their destination.  This helps remove any
+ * potential deadlocks in the main thread and means we can overlap any I/O
+ * delays with CPU utilisation.  This is also where we accumulate index
+ * entries as it's best performed by a single thread.
+ *
+ * Finally, we have some tidy up code to drain the queue at the end, as
+ * the async nature means the main thread will finish before the workers
+ * have completed.
+ */
+
+/*
+ * Work-load for single compression or decompression job.
+ * Comp and uncomp can be reused, which is particularly useful when
+ * we're dealing with variable sized memory allocations.
+ * See fp->job_free_list; // TODO
+ */
+typedef struct {
+    bgzf2 *fp;
+    char *uncomp_data;
+    char *comp_data;
+    size_t uncomp_sz, comp_sz;
+    int errcode;
+    int hit_eof;
+    int job_num;
+} bgzf2_job;
+
+/*
+ * Single threaded, in a thread of its own (ie async with main).
+ *
+ * Takes compressed blocks off the results queue and calls hwrite to
+ * write them into the output stream.  Also updates any indexing structures.
+ *
+ * Returns NULL when no more are left, or -1 on error
+ */
+static void *bgzf2_mt_writer(void *vp) {
+    bgzf2 *fp = (bgzf2 *)vp;
+    hts_tpool_result *r;
+
+//    if (fp->idx_build_otf) {
+//        fp->idx->moffs = fp->idx->noffs = 1;
+//        fp->idx->offs = (bgzidx1_t*) calloc(fp->idx->moffs, sizeof(bgzidx1_t));
+//        if (!fp->idx->offs) goto err;
+//    }
+
+    // Iterates until result queue is shutdown, where it returns NULL.
+    while ((r = hts_tpool_next_result_wait(fp->out_queue))) {
+        bgzf2_job *j = (bgzf2_job *)hts_tpool_result_data(r);
+        assert(j);
+	//fprintf(stderr, "job: %d %d->%d %.10s\n",
+	//	j->job_num, (int)j->uncomp_sz, (int)j->comp_sz,
+	//	j->uncomp_data);
+
+//        if (fp->idx_build_otf) {
+//            fp->idx->noffs++;
+//            if ( fp->idx->noffs > fp->idx->moffs )
+//            {
+//                fp->idx->moffs = fp->idx->noffs;
+//                kroundup32(fp->idx->moffs);
+//                fp->idx->offs = (bgzidx1_t*) realloc(fp->idx->offs, fp->idx->moffs*sizeof(bgzidx1_t));
+//                if ( !fp->idx->offs ) goto err;
+//            }
+//            fp->idx->offs[ fp->idx->noffs-1 ].uaddr = fp->idx->offs[ fp->idx->noffs-2 ].uaddr + j->uncomp_sz;
+//            fp->idx->offs[ fp->idx->noffs-1 ].caddr = fp->idx->offs[ fp->idx->noffs-2 ].caddr + j->comp_sz;
+//        }
+//
+//        // Flush any cached hts_idx_push calls
+//        if (bgzf_idx_flush(fp) < 0)
+//            goto err;
+
+
+	if (write_pzstd_skippable(fp, j->comp_sz) < 0)
+	    goto err;
+
+	if (bgzf2_add_index(fp, j->uncomp_sz, j->comp_sz) < 0)
+	    goto err;
+
+        if (hwrite(fp->hfp, j->comp_data, j->comp_sz) != j->comp_sz)
+            goto err;
+
+//        // Update our local block_address.  Cannot be fp->block_address due to no
+//        // locking in bgzf_tell.
+//        pthread_mutex_lock(&mt->idx_m);
+//        mt->block_address += j->comp_sz;
+//        pthread_mutex_unlock(&mt->idx_m);
+
+        /*
+         * Periodically call hflush (which calls fsync when on a file).
+         * This avoids the fsync being done at the bgzf_close stage,
+         * which can sometimes cause significant delays.  As this is in
+         * a separate thread, spreading the sync delays throughout the
+         * program execution seems better.
+         */
+        if (++fp->flush_pending % 32 == 0)
+            if (hflush(fp->hfp) != 0)
+                goto err;
+
+
+        hts_tpool_delete_result(r, 0);
+
+        // Also updated by main thread
+        pthread_mutex_lock(&fp->job_pool_m);
+        pool_free(fp->job_pool, j);
+        fp->jobs_pending--;
+        pthread_mutex_unlock(&fp->job_pool_m);
+    }
+
+    if (hflush(fp->hfp) != 0)
+        goto err;
+
+    hts_tpool_process_destroy(fp->out_queue);
+    pthread_mutex_lock(&fp->job_pool_m);
+    fp->out_queue = NULL;
+    pthread_mutex_unlock(&fp->job_pool_m);
+
+    return NULL;
+
+ err:
+    hts_tpool_process_destroy(fp->out_queue);
+    return (void *)-1;
+}
+
+// TODO
+static void *bgzf2_mt_reader(void *vp) {
+    return NULL;
+}
+
+/*
+ * Threaded: runs in one of many thread pool workers.
+ *
+ * Function called by the bgzf2 encode multi-threaded worker tasks.
+ */
+static void *bgzf2_encode_func(void *vp) {
+    bgzf2_job *j = (bgzf2_job *)vp;
+
+    if ((j->comp_sz = compress_block(j->uncomp_data, j->uncomp_sz,
+				     &j->comp_data, &j->comp_sz,
+				     j->fp->level)) < 0)
+	j->errcode = 1; // TODO design err codes properly
+
+    return vp;
+}
+
+/*
+ * Main thread: adds a thread pool to a bgzf2 fp, adding
+ * multi-threading capabilities.
+ *
+ * Returns 0 on success,
+ *        -1 on failure
+ */
+int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize) {
+    fp->pool = pool;
+    if (!qsize)
+        qsize = hts_tpool_size(pool)*2;
+    if (!(fp->out_queue = hts_tpool_process_init(fp->pool, qsize, 0)))
+	return -1;
+    hts_tpool_process_ref_incr(fp->out_queue);
+
+    fp->job_pool = pool_create(sizeof(bgzf2_job));
+    if (!fp->job_pool)
+	return -1;
+
+    pthread_mutex_init(&fp->job_pool_m, NULL);
+    pthread_mutex_init(&fp->command_m, NULL);
+//    pthread_mutex_init(&fp->idx_m, NULL);
+    pthread_cond_init(&fp->command_c, NULL);
+    fp->flush_pending = 0;
+    fp->jobs_pending = 0;
+    pthread_create(&fp->io_task, NULL,
+                   fp->is_write ? bgzf2_mt_writer : bgzf2_mt_reader, fp);
+
+    return 0;
+}
+
+/*----------------------------------------------------------------------
+ * Basic implementation
+ */
+
 /*
  * Compress and write a block to disk.
  *
@@ -275,7 +486,7 @@ static int write_pzstd_skippable(bgzf2 *fp, uint32_t comp_sz) {
  *        -1 on failure
  */
 static int bgzf2_write_block(bgzf2 *fp, char *buf, size_t buf_sz) {
-    if ((fp->comp_sz = compress_block(buf, buf_sz, &fp->comp, &fp->comp_alloc,
+    if ((fp->comp_sz = compress_block(buf, buf_sz, &fp->comp, &fp->comp_sz,
 				      fp->level)) < 0)
 	return -1;
 
@@ -291,6 +502,76 @@ static int bgzf2_write_block(bgzf2 *fp, char *buf, size_t buf_sz) {
     return ret;
 }
 
+static void bgzf2_job_free(void *vp) {
+    free(vp);
+
+//    // Maybe faster to just free and re-alloc?  Depends on malloc I guess
+//    bgzf2_job *j = (bgzf2_job *)vp;
+//    bgzf2 *fp = j->fp;
+//    pthread_mutex_lock(&fp->job_pool_m);
+//    pool_free(fp->job_pool, j);
+//    pthread_mutex_unlock(&fp->job_pool_m);
+}
+
+/*
+ * (Runs in the main thread)
+ * Asynchronously compress and write a block to disk.
+ *
+ * Returns 0 on success,
+ *        -1 on failure
+ */
+static int bgzf2_write_block_mt(bgzf2 *fp, char *buf, size_t buf_sz) {
+    bgzf2_job *j = malloc(sizeof(*j));
+    if (!j)
+	return -1;
+
+    // fill out job
+    j->fp = fp; // NB: not needed without pooled alloc
+    j->uncomp_data = malloc(buf_sz); // todo: steal buffer?
+    if (!j->uncomp_data)
+	goto err;
+    memcpy(j->uncomp_data, buf, buf_sz);
+    j->uncomp_sz = buf_sz;
+
+    // steal compressed buffer from fp.
+    j->comp_data = fp->comp;  fp->comp = NULL;
+    j->comp_sz = fp->comp_sz; fp->comp_sz = fp->comp_alloc = 0;
+
+    j->job_num = fp->job_num++;
+
+    pthread_mutex_lock(&fp->job_pool_m);
+    // Used by flush function to drain queue.
+    // Can we get this via another route?
+    fp->jobs_pending++;
+    pthread_mutex_unlock(&fp->job_pool_m);
+
+    //fprintf(stderr, "dispatch %d %.10s\n", j->job_num, j->uncomp_data);
+    if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_encode_func,
+			    j, bgzf2_job_free, bgzf2_job_free, 0) < 0)
+	goto err;
+
+    fp->buffer_pos = 0;
+    return 0;
+
+ err:
+    bgzf2_job_free(j);
+    pthread_mutex_lock(&fp->job_pool_m);
+    fp->jobs_pending--;
+    pthread_mutex_unlock(&fp->job_pool_m);
+    return -1;
+
+//    if (write_pzstd_skippable(fp, fp->comp_sz) < 0)
+//	return -1;
+//
+//    int ret = bgzf2_add_index(fp, buf_sz, fp->comp_sz);
+//
+//    if (hwrite(fp->hfp, fp->comp, fp->comp_sz) != fp->comp_sz)
+//	return -1;
+//
+//    fp->buffer_pos = 0; // reset buffered offset
+//    return ret;
+}
+
 /*
  * Flush the bgzf2 stream and ensure we start a new block.
  *
@@ -301,7 +582,49 @@ int bgzf2_flush(bgzf2 *fp) {
     if (!fp->buffer_pos)
 	return 0;
 
-    return bgzf2_write_block(fp, fp->buffer, fp->buffer_pos);
+    return fp->pool
+	? bgzf2_write_block_mt(fp, fp->buffer, fp->buffer_pos)
+	: bgzf2_write_block(fp, fp->buffer, fp->buffer_pos);
+}
+
+/*
+ * Flushes data and drains any asynchronous I/O still waiting to be
+ * written.
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+int bgzf2_drain(bgzf2 *fp) {
+    if (bgzf2_flush(fp) < 0)
+	return -1;
+
+    if (!fp->pool)
+	return 0;
+
+    // Wait for any compression jobs still in the queue or running
+    // to complete.  Even after the queue is drained, we may still
+    // have jobs_pending > 0 as we're waiting on hwrite I/O too.
+    puts("flush start");
+    int jp = 0;
+    do {
+	if (hts_tpool_process_flush(fp->out_queue) < 0)
+	    return -1;
+	pthread_mutex_lock(&fp->job_pool_m);
+	jp = fp->jobs_pending;
+	pthread_mutex_unlock(&fp->job_pool_m);
+    } while (jp);
+    puts("flush end");
+
+    // At this point the writer thread should have completed too
+    pthread_mutex_lock(&fp->job_pool_m);
+    hts_tpool_process_destroy(fp->out_queue);
+    pthread_mutex_unlock(&fp->job_pool_m);
+    
+    void *retval = NULL;
+    pthread_join(fp->io_task, &retval);
+    puts("joined");
+
+    return retval == NULL ? 0 : -1;
 }
 
 /*
@@ -365,7 +688,18 @@ bgzf2 *bgzf2_open(const char *fn, const char *mode) {
 	fp->is_write = 0;
     }
 
+//    // Threading
+//    fp->pool = hts_tpool_init(4);
+//    fp->out_queue = hts_tpool_process_init(fp->pool, 8, 0);
+//    if (bgzf2_thread_pool(fp, fp->pool, 0) < 0)
+//	goto err;
+
     return fp;
+
+ err:
+    // TODO: plus other tidying.  Consider bgzf2_free func.
+    free(fp);
+    return NULL;
 }
 
 /*
@@ -378,7 +712,7 @@ int bgzf2_close(bgzf2 *fp) {
     int ret = 0;
 
     if (fp->is_write) {
-	ret |= (bgzf2_flush(fp) < 0);
+	ret |= (bgzf2_drain(fp) < 0);
 	ret |= write_seekable_index(fp);
     }
 

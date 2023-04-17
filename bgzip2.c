@@ -30,6 +30,7 @@
 
 #include "htslib/bgzf2.h"
 #include "htslib/hfile.h"
+#include "htslib/thread_pool.h"
 
 #ifndef MIN
 #  define MIN(a,b) ((a)<(b)?(a):(b))
@@ -37,7 +38,8 @@
 
 #define BUFSZ 65536
 
-static int convert(char *in, char *out, int level, long block_size) {
+static int convert(char *in, char *out, int level, long block_size,
+                   int nthreads) {
     hFILE *fp_in = NULL;
     bgzf2 *fp_out = NULL;
     char buffer[BUFSZ];
@@ -49,6 +51,14 @@ static int convert(char *in, char *out, int level, long block_size) {
     snprintf(omode, 30, "w%d", level);
     fp_out = bgzf2_open(out, omode);
     if (!fp_out) goto err;
+
+    if (nthreads) {
+        hts_tpool *pool = hts_tpool_init(nthreads);
+        if (!pool)
+            goto err;
+        if (bgzf2_thread_pool(fp_out, pool, 0) < 0)
+            goto err;
+    }
 
     if (bgzf2_set_block_size(fp_out, block_size))
         goto err;
@@ -132,9 +142,14 @@ int main(int argc, char **argv) {
     char *infn = NULL;
     char *outfn = NULL;
     uint64_t start = 0, end = 0;
+    int nthreads = 0;
 
-    while ((c = getopt(argc, argv, "cdhb:0123456789r:")) >= 0) {
+    while ((c = getopt(argc, argv, "cdhb:0123456789r:@:")) >= 0) {
         switch(c) {
+        case '@':
+            nthreads = atoi(optarg);
+            break;
+
         case 'c': // stdout
             outfn = "-";
             break;
@@ -219,7 +234,7 @@ int main(int argc, char **argv) {
         level = BGZF2_DEFAULT_LEVEL;
 
     if (compress) {
-        return convert(infn, outfn, level, blk_size);
+        return convert(infn, outfn, level, blk_size, nthreads);
     } else {
         return decode(infn, outfn, start, end);
     }
