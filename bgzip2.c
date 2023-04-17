@@ -234,8 +234,8 @@ int main(int argc, char **argv) {
         level = BGZF2_DEFAULT_LEVEL;
 
     if (compress) {
-        return convert(infn, outfn, level, blk_size, nthreads);
+        return convert(infn, outfn, level, blk_size, nthreads) ? 1 : 0;
     } else {
-        return decode(infn, outfn, start, end);
+        return decode(infn, outfn, start, end) ? 1 : 0;
     }
 }
