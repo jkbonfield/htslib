@@ -1,3 +1,6 @@
+// NB: previous commit was considerably more efficient when overcomitting on
+// threads vs CPU count.
+
 /* The MIT License
 
    Copyright (C) 2023 Genome Research Ltd
@@ -116,6 +119,28 @@ typedef struct {
     off_t cpos;    // cumulative compression poisition in file
 } bgzf2_index_t;
 
+// Note this is just a kstring with a linked list.
+// We could perhaps embed the link into the ks->s pointer, so empty ones
+// are linked together via their data itself.
+typedef struct bgzf2_buffer {
+    size_t alloc, sz, pos; // allocated, desired size, and curr pos.
+    char *buf;
+    struct bgzf2_buffer *next;
+} bgzf2_buffer;
+
+/*
+ * Work-load for single compression or decompression job.
+ */
+typedef struct bgzf2_job {
+    bgzf2 *fp;
+    bgzf2_buffer *uncomp;
+    bgzf2_buffer *comp;
+    int errcode;
+    int hit_eof;
+    int job_num;
+    struct bgzf2_job *next;
+} bgzf2_job;
+
 // INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
 // a blank one here)
 struct bgzf2 {
@@ -128,17 +153,12 @@ struct bgzf2 {
     int nindex;           // used size of index array
     int aindex;           // allocated size of index array
 
-    char *buffer;         // uncompressed data
-    size_t buffer_sz;     // used size of buffer
-    size_t buffer_alloc;  // allocated size of buffer
-    size_t buffer_pos;    // index into current buffer
-    char *comp;           // compressed data block
-    size_t comp_sz;       // size of compressed data
-    size_t comp_alloc;    // allocated size of compressed block
+    bgzf2_buffer *uncomp; // uncompressed data
+    bgzf2_buffer *comp;   // compressed data
 
     // Multi-threading support
-    pthread_t io_task;
-    pthread_mutex_t job_pool_m; // when updating jobs_pending
+    pthread_mutex_t job_pool_m; // when updating this struct
+    struct bgzf2_job *job_free_list;
     int jobs_pending;
     int flush_pending;
     hts_tpool *pool;
@@ -147,13 +167,74 @@ struct bgzf2 {
     pool_alloc_t *job_pool;
     int job_num; // debugging
 
-    pthread_mutex_t command_m; // when updating this struct
+    pthread_t io_task;
+    pthread_mutex_t command_m; // for messaging with io_task
     pthread_cond_t command_c;
 };
 
 /*----------------------------------------------------------------------
  * Utility functions shared by both single and multi-threaded implementations
  */
+
+/*
+ * Allocates a new bgzf2 buffer capable of holding n bytes.
+ *
+ * Returns buffer pointer on success,
+ *         NULL on failure
+ */
+bgzf2_buffer *bgzf2_buffer_alloc(size_t n) {
+    bgzf2_buffer *b = malloc(sizeof(*b));
+    if (!b)
+	return NULL;
+
+    if (!(b->buf = malloc(n))) {
+	free(b);
+	return NULL;
+    }
+
+    b->alloc = n;
+    b->sz = n;
+    b->pos = 0;
+    b->next = NULL;
+
+    return b;
+}
+
+/*
+ * Ensure size is at least n (NB not grow by n).
+ * Returns 0 on success,
+ *        -1 on failure.
+ */
+int bgzf2_buffer_grow(bgzf2_buffer **bp, size_t n) {
+    bgzf2_buffer *b = *bp;
+
+    if (!*bp) {
+	b = *bp = calloc(1, sizeof(*b));
+	if (!b)
+	    return -1;
+    }
+    b->sz = n;
+    if (n <= b->alloc)
+	return 0;
+
+    char *tmp = realloc(b->buf, n);
+    if (!tmp)
+	return -1;
+
+    b->buf = tmp;
+    b->alloc = n;
+
+    return 0;
+}
+
+/* Frees memory used by a bgzf2_buffer */
+void bgzf2_buffer_free(bgzf2_buffer *b) {
+    if (!b)
+	return;
+
+    free(b->buf);
+    free(b);
+}
 
 /*
  * Compresses a block of data.
@@ -164,21 +245,16 @@ struct bgzf2 {
  *        -1 on failure.
  */
 static size_t compress_block(char *uncomp, size_t uncomp_sz,
-			     char **comp, size_t *comp_alloc,
+			     char *comp, size_t comp_alloc,
 			     int level) {
-    // Grow output buffer
+    // Check output buffer is large enough
     size_t comp_bound = ZSTD_compressBound(uncomp_sz);
-    if (comp_bound > *comp_alloc) {
-	char *c = realloc(*comp, comp_bound);
-	if (!c)
-	    return -1;
-	*comp = c;
-	*comp_alloc = comp_bound;
-    }
+    if (comp_bound > comp_alloc)
+	return -1;
 
-    // Use zstd.
+    // Currently we use Zstd only.
     // For now we create and configure new streams each time, but we
-    // could consider reusing the same stream.
+    // could consider reusing the same zstd stream (NB: needs 1 per thread).
     ZSTD_CStream *zcs = ZSTD_createCStream();
     if (!zcs)
 	return -1;
@@ -195,7 +271,7 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
 //        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmBucketSizeLog, 4);
 //        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashRateLog, 7); // 4 at -3
 	
-    size_t csize = ZSTD_compress2(zcs, *comp, *comp_alloc, uncomp, uncomp_sz);
+    size_t csize = ZSTD_compress2(zcs, comp, comp_alloc, uncomp, uncomp_sz);
     ZSTD_freeCStream(zcs);
 
     return ZSTD_isError(csize) ? -1 : csize;
@@ -237,7 +313,10 @@ static int write_seekable_index(bgzf2 *fp) {
     buf[off++] = 0; // no checksums
     u32_to_le(0x8F92EAB1, buf+off); off += 4;
 
-    return off == hwrite(fp->hfp, buf, off) ? 0 : -1;
+    int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
+    free(buf);
+
+    return ret;
 }
 
 /*
@@ -313,20 +392,51 @@ static int write_pzstd_skippable(bgzf2 *fp, uint32_t comp_sz) {
  */
 
 /*
- * Work-load for single compression or decompression job.
- * Comp and uncomp can be reused, which is particularly useful when
- * we're dealing with variable sized memory allocations.
- * See fp->job_free_list; // TODO
+ * Doesn't explicitly free the memory, but instead puts it on a free list
+ * so we can reuse it.
  */
-typedef struct {
-    bgzf2 *fp;
-    char *uncomp_data;
-    char *comp_data;
-    size_t uncomp_sz, comp_sz;
-    int errcode;
-    int hit_eof;
-    int job_num;
-} bgzf2_job;
+static void bgzf2_job_free(void *vp) {
+    bgzf2_job *j = (bgzf2_job *)vp;
+    //fprintf(stderr, "bgzf2_job_free %d\n", j->job_num);
+
+    bgzf2 *fp = j->fp;
+    pthread_mutex_lock(&fp->job_pool_m);
+    j->next = fp->job_free_list;
+    fp->job_free_list = j;
+    pthread_mutex_unlock(&fp->job_pool_m);
+}
+
+/*
+ * Actually deallocates memory used by a job
+ */
+static void bgzf2_job_really_free(bgzf2_job *j) {
+    bgzf2_buffer_free(j->comp);
+    bgzf2_buffer_free(j->uncomp);
+}
+
+/*
+ * Fetches a new bgzf2_job struct.  Reuses previously freed ones if available,
+ * or allocates new if not.
+ */
+static bgzf2_job *bgzf2_job_new(bgzf2 *fp) {
+    bgzf2_job *j;
+
+    pthread_mutex_lock(&fp->job_pool_m);
+    if (fp->job_free_list) {
+	j = fp->job_free_list;
+	fp->job_free_list = j->next;
+	//fprintf(stderr, "Reuse %d\n", j->job_num);
+	pthread_mutex_unlock(&fp->job_pool_m);
+	
+    } else {
+	pthread_mutex_unlock(&fp->job_pool_m);
+	if (!(j = pool_alloc(fp->job_pool)))
+	    return NULL;
+	memset(j, 0, sizeof(*j));
+    }
+
+    return j;
+}
 
 /*
  * Single threaded, in a thread of its own (ie async with main).
@@ -350,9 +460,12 @@ static void *bgzf2_mt_writer(void *vp) {
     while ((r = hts_tpool_next_result_wait(fp->out_queue))) {
         bgzf2_job *j = (bgzf2_job *)hts_tpool_result_data(r);
         assert(j);
-	//fprintf(stderr, "job: %d %d->%d %.10s\n",
-	//	j->job_num, (int)j->uncomp_sz, (int)j->comp_sz,
-	//	j->uncomp_data);
+//	fprintf(stderr, "job: %d %d->%d %.10s\n",
+//		j->job_num, (int)j->uncomp->sz, (int)j->comp->sz,
+//		j->uncomp->buf);
+//	static int job_last = -1;
+//	assert(j->job_num == job_last+1);
+//	job_last++;
 
 //        if (fp->idx_build_otf) {
 //            fp->idx->noffs++;
@@ -372,13 +485,13 @@ static void *bgzf2_mt_writer(void *vp) {
 //            goto err;
 
 
-	if (write_pzstd_skippable(fp, j->comp_sz) < 0)
+	if (write_pzstd_skippable(fp, j->comp->sz) < 0)
 	    goto err;
 
-	if (bgzf2_add_index(fp, j->uncomp_sz, j->comp_sz) < 0)
+	if (bgzf2_add_index(fp, j->uncomp->sz, j->comp->sz) < 0)
 	    goto err;
 
-        if (hwrite(fp->hfp, j->comp_data, j->comp_sz) != j->comp_sz)
+        if (hwrite(fp->hfp, j->comp->buf, j->comp->sz) != j->comp->sz)
             goto err;
 
 //        // Update our local block_address.  Cannot be fp->block_address due to no
@@ -403,9 +516,9 @@ static void *bgzf2_mt_writer(void *vp) {
 
         // Also updated by main thread
         pthread_mutex_lock(&fp->job_pool_m);
-        pool_free(fp->job_pool, j);
         fp->jobs_pending--;
         pthread_mutex_unlock(&fp->job_pool_m);
+	bgzf2_job_free(j);
     }
 
     if (hflush(fp->hfp) != 0)
@@ -436,9 +549,9 @@ static void *bgzf2_mt_reader(void *vp) {
 static void *bgzf2_encode_func(void *vp) {
     bgzf2_job *j = (bgzf2_job *)vp;
 
-    if ((j->comp_sz = compress_block(j->uncomp_data, j->uncomp_sz,
-				     &j->comp_data, &j->comp_sz,
-				     j->fp->level)) < 0)
+    if ((j->comp->sz = compress_block(j->uncomp->buf, j->uncomp->pos,
+				      j->comp->buf, j->comp->alloc,
+				      j->fp->level)) < 0)
 	j->errcode = 1; // TODO design err codes properly
 
     return vp;
@@ -485,32 +598,25 @@ int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize) {
  * Returns 0 on success,
  *        -1 on failure
  */
-static int bgzf2_write_block(bgzf2 *fp, char *buf, size_t buf_sz) {
-    if ((fp->comp_sz = compress_block(buf, buf_sz, &fp->comp, &fp->comp_sz,
-				      fp->level)) < 0)
+static int bgzf2_write_block(bgzf2 *fp, bgzf2_buffer *buf) {
+    if (bgzf2_buffer_grow(&fp->comp, ZSTD_compressBound(buf->sz)) < 0)
 	return -1;
 
-    if (write_pzstd_skippable(fp, fp->comp_sz) < 0)
+    if ((fp->comp->sz = compress_block(buf->buf, buf->pos,
+				       fp->comp->buf, fp->comp->alloc,
+				       fp->level)) < 0)
 	return -1;
 
-    int ret = bgzf2_add_index(fp, buf_sz, fp->comp_sz);
-
-    if (hwrite(fp->hfp, fp->comp, fp->comp_sz) != fp->comp_sz)
+    if (write_pzstd_skippable(fp, fp->comp->sz) < 0)
 	return -1;
 
-    fp->buffer_pos = 0; // reset buffered offset
+    int ret = bgzf2_add_index(fp, buf->sz, fp->comp->sz);
+
+    if (hwrite(fp->hfp, fp->comp->buf, fp->comp->sz) != fp->comp->sz)
+	return -1;
+
+    fp->uncomp->pos = 0; // reset buffered offset
     return ret;
-}
-
-static void bgzf2_job_free(void *vp) {
-    free(vp);
-
-//    // Maybe faster to just free and re-alloc?  Depends on malloc I guess
-//    bgzf2_job *j = (bgzf2_job *)vp;
-//    bgzf2 *fp = j->fp;
-//    pthread_mutex_lock(&fp->job_pool_m);
-//    pool_free(fp->job_pool, j);
-//    pthread_mutex_unlock(&fp->job_pool_m);
 }
 
 /*
@@ -520,37 +626,35 @@ static void bgzf2_job_free(void *vp) {
  * Returns 0 on success,
  *        -1 on failure
  */
-static int bgzf2_write_block_mt(bgzf2 *fp, char *buf, size_t buf_sz) {
-    bgzf2_job *j = malloc(sizeof(*j));
+static int bgzf2_write_block_mt(bgzf2 *fp, bgzf2_buffer *buf) {
+    bgzf2_job *j = bgzf2_job_new(fp);
     if (!j)
 	return -1;
 
-    // fill out job
-    j->fp = fp; // NB: not needed without pooled alloc
-    j->uncomp_data = malloc(buf_sz); // todo: steal buffer?
-    if (!j->uncomp_data)
-	goto err;
-    memcpy(j->uncomp_data, buf, buf_sz);
-    j->uncomp_sz = buf_sz;
-
-    // steal compressed buffer from fp.
-    j->comp_data = fp->comp;  fp->comp = NULL;
-    j->comp_sz = fp->comp_sz; fp->comp_sz = fp->comp_alloc = 0;
-
+    // Fill out job.
+    size_t comp_sz = ZSTD_compressBound(buf->sz);
+    j->fp = fp;
     j->job_num = fp->job_num++;
+    j->next = NULL;
 
-    pthread_mutex_lock(&fp->job_pool_m);
+    // We could steal "buf" and optimise this more.
+    if (bgzf2_buffer_grow(&j->uncomp, buf->sz) < 0 ||
+	bgzf2_buffer_grow(&j->comp, comp_sz) < 0)
+	return -1;
+    memcpy(j->uncomp->buf, buf->buf, buf->pos);
+    j->uncomp->pos = buf->pos;
+
     // Used by flush function to drain queue.
     // Can we get this via another route?
+    pthread_mutex_lock(&fp->job_pool_m);
     fp->jobs_pending++;
     pthread_mutex_unlock(&fp->job_pool_m);
 
-    //fprintf(stderr, "dispatch %d %.10s\n", j->job_num, j->uncomp_data);
     if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_encode_func,
 			    j, bgzf2_job_free, bgzf2_job_free, 0) < 0)
 	goto err;
 
-    fp->buffer_pos = 0;
+    fp->uncomp->pos = 0;
     return 0;
 
  err:
@@ -559,17 +663,6 @@ static int bgzf2_write_block_mt(bgzf2 *fp, char *buf, size_t buf_sz) {
     fp->jobs_pending--;
     pthread_mutex_unlock(&fp->job_pool_m);
     return -1;
-
-//    if (write_pzstd_skippable(fp, fp->comp_sz) < 0)
-//	return -1;
-//
-//    int ret = bgzf2_add_index(fp, buf_sz, fp->comp_sz);
-//
-//    if (hwrite(fp->hfp, fp->comp, fp->comp_sz) != fp->comp_sz)
-//	return -1;
-//
-//    fp->buffer_pos = 0; // reset buffered offset
-//    return ret;
 }
 
 /*
@@ -579,12 +672,15 @@ static int bgzf2_write_block_mt(bgzf2 *fp, char *buf, size_t buf_sz) {
  *        -1 on failure
  */
 int bgzf2_flush(bgzf2 *fp) {
-    if (!fp->buffer_pos)
+    if (!fp->uncomp->pos)
 	return 0;
 
-    return fp->pool
-	? bgzf2_write_block_mt(fp, fp->buffer, fp->buffer_pos)
-	: bgzf2_write_block(fp, fp->buffer, fp->buffer_pos);
+    if (fp->pool) {
+	int ret = bgzf2_write_block_mt(fp, fp->uncomp);
+	return ret;
+    } else {
+	return bgzf2_write_block(fp, fp->uncomp);
+    }
 }
 
 /*
@@ -604,7 +700,6 @@ int bgzf2_drain(bgzf2 *fp) {
     // Wait for any compression jobs still in the queue or running
     // to complete.  Even after the queue is drained, we may still
     // have jobs_pending > 0 as we're waiting on hwrite I/O too.
-    puts("flush start");
     int jp = 0;
     do {
 	if (hts_tpool_process_flush(fp->out_queue) < 0)
@@ -613,7 +708,6 @@ int bgzf2_drain(bgzf2 *fp) {
 	jp = fp->jobs_pending;
 	pthread_mutex_unlock(&fp->job_pool_m);
     } while (jp);
-    puts("flush end");
 
     // At this point the writer thread should have completed too
     pthread_mutex_lock(&fp->job_pool_m);
@@ -622,7 +716,6 @@ int bgzf2_drain(bgzf2 *fp) {
     
     void *retval = NULL;
     pthread_join(fp->io_task, &retval);
-    puts("joined");
 
     return retval == NULL ? 0 : -1;
 }
@@ -635,18 +728,13 @@ int bgzf2_drain(bgzf2 *fp) {
  *        -1 on failure
  */
 int bgzf2_set_block_size(bgzf2 *fp, size_t sz) {
-    if (bgzf2_flush(fp) < 0)
-	return -1;
+    fp->block_size = sz;
 
-    if (fp->buffer_alloc < sz) {
-	char *b = realloc(fp->buffer, sz);
-	if (!b)
+    if (fp->uncomp)
+	if (bgzf2_flush(fp) < 0)
 	    return -1;
-	fp->buffer = b;
-	fp->buffer_alloc = fp->buffer_sz = sz;
-    }
 
-    return 0;
+    return bgzf2_buffer_grow(&fp->uncomp, sz);
 }
 
 /*
@@ -695,11 +783,6 @@ bgzf2 *bgzf2_open(const char *fn, const char *mode) {
 //	goto err;
 
     return fp;
-
- err:
-    // TODO: plus other tidying.  Consider bgzf2_free func.
-    free(fp);
-    return NULL;
 }
 
 /*
@@ -718,6 +801,22 @@ int bgzf2_close(bgzf2 *fp) {
 
     ret |= hclose(fp->hfp);
 
+    bgzf2_job *j, *n;
+    for (j = fp->job_free_list; j; j = n) {
+	//fprintf(stderr, "free job %d\n", j->job_num);
+	n = j->next;
+	bgzf2_job_really_free(j);
+    }
+
+    if (fp->job_pool)
+	pool_destroy(fp->job_pool);
+
+    if (fp->comp)   bgzf2_buffer_free(fp->comp);
+    if (fp->uncomp) bgzf2_buffer_free(fp->uncomp);
+
+    free(fp->index);
+    free(fp);
+
     return ret ? -1 : 0;
 }
 
@@ -734,20 +833,24 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
     int r = 0;
 
     do {
-	if (fp->buffer_sz == fp->buffer_pos) {
+	if (fp->uncomp && fp->uncomp->sz == fp->uncomp->pos) {
 	    // Full
 	    if (bgzf2_flush(fp))
 		return -1;
 	}
 
-	ssize_t consumes = fp->buffer_sz - fp->buffer_pos;
+	if (!fp->uncomp)
+	    if (bgzf2_buffer_grow(&fp->uncomp, fp->block_size) < 0)
+		return -1;
+
+	ssize_t consumes = fp->uncomp->sz - fp->uncomp->pos;
 	if (consumes > buf_sz)
 	    consumes = buf_sz;
 
 	if (consumes == buf_sz || can_split) {
 	    // Whole or can_split and a portion
-	    memcpy(fp->buffer + fp->buffer_pos, buf, consumes);
-	    fp->buffer_pos += consumes;
+	    memcpy(fp->uncomp->buf + fp->uncomp->pos, buf, consumes);
+	    fp->uncomp->pos += consumes;
 	    buf_sz -= consumes;
 	    buf    += consumes;
 	    r      += consumes;
@@ -755,13 +858,10 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
 	    // Can't split and doesn't fit, so flush and write this new item
 	    // as a new block if it's too large.
 	    int err = bgzf2_flush(fp);
-	    if (buf_sz >= fp->buffer_alloc) {
-		err |= bgzf2_write_block(fp, buf, buf_sz) < 0;
+	    if (err || bgzf2_buffer_grow(&fp->uncomp, buf_sz) < 0)
+		return -1;
+	    memcpy(fp->uncomp->buf, buf, buf_sz);
 
-		if (err)
-		    return r ? r : -1;
-		buf_sz = 0;
-	    }
 	    // else it will fit on the next loop given we've now flushed
 	}
     } while (buf_sz);
@@ -774,7 +874,7 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
  * This can work on both non-random access zstd compressed files (TODO)
  * as well as block compressed ones.
  *
- * This fills out fp->buffer and resets to fp->buffer_pos/sz to be
+ * This fills out fp->uncomp and resets to fp->uncomp->pos to be
  * the start/end of decoded size.
  *
  * TODO: just use the standard zstd API if not pzstd framed
@@ -818,19 +918,14 @@ static int bgzf2_read_block(bgzf2 *fp) {
     }
 
     // Load compressed data
-    fp->comp_sz = le_to_u32(buf+8);
-    if (fp->comp_alloc < fp->comp_sz) {
-	fp->comp_alloc = fp->comp_sz;
-	char *tmp = realloc(fp->comp, fp->comp_alloc);
-	if (!tmp)
-	    return -1;
-	fp->comp = tmp;
-    }
-    if (fp->comp_sz != hread(fp->hfp, fp->comp, fp->comp_sz))
+    size_t csize = le_to_u32(buf+8);
+    if (bgzf2_buffer_grow(&fp->comp, csize) < 0)
+	return -1;
+    if (csize != hread(fp->hfp, fp->comp->buf, csize))
 	return -1;
 
     // Get decompressed size and allocate
-    size_t usize = ZSTD_getFrameContentSize(fp->comp, fp->comp_sz);
+    size_t usize = ZSTD_getFrameContentSize(fp->comp, csize);
     if (usize == ZSTD_CONTENTSIZE_UNKNOWN)
 	return -2;
     if (usize == ZSTD_CONTENTSIZE_ERROR)
@@ -840,22 +935,16 @@ static int bgzf2_read_block(bgzf2 *fp) {
 
     if (usize > BGZF2_MAX_BLOCK_SIZE)
 	return -1; // protect against extreme memory size attacks
-    if (fp->buffer_alloc < usize) {
-	fp->buffer_alloc = usize;
-	char *tmp = realloc(fp->buffer, usize);
-	if (!tmp)
-	    return -1;
-	fp->buffer = tmp;
-    }
+    if (bgzf2_buffer_grow(&fp->uncomp, usize) < 0)
+	return -1;
 
     // Uncompress
-    if (ZSTD_decompress(fp->buffer, usize, fp->comp, fp->comp_sz) != usize) {
+    if (ZSTD_decompress(fp->uncomp->buf,usize, fp->comp->buf,csize) != usize) {
 	// Embedded size mismatches the stream
 	return -1;
     }
 
-    fp->buffer_sz = usize;
-    fp->buffer_pos = 0;
+    fp->uncomp->pos = 0;
 
     return usize;
 }
@@ -874,7 +963,7 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
     //        read a block to comp, decompress it, store in buffer
     //    copy from buffer to buf
     while (buf_sz) {
-	if (fp->buffer_pos == fp->buffer_sz) {
+	if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
 	    // out of buffered content, fetch some more
 	    size_t n = bgzf2_read_block(fp);
 	    if (n < 0)
@@ -883,11 +972,11 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
 		return decoded; // EOF
 	}
 
-	size_t n = MIN(buf_sz, fp->buffer_sz - fp->buffer_pos);
-	memcpy(buf, fp->buffer + fp->buffer_pos, n);
+	size_t n = MIN(buf_sz, fp->uncomp->sz - fp->uncomp->pos);
+	memcpy(buf, fp->uncomp->buf + fp->uncomp->pos, n);
 	buf += n;
 	buf_sz -= n;
-	fp->buffer_pos += n;
+	fp->uncomp->pos += n;
 	decoded += n;
     }
 
@@ -1026,7 +1115,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
 	return -1;
 
     // Skip past any partial data
-    fp->buffer_pos = upos - idx->pos;
+    fp->uncomp->pos = upos - idx->pos;
 
     return 0;
 }
