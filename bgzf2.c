@@ -136,10 +136,20 @@ typedef struct bgzf2_job {
     bgzf2_buffer *uncomp;
     bgzf2_buffer *comp;
     int errcode;
-    int hit_eof;
+    int hit_eof; // view from main or view from thread?
     int job_num;
     struct bgzf2_job *next;
 } bgzf2_job;
+
+// Message command types for communicating with bgzf2_mt_reader
+enum mtaux_cmd {
+    NONE = 0,
+    SEEK,
+    SEEK_DONE,
+    HAS_EOF,
+    HAS_EOF_DONE,
+    CLOSE,
+};
 
 // INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
 // a blank one here)
@@ -170,6 +180,7 @@ struct bgzf2 {
     pthread_t io_task;
     pthread_mutex_t command_m; // for messaging with io_task
     pthread_cond_t command_c;
+    enum mtaux_cmd command;
 };
 
 /*----------------------------------------------------------------------
@@ -399,7 +410,7 @@ static int write_pzstd_skippable(bgzf2 *fp, uint32_t comp_sz) {
  * The thread pool workers all call bgzf2_encode_func, whose only task is
  * the data compression step.
  *
- * bgzf2_mt_write is a dedicated I/O thread (not in the pool) whose sole
+ * bgzf2_mt_writer is a dedicated I/O thread (not in the pool) whose sole
  * purpoise is to asynchronously take the result of the compression jobs off
  * fp->out_queue and hwrite them to their destination.  This helps remove any
  * potential deadlocks in the main thread and means we can overlap any I/O
@@ -409,6 +420,14 @@ static int write_pzstd_skippable(bgzf2 *fp, uint32_t comp_sz) {
  * Finally, we have some tidy up code to drain the queue at the end, as
  * the async nature means the main thread will finish before the workers
  * have completed.
+ *
+ * Decode: bgzf2_mt_reader is a dedicated I/O thread (not in the pool) that is
+ * reading blocks ahead of time and dispatching decompression jobs to be
+ * executed on the main thread pool.  These jobs call bgzf2_decode_func.
+ *
+ * We have a "command" channel for communicating with bgzf2_mt_read, for
+ * purposes such as specifying end ranges, closing down, and handling
+ * errors.
  */
 
 /*
@@ -453,10 +472,15 @@ static bgzf2_job *bgzf2_job_new(bgzf2 *fp) {
 	if (!(j = pool_alloc(fp->job_pool)))
 	    return NULL;
 	memset(j, 0, sizeof(*j));
+	//fprintf(stderr, "Alloc new block\n");
     }
 
     return j;
 }
+
+/*----------
+ * MT encoding
+ */
 
 /*
  * Single threaded, in a thread of its own (ie async with main).
@@ -556,11 +580,6 @@ static void *bgzf2_mt_writer(void *vp) {
     return (void *)-1;
 }
 
-// TODO
-static void *bgzf2_mt_reader(void *vp) {
-    return NULL;
-}
-
 /*
  * Threaded: runs in one of many thread pool workers.
  *
@@ -576,6 +595,259 @@ static void *bgzf2_encode_func(void *vp) {
 
     return vp;
 }
+
+/*----------
+ * MT decoding
+ */
+
+static void bgzf2_mt_seek(bgzf2 *fp) {
+    fp->hit_eof = 0;
+    abort();
+}
+
+static void bgzf2_mt_eof(bgzf2 *fp) {
+    abort();
+}
+
+/*
+ * Nul function so we can dispatch a job with the correct serial
+ * to mark failure or to indicate an empty read (EOF).
+ */
+static void *bgzf2_nul_func(void *arg) {
+    return arg;
+}
+
+/*
+ * Single threaded, called by bgzf2_mt_reader.
+ *
+ * Reads a compressed block of data using hread and unwraps the
+ * relevant headers to fill out a bgzf2_job prior to decompression.
+ * This doesn't actually dispatch the decompression job.
+ *
+ * Returns >0 on success (size once uncompressed),
+ *          0 on EOF,
+ *         -1 on failure
+ */
+static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
+{
+    int bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp);
+
+    ssize_t usize = bgzf2_read_block(fp, &j->comp);
+    if (usize <= 0)
+	return usize;
+
+    // Allocate uncompressed data block
+    if (usize > BGZF2_MAX_BLOCK_SIZE)
+	return -1; // protect against extreme memory size attacks
+    if (bgzf2_buffer_grow(&j->uncomp, usize) < 0)
+	return -1;
+
+    j->fp = fp;
+    j->errcode = 0;
+
+    return usize;
+}
+
+/*
+ * Threaded: runs in one of many thread pool workers.
+ *
+ * Function called by the bgzf2 decode multi-threaded worker tasks.
+ */
+static void *bgzf2_decode_func(void *vp) {
+    bgzf2_job *j = (bgzf2_job *)vp;
+
+    if (ZSTD_decompress(j->uncomp->buf, j->uncomp->sz,
+			j->comp->buf, j->comp->sz) != j->uncomp->sz) {
+	j->errcode = 1; // TODO design err codes properly
+    }
+
+    return vp;
+}
+
+/*
+ * Single threaded, in a thread of its own (ie async with main).
+ *
+ * Reads compressed blocks from the file handle and dispatches jobs to the
+ * thread pool to decompress them.
+ */
+static void *bgzf2_mt_reader(void *vp) {
+    bgzf2 *fp = (bgzf2 *)vp;
+    bgzf2_job *j;
+
+restart:
+    if (!(j = bgzf2_job_new(fp)))
+	goto err;
+    j->fp = fp;
+
+    while (bgzf2_mt_read_block(fp, j) > 0) {
+        // Dispatch
+        if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_decode_func, j,
+                                bgzf2_job_free, bgzf2_job_free, 0) < 0) {
+            bgzf2_job_free(j);
+            goto err;
+        }
+
+        // Check for command
+        pthread_mutex_lock(&fp->command_m);
+        switch (fp->command) {
+        case SEEK:
+            bgzf2_mt_seek(fp);  // Sets fp->command to SEEK_DONE
+            pthread_mutex_unlock(&fp->command_m);
+            goto restart;
+
+        case HAS_EOF:
+            bgzf2_mt_eof(fp);   // Sets fp->command to HAS_EOF_DONE
+            break;
+
+        case SEEK_DONE:
+        case HAS_EOF_DONE:
+            pthread_cond_signal(&fp->command_c);
+            break;
+
+        case CLOSE:
+            pthread_cond_signal(&fp->command_c);
+            pthread_mutex_unlock(&fp->command_m);
+            hts_tpool_process_destroy(fp->out_queue);
+            return NULL;
+
+        default:
+            break;
+        }
+        pthread_mutex_unlock(&fp->command_m);
+
+        // Allocate buffer for next block
+	j = bgzf2_job_new(fp);
+        if (!j) {
+            hts_tpool_process_destroy(fp->out_queue);
+            return NULL;
+        }
+	j->fp = fp;
+        //j->errcode = 0;
+        //j->comp_len = 0;
+        //j->uncomp_len = 0;
+        //j->hit_eof = 0;
+        //j->fp = fp;
+    }
+
+    if (j->errcode == 2 /* FIXME */) {
+        // Attempt to multi-thread decode a raw gzip stream cannot be done.
+        // We tear down the multi-threaded decoder and revert to the old code.
+        if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_nul_func, j,
+                                bgzf2_job_free, bgzf2_job_free, 0) < 0) {
+            bgzf2_job_free(j);
+            hts_tpool_process_destroy(fp->out_queue);
+            return NULL;
+        }
+        hts_tpool_process_ref_decr(fp->out_queue);
+        return &j->errcode;
+    }
+
+    // Dispatch an empty block so EOF is spotted.
+    // We also use this mechanism for returning errors, in which case
+    // j->errcode is set already.
+
+    j->hit_eof = 1;
+    if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_nul_func, j,
+                            bgzf2_job_free, bgzf2_job_free, 0) < 0) {
+        bgzf2_job_free(j);
+        hts_tpool_process_destroy(fp->out_queue);
+        return NULL;
+    }
+    if (j->errcode != 0) {
+        hts_tpool_process_destroy(fp->out_queue);
+        return &j->errcode;
+    }
+
+    // We hit EOF so can stop reading, but we may get a subsequent
+    // seek request.  In this case we need to restart the reader.
+    //
+    // To handle this we wait on a condition variable and then
+    // monitor the command. (This could be either seek or close.)
+    for (;;) {
+        pthread_mutex_lock(&fp->command_m);
+        if (fp->command == NONE)
+            pthread_cond_wait(&fp->command_c, &fp->command_m);
+        switch(fp->command) {
+        default:
+            pthread_mutex_unlock(&fp->command_m);
+            break;
+
+        case SEEK:
+            bgzf2_mt_seek(fp);
+            pthread_mutex_unlock(&fp->command_m);
+            goto restart;
+
+        case HAS_EOF:
+            bgzf2_mt_eof(fp);   // Sets fp->command to HAS_EOF_DONE
+            pthread_mutex_unlock(&fp->command_m);
+            break;
+
+        case SEEK_DONE:
+        case HAS_EOF_DONE:
+            pthread_cond_signal(&fp->command_c);
+            pthread_mutex_unlock(&fp->command_m);
+            break;
+
+        case CLOSE:
+            pthread_cond_signal(&fp->command_c);
+            pthread_mutex_unlock(&fp->command_m);
+            hts_tpool_process_destroy(fp->out_queue);
+            return NULL;
+        }
+    }
+
+ err:
+    pthread_mutex_lock(&fp->command_m);
+    fp->command = CLOSE;
+    pthread_cond_signal(&fp->command_c);
+    pthread_mutex_unlock(&fp->command_m);
+    hts_tpool_process_destroy(fp->out_queue);
+    return NULL;
+}
+
+/*
+ * Fetches next decoded block from the thread-pool results queue.
+ *
+ * Returns >0 on success (number of bytes read),
+ *          0 on EOF,
+ *         -1 on failure
+ *         -2 on switch to stream mode
+ */
+static int bgzf2_decode_block_mt(bgzf2 *fp) {
+    if (fp->hit_eof)
+	return 0;
+
+    hts_tpool_result *r;
+
+    r = hts_tpool_next_result_wait(fp->out_queue);
+    if (!r)
+	return -1;
+
+    bgzf2_job *j = (bgzf2_job *)hts_tpool_result_data(r);
+    if (j->hit_eof) {
+	bgzf2_job_free(j);
+	return 0;
+    }
+
+    // Swap j->uncomp with fp->uncomp to avoid a memcpy
+    bgzf2_buffer *tmp = fp->uncomp;
+    fp->uncomp = j->uncomp;
+    j->uncomp = tmp;
+
+//    if (bgzf2_buffer_grow(&fp->uncomp, j->uncomp->sz) < 0)
+//	return -1;
+//
+//    memcpy(fp->uncomp->buf, j->uncomp->buf, j->uncomp->sz);
+
+    bgzf2_job_free(j);
+
+    fp->uncomp->pos = 0;
+    return fp->uncomp->sz;
+}
+
+/*----------
+ * Multi-threading code shared by reader and writers
+ */
 
 /*
  * Main thread: adds a thread pool to a bgzf2 fp, adding
@@ -890,23 +1162,16 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
 }
 
 /*
- * Reads more compressed data and decompresses it.
- * This can work on both non-random access zstd compressed files (TODO)
- * as well as block compressed ones.
+ * Reads more compressed data into the bgzf2_buffer.
+ * NB: The return value is the size of the data when uncompressed.
+ * The compressed size will be in (*comp)->sz.
  *
- * This fills out fp->uncomp and resets to fp->uncomp->pos to be
- * the start/end of decoded size.
- *
- * TODO: just use the standard zstd API if not pzstd framed
- * We may wish to just switch to streaming mode, but we'll want to push
- * data back to the buffer first?
- *
- * Returns >0 on success (number of bytes read),
+ * Returns >0 on success (size when uncompressed),
  *          0 on EOF,
  *         -1 on failure
  *         -2 on switch to stream mode
  */
-static int bgzf2_read_block(bgzf2 *fp) {
+/*static*/ int bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp) {
     uint8_t buf[12];
     size_t n;
 
@@ -939,13 +1204,13 @@ static int bgzf2_read_block(bgzf2 *fp) {
 
     // Load compressed data
     size_t csize = le_to_u32(buf+8);
-    if (bgzf2_buffer_grow(&fp->comp, csize) < 0)
+    if (bgzf2_buffer_grow(comp, csize) < 0)
 	return -1;
-    if (csize != hread(fp->hfp, fp->comp->buf, csize))
+    if (csize != hread(fp->hfp, (*comp)->buf, csize))
 	return -1;
 
-    // Get decompressed size and allocate
-    size_t usize = ZSTD_getFrameContentSize(fp->comp->buf, csize);
+    // Get decompressed size and return it.
+    size_t usize = ZSTD_getFrameContentSize((*comp)->buf, csize);
     if (usize == ZSTD_CONTENTSIZE_UNKNOWN)
 	return -2;
     if (usize == ZSTD_CONTENTSIZE_ERROR)
@@ -953,13 +1218,41 @@ static int bgzf2_read_block(bgzf2 *fp) {
     if (usize == 0)
 	return 0; // empty frame => skip to next
 
+    return usize;
+}
+
+/*
+ * Reads more compressed data and decompresses it.
+ * This can work on both non-random access zstd compressed files (TODO)
+ * as well as block compressed ones.
+ *
+ * This fills out fp->uncomp and resets to fp->uncomp->pos to be
+ * the start/end of decoded size.
+ *
+ * TODO: just use the standard zstd API if not pzstd framed
+ * We may wish to just switch to streaming mode, but we'll want to push
+ * data back to the buffer first?
+ *
+ * Returns >0 on success (number of bytes read),
+ *          0 on EOF,
+ *         -1 on failure
+ *         -2 on switch to stream mode
+ */
+static int bgzf2_decode_block(bgzf2 *fp) {
+    ssize_t usize = bgzf2_read_block(fp, &fp->comp);
+    if (usize <= 0)
+	return usize;
+
+    // Allocate uncompressed data block
     if (usize > BGZF2_MAX_BLOCK_SIZE)
 	return -1; // protect against extreme memory size attacks
     if (bgzf2_buffer_grow(&fp->uncomp, usize) < 0)
 	return -1;
+    assert(fp->uncomp->sz == usize);
 
-    // Uncompress
-    if (ZSTD_decompress(fp->uncomp->buf,usize, fp->comp->buf,csize) != usize) {
+    // Uncompress it
+    if (ZSTD_decompress(fp->uncomp->buf, fp->uncomp->sz,
+			fp->comp->buf, fp->comp->sz) != fp->uncomp->sz) {
 	// Embedded size mismatches the stream
 	return -1;
     }
@@ -976,6 +1269,9 @@ static int bgzf2_read_block(bgzf2 *fp) {
  *        -1 on failure
  */
 int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
+    if (fp->hit_eof)
+	return 0;
+
     size_t decoded = 0;
 
     // loop:
@@ -985,11 +1281,15 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
     while (buf_sz) {
 	if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
 	    // out of buffered content, fetch some more
-	    size_t n = bgzf2_read_block(fp);
+	    size_t n = fp->pool
+		? bgzf2_decode_block_mt(fp)
+		: bgzf2_decode_block(fp);
 	    if (n < 0)
 		return -1;
-	    else if (n == 0)
+	    else if (n == 0) {
+		fp->hit_eof = 1;
 		return decoded; // EOF
+	    }
 	}
 
 	size_t n = MIN(buf_sz, fp->uncomp->sz - fp->uncomp->pos);
@@ -1131,7 +1431,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
     if (idx->cpos != hseek(fp->hfp, idx->cpos, SEEK_SET))
 	return -1;
 
-    if (bgzf2_read_block(fp) < 0)
+    if (bgzf2_decode_block(fp) < 0)
 	return -1;
 
     // Skip past any partial data

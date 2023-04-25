@@ -87,7 +87,8 @@ static int convert(char *in, char *out, int level, long block_size,
 
 
 // TODO: specify a region
-static int decode(char *in, char *out, uint64_t start, uint64_t end) {
+static int decode(char *in, char *out, uint64_t start, uint64_t end,
+                  int nthreads) {
     char buffer[BUFSZ];
     bgzf2 *fp_in = NULL;
     hFILE *fp_out = NULL;
@@ -96,6 +97,14 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end) {
 
     fp_in = bgzf2_open(in, "r");
     fp_out = hopen(out, "w");
+
+    if (nthreads) {
+        hts_tpool *pool = hts_tpool_init(nthreads);
+        if (!pool)
+            goto err;
+        if (bgzf2_thread_pool(fp_in, pool, 0) < 0)
+            goto err;
+    }
 
     if (end) {
         int err = load_seekable_index(fp_in);
@@ -236,6 +245,6 @@ int main(int argc, char **argv) {
     if (compress) {
         return convert(infn, outfn, level, blk_size, nthreads) ? 1 : 0;
     } else {
-        return decode(infn, outfn, start, end) ? 1 : 0;
+        return decode(infn, outfn, start, end, nthreads) ? 1 : 0;
     }
 }
