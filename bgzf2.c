@@ -264,17 +264,37 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
 	return -1;
     }
 
-// Helps on bigger buffer sizes
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_checksumFlag, 1);
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_contentSizeFlag, 1);
+
+#if 0
+    // A bit slower and more system call time.
+    ZSTD_inBuffer input = {
+	.src = uncomp,
+	.size = uncomp_sz,
+	.pos = 0
+    };
+    ZSTD_outBuffer output = {
+	.dst = comp,
+	.size = comp_alloc,
+	.pos = 0
+    };
+
+    size_t csize = ZSTD_compressStream2(zcs, &output, &input, ZSTD_e_end);
+    return ZSTD_isError(csize) || csize != 0 ? -1 : output.pos;
+#else
+    size_t csize = ZSTD_compress2(zcs, comp, comp_alloc, uncomp, uncomp_sz);
+    ZSTD_freeCStream(zcs);
+    return ZSTD_isError(csize) ? -1 : csize;
+#endif
+
+// Helps on bigger buffer sizes (or higher compression levels?)
 //        ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, 6);
 //        ZSTD_CCtx_setParameter(zcs, ZSTD_c_minMatch, 6);
 //        ZSTD_CCtx_setParameter(zcs, ZSTD_c_enableLongDistanceMatching, 1);
 //        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmBucketSizeLog, 4);
 //        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashRateLog, 7); // 4 at -3
 	
-    size_t csize = ZSTD_compress2(zcs, comp, comp_alloc, uncomp, uncomp_sz);
-    ZSTD_freeCStream(zcs);
-
-    return ZSTD_isError(csize) ? -1 : csize;
 }
 
 /*
@@ -925,7 +945,7 @@ static int bgzf2_read_block(bgzf2 *fp) {
 	return -1;
 
     // Get decompressed size and allocate
-    size_t usize = ZSTD_getFrameContentSize(fp->comp, csize);
+    size_t usize = ZSTD_getFrameContentSize(fp->comp->buf, csize);
     if (usize == ZSTD_CONTENTSIZE_UNKNOWN)
 	return -2;
     if (usize == ZSTD_CONTENTSIZE_ERROR)
