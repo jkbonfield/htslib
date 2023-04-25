@@ -103,6 +103,17 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split);
 int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz);
 
 /*
+ * Reads a data from a bgzf2 file handle.  This modifies *buf to
+ * point to a block of internal data and returns the size of this data.
+ * In will be between 1 and buf_sz bytes long.  This data should not be
+ * modified.
+ *
+ * Returns number of bytes read on success
+ *        -1 on failure
+ */
+int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz);
+
+/*
  * Flush the bgzf2 stream and ensure we start a new block.
  *
  * Returns 0 on success,
