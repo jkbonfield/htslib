@@ -89,7 +89,6 @@ static int convert(char *in, char *out, int level, long block_size,
 // TODO: specify a region
 static int decode(char *in, char *out, uint64_t start, uint64_t end,
                   int nthreads) {
-    char buffer[BUFSZ];
     bgzf2 *fp_in = NULL;
     hFILE *fp_out = NULL;
     int ret = 1;
@@ -121,12 +120,24 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
     }
 
     size_t n;
+#if 0
+    char buffer[BUFSZ];
     while (remaining > 0 && (n = bgzf2_read(fp_in, buffer, BUFSZ)) > 0) {
         if (hwrite(fp_out, buffer, MIN(n, remaining)) != n)
             goto err;
 
         remaining -= n;
     }
+#else
+    const char *buf0;
+    while (remaining > 0 &&
+           (n = bgzf2_read_zero_copy(fp_in, &buf0, BUFSZ)) > 0) {
+        if (hwrite(fp_out, buf0, MIN(n, remaining)) != n)
+            goto err;
+
+        remaining -= n;
+    }
+#endif
 
     if (n == 0)
         ret = 0;

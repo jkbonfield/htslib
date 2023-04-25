@@ -834,11 +834,6 @@ static int bgzf2_decode_block_mt(bgzf2 *fp) {
     fp->uncomp = j->uncomp;
     j->uncomp = tmp;
 
-//    if (bgzf2_buffer_grow(&fp->uncomp, j->uncomp->sz) < 0)
-//	return -1;
-//
-//    memcpy(fp->uncomp->buf, j->uncomp->buf, j->uncomp->sz);
-
     bgzf2_job_free(j);
 
     fp->uncomp->pos = 0;
@@ -1299,6 +1294,47 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
 	fp->uncomp->pos += n;
 	decoded += n;
     }
+
+    return decoded;
+}
+
+/*
+ * Reads a data from a bgzf2 file handle.  This modifies *buf to
+ * point to a block of internal data and returns the size of this data.
+ * In will be between 1 and buf_sz bytes long.  This data should not be
+ * modified.
+ *
+ * Returns number of bytes read on success
+ *        -1 on failure
+ */
+int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz) {
+    if (fp->hit_eof)
+	return 0;
+
+    size_t decoded = 0;
+
+    if (!buf_sz)
+	return 0;
+
+    if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
+	// out of buffered content, fetch some more
+	size_t n = fp->pool
+	    ? bgzf2_decode_block_mt(fp)
+	    : bgzf2_decode_block(fp);
+	if (n < 0)
+	    return -1;
+	else if (n == 0) {
+	    fp->hit_eof = 1;
+	    return decoded; // EOF
+	}
+    }
+
+    size_t n = MIN(buf_sz, fp->uncomp->sz - fp->uncomp->pos);
+    *buf = fp->uncomp->buf + fp->uncomp->pos;
+    buf += n;
+    buf_sz -= n;
+    fp->uncomp->pos += n;
+    decoded += n;
 
     return decoded;
 }
