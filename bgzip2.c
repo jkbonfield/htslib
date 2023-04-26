@@ -36,7 +36,8 @@
 #  define MIN(a,b) ((a)<(b)?(a):(b))
 #endif
 
-#define BUFSZ 65536
+//#define BUFSZ 65536
+#define BUFSZ 5000000
 
 static int convert(char *in, char *out, int level, long block_size,
                    int nthreads) {

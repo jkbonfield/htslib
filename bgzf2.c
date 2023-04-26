@@ -138,6 +138,7 @@ typedef struct bgzf2_job {
     int errcode;
     int hit_eof; // view from main or view from thread?
     int job_num;
+    int known_size;
     struct bgzf2_job *next;
 } bgzf2_job;
 
@@ -625,22 +626,30 @@ static void *bgzf2_nul_func(void *arg) {
  * This doesn't actually dispatch the decompression job.
  *
  * Returns >0 on success (size once uncompressed),
+ *          INT_MAX if unknown size (not in frame header),
  *          0 on EOF,
  *         -1 on failure
  */
 static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
 {
-    int bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp);
+    size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp);
 
     ssize_t usize = bgzf2_read_block(fp, &j->comp);
+    if (usize == -2)
+	return INT_MAX;
     if (usize <= 0)
 	return usize;
 
     // Allocate uncompressed data block
-    if (usize > BGZF2_MAX_BLOCK_SIZE)
-	return -1; // protect against extreme memory size attacks
-    if (bgzf2_buffer_grow(&j->uncomp, usize) < 0)
-	return -1;
+    if (usize != -2) {
+	if (usize > BGZF2_MAX_BLOCK_SIZE)
+	    return -1; // protect against extreme memory size attacks
+	if (bgzf2_buffer_grow(&j->uncomp, usize) < 0)
+	    return -1;
+	j->known_size = 1;
+    } else {
+	j->known_size = 0;
+    }
 
     j->fp = fp;
     j->errcode = 0;
@@ -656,10 +665,17 @@ static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
 static void *bgzf2_decode_func(void *vp) {
     bgzf2_job *j = (bgzf2_job *)vp;
 
-    if (ZSTD_decompress(j->uncomp->buf, j->uncomp->sz,
-			j->comp->buf, j->comp->sz) != j->uncomp->sz) {
-	j->errcode = 1; // TODO design err codes properly
-    }
+    int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
+			       size_t usize);
+
+    if (bgzf2_decompress_block(&j->comp, &j->uncomp,
+			       j->known_size ? j->uncomp->sz : -2) < 0)
+	j->errcode = 1;
+
+//    if (ZSTD_decompress(j->uncomp->buf, j->uncomp->sz,
+//			j->comp->buf, j->comp->sz) != j->uncomp->sz) {
+//	j->errcode = 1; // TODO design err codes properly
+//    }
 
     return vp;
 }
@@ -1166,7 +1182,7 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
  *         -1 on failure
  *         -2 on switch to stream mode
  */
-/*static*/ int bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp) {
+/*static*/ size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp) {
     uint8_t buf[12];
     size_t n;
 
@@ -1216,6 +1232,109 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
     return usize;
 }
 
+/*static*/
+int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
+			   size_t usize) {
+    // Allocate uncompressed data block
+    if (usize == -2 /*|| 1*/) {
+	// Unknown size, so we have to dynamically grow and do multiple
+	// decode calls.  This isn't so efficient, but it's needed if
+	// we want to process pzstd output streams as it doesn't add the
+	// content size to the frame.
+	if (*comp)
+	    (*comp)->pos = 0;
+	if (*uncomp)
+	    (*uncomp)->pos = 0;
+//	if (usize != -2)
+//	    if (bgzf2_buffer_grow(uncomp, usize) < 0)
+//		return -1;
+	if (!*uncomp || (*uncomp)->alloc == 0)
+	    // first cautious guess
+	    if (bgzf2_buffer_grow(uncomp, (*comp)->sz*2) < 0)
+		return -1;
+	ZSTD_inBuffer input = {
+	    .src  = (*comp)->buf,
+	    .size = (*comp)->sz,
+	    .pos  = 0
+	};
+	ZSTD_outBuffer output = {
+	    .dst  = (*uncomp)->buf,
+	    .size = (*uncomp)->alloc,
+	    .pos  = 0
+	};
+	size_t dsize = 1;
+	// FIXME: cache me?
+	ZSTD_DStream *zcs = ZSTD_createDStream();
+	if (!zcs)
+	    return -1;
+
+	// Keep iterating until all input stream is consumed
+	while (input.pos < input.size) {
+	    dsize = ZSTD_decompressStream(zcs, &output, &input);
+	    if (ZSTD_isError(dsize)) {
+		fprintf(stderr, "Error: %s\n", ZSTD_getErrorName(dsize));
+		return -1;
+	    }
+	    // Grow output buffer based on proportion of input, accounting
+	    // for potential improvements in ratio as we extend.
+	    if (input.pos < input.size && output.size == output.pos) {
+		size_t guess = (input.size+1.0) / (input.pos+1.0) * 1.05 *
+		    output.size + 1000;
+		guess = guess > (*uncomp)->alloc + 10000
+		      ? guess : (*uncomp)->alloc + 10000;
+		if (bgzf2_buffer_grow(uncomp, guess) < 0)
+		    return -1;
+
+		output.dst  = (*uncomp)->buf;
+		output.size = (*uncomp)->alloc;
+	    }
+	}
+
+	// We've used all input, but may still be blocked on output size.
+	while (dsize != 0) {
+	    if ((*uncomp)->pos == (*uncomp)->sz)
+		if (bgzf2_buffer_grow(uncomp, (*uncomp)->alloc*1.5+100000) < 0)
+		    return -1;
+
+	    output.dst  = (*uncomp)->buf;
+	    output.size = (*uncomp)->alloc;
+
+	    dsize = ZSTD_decompressStream(zcs, &output, &input);
+	    if (ZSTD_isError(dsize)) {
+		fprintf(stderr, "Error: %s\n", ZSTD_getErrorName(dsize));
+		return -1;
+	    }
+	}
+	(*uncomp)->sz = output.pos;
+	
+    } else {
+	// Note: we could use the same logic above, but seeding the
+	// fp->uncomp buffer size with usize instead of a starting guess.
+	//
+	// This appears to be similar speed to this code below, but I'm
+	// wary as it's much less clear as to how it's working.
+	//
+	// FIXME: merge at some point when we're more confident in robustness
+	// of pzstd support.
+	if (usize > BGZF2_MAX_BLOCK_SIZE)
+	    return -1; // protect against extreme memory size attacks
+	if (bgzf2_buffer_grow(uncomp, usize) < 0)
+	    return -1;
+	assert((*uncomp)->sz == usize);
+
+	// Uncompress it
+	if (ZSTD_decompress((*uncomp)->buf, (*uncomp)->sz,
+			    (*comp)->buf, (*comp)->sz) != (*uncomp)->sz) {
+	    // Embedded size mismatches the stream
+	    return -1;
+	}
+    }
+
+    (*uncomp)->pos = 0;
+
+    return (*uncomp)->sz;
+}
+
 /*
  * Reads more compressed data and decompresses it.
  * This can work on both non-random access zstd compressed files (TODO)
@@ -1235,26 +1354,98 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
  */
 static int bgzf2_decode_block(bgzf2 *fp) {
     ssize_t usize = bgzf2_read_block(fp, &fp->comp);
-    if (usize <= 0)
+    if (usize != -2 && usize <= 0)
 	return usize;
 
-    // Allocate uncompressed data block
-    if (usize > BGZF2_MAX_BLOCK_SIZE)
-	return -1; // protect against extreme memory size attacks
-    if (bgzf2_buffer_grow(&fp->uncomp, usize) < 0)
-	return -1;
-    assert(fp->uncomp->sz == usize);
+    return bgzf2_decompress_block(&fp->comp, &fp->uncomp, usize);
 
-    // Uncompress it
-    if (ZSTD_decompress(fp->uncomp->buf, fp->uncomp->sz,
-			fp->comp->buf, fp->comp->sz) != fp->uncomp->sz) {
-	// Embedded size mismatches the stream
-	return -1;
+    // Allocate uncompressed data block
+    if (usize == -2) {
+	// Unknown size, so we have to dynamically grow and do multiple
+	// decode calls.  This isn't so efficient, but it's needed if
+	// we want to process pzstd output streams as it doesn't add the
+	// content size to the frame.
+	if (fp->comp)
+	    fp->comp->pos = 0;
+	if (fp->uncomp)
+	    fp->uncomp->pos = 0;
+	if (!fp->uncomp || fp->uncomp->sz == 0)
+	    if (bgzf2_buffer_grow(&fp->uncomp, fp->comp->sz*2) < 0)
+		return -1;
+	ZSTD_inBuffer input = {
+	    .src  = fp->comp->buf,
+	    .size = fp->comp->sz,
+	    .pos  = 0
+	};
+	ZSTD_outBuffer output = {
+	    .dst  = fp->uncomp->buf,
+	    .size = fp->uncomp->sz,
+	    .pos  = 0
+	};
+	size_t dsize;
+	ZSTD_DStream *zcs = ZSTD_createDStream();
+	if (!zcs)
+	    return -1;
+
+	// Keep iterating until all input stream is consumed
+	while (input.pos < input.size) {
+	    dsize = ZSTD_decompressStream(zcs, &output, &input);
+	    if (ZSTD_isError(dsize)) {
+		fprintf(stderr, "Error: %s\n", ZSTD_getErrorName(dsize));
+		return -1;
+	    }
+	    // Grow output buffer based on proportion of input, accounting
+	    // for potential improvements in ratio as we extend.
+	    if (input.pos < input.size && output.size == output.pos) {
+		size_t guess = (input.size+1.0) / (input.pos+1.0) * 1.05 *
+		    output.size + 1000;
+		guess = guess > fp->uncomp->sz + 10000
+		      ? guess : fp->uncomp->sz + 10000;
+		if (bgzf2_buffer_grow(&fp->uncomp, guess) < 0)
+		    return -1;
+
+		output.dst  = fp->uncomp->buf;
+		output.size = fp->uncomp->sz;
+	    }
+	}
+
+	// We've used all input, but may still be blocked on output size.
+	while (dsize != 0) {
+	    if (bgzf2_buffer_grow(&fp->uncomp,
+				  fp->uncomp->sz * 1.5 + 100000) < 0)
+		return -1;
+
+	    output.dst  = fp->uncomp->buf;
+	    output.size = fp->uncomp->sz;
+
+	    dsize = ZSTD_decompressStream(zcs, &output, &input);
+	    if (ZSTD_isError(dsize)) {
+		fprintf(stderr, "Error: %s\n", ZSTD_getErrorName(dsize));
+		return -1;
+	    }
+	}
+	fp->uncomp->sz = output.pos;
+	
+    } else {
+	// FIXME: we could use the same logic above, but seeding the
+	// fp->uncomp buffer size with usize instead of a starting guess.
+	if (usize > BGZF2_MAX_BLOCK_SIZE)
+	    return -1; // protect against extreme memory size attacks
+	if (bgzf2_buffer_grow(&fp->uncomp, usize) < 0)
+	    return -1;
+	assert(fp->uncomp->sz == usize);
+
+	// Uncompress it
+	if (ZSTD_decompress(fp->uncomp->buf, fp->uncomp->sz,
+			    fp->comp->buf, fp->comp->sz) != fp->uncomp->sz) {
+	    // Embedded size mismatches the stream
+	    return -1;
+	}
     }
 
     fp->uncomp->pos = 0;
 
-    return usize;
+    return fp->uncomp->sz;
 }
 
 /*
@@ -1312,13 +1503,14 @@ int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz) {
 	return 0;
 
     size_t decoded = 0;
+    *buf = NULL;
 
     if (!buf_sz)
 	return 0;
 
     if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
 	// out of buffered content, fetch some more
-	size_t n = fp->pool
+	ssize_t n = fp->pool
 	    ? bgzf2_decode_block_mt(fp)
 	    : bgzf2_decode_block(fp);
 	if (n < 0)
