@@ -1232,11 +1232,25 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
     return usize;
 }
 
+static pthread_once_t bgzf2_once = PTHREAD_ONCE_INIT;
+static pthread_key_t bgzf2_key;
+
+static void bgzf2_tls_free(void *ptr) {
+    ZSTD_DStream *zcs = (ZSTD_DStream *)ptr;
+    if (zcs)
+	ZSTD_freeDStream(zcs);
+}
+
+static void bgzf2_tls_init(void) {
+    pthread_key_create(&bgzf2_key, bgzf2_tls_free);
+    pthread_setspecific(bgzf2_key, ZSTD_createDStream());
+}
+
 /*static*/
 int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
 			   size_t usize) {
     // Allocate uncompressed data block
-    if (usize == -2 /*|| 1*/) {
+    if (usize == -2) {
 	// Unknown size, so we have to dynamically grow and do multiple
 	// decode calls.  This isn't so efficient, but it's needed if
 	// we want to process pzstd output streams as it doesn't add the
@@ -1245,12 +1259,13 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
 	    (*comp)->pos = 0;
 	if (*uncomp)
 	    (*uncomp)->pos = 0;
-//	if (usize != -2)
-//	    if (bgzf2_buffer_grow(uncomp, usize) < 0)
-//		return -1;
+	if (usize != -2) {
+	    if (bgzf2_buffer_grow(uncomp, usize) < 0)
+		return -1;
+	}
 	if (!*uncomp || (*uncomp)->alloc == 0)
 	    // first cautious guess
-	    if (bgzf2_buffer_grow(uncomp, (*comp)->sz*2) < 0)
+	    if (bgzf2_buffer_grow(uncomp, (*comp)->sz*4 + 8192) < 0)
 		return -1;
 	ZSTD_inBuffer input = {
 	    .src  = (*comp)->buf,
@@ -1263,14 +1278,26 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
 	    .pos  = 0
 	};
 	size_t dsize = 1;
-	// FIXME: cache me?
-	ZSTD_DStream *zcs = ZSTD_createDStream();
-	if (!zcs)
+
+	// Cache ZSTD_DStream, one per thread.
+	// This is an 8% speed gain in a test, but that may not be
+	// representative.
+	pthread_once(&bgzf2_once, bgzf2_tls_init);
+	ZSTD_DStream *zds = pthread_getspecific(bgzf2_key);
+	if (!zds) {
+	    zds = ZSTD_createDStream();
+	    pthread_setspecific(bgzf2_key, zds);
+	}
+	//ZSTD_DCtx_reset(zds, ZSTD_reset_session_only);
+
+	//ZSTD_DStream *zds = ZSTD_createDStream();	
+	if (!zds)
 	    return -1;
 
 	// Keep iterating until all input stream is consumed
 	while (input.pos < input.size) {
-	    dsize = ZSTD_decompressStream(zcs, &output, &input);
+	    //fprintf(stderr, "In %ld out %ld\n", input.size, output.size);
+	    dsize = ZSTD_decompressStream(zds, &output, &input);
 	    if (ZSTD_isError(dsize)) {
 		fprintf(stderr, "Error: %s\n", ZSTD_getErrorName(dsize));
 		return -1;
@@ -1282,6 +1309,7 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
 		    output.size + 1000;
 		guess = guess > (*uncomp)->alloc + 10000
 		      ? guess : (*uncomp)->alloc + 10000;
+		//fprintf(stderr, "Grow %ld to %ld\n", (*uncomp)->alloc, guess);
 		if (bgzf2_buffer_grow(uncomp, guess) < 0)
 		    return -1;
 
@@ -1292,6 +1320,7 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
 
 	// We've used all input, but may still be blocked on output size.
 	while (dsize != 0) {
+	    fprintf(stderr, "Second zstd decode\n");
 	    if ((*uncomp)->pos == (*uncomp)->sz)
 		if (bgzf2_buffer_grow(uncomp, (*uncomp)->alloc*1.5+100000) < 0)
 		    return -1;
@@ -1299,7 +1328,7 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
 	    output.dst  = (*uncomp)->buf;
 	    output.size = (*uncomp)->alloc;
 
-	    dsize = ZSTD_decompressStream(zcs, &output, &input);
+	    dsize = ZSTD_decompressStream(zds, &output, &input);
 	    if (ZSTD_isError(dsize)) {
 		fprintf(stderr, "Error: %s\n", ZSTD_getErrorName(dsize));
 		return -1;
@@ -1307,6 +1336,8 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
 	}
 	(*uncomp)->sz = output.pos;
 	
+	//ZSTD_freeDStream(zds);  // uncomment if not using TLS
+
     } else {
 	// Note: we could use the same logic above, but seeding the
 	// fp->uncomp buffer size with usize instead of a starting guess.
