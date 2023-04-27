@@ -120,7 +120,7 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
         }
     }
 
-    size_t n;
+    ssize_t n;
 #if 0
     char buffer[BUFSZ];
     while (remaining > 0 && (n = bgzf2_read(fp_in, buffer, BUFSZ)) > 0) {
@@ -146,6 +146,9 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
  err:
     if (fp_in)  ret |= (bgzf2_close(fp_in) < 0);
     if (fp_out) ret |= (hclose(fp_out) < 0);
+
+    if (ret)
+        fprintf(stderr, "Error decoding file\n");
 
     return ret ? -1 : 0;
 }
