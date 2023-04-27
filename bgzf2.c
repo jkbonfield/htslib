@@ -1236,7 +1236,8 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
  * Returns >0 on success (size when uncompressed),
  *          0 on EOF,
  *         -1 on failure
- *         -2 on switch to stream mode
+ *         -2 on unknown sized blocks (eg pzstd format)
+ *         -3 on switch to stream mode
  */
 /*static*/ size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp) {
     uint8_t buf[12];
@@ -1262,7 +1263,7 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
 
 	    goto next_block;
 	}
-	return -2;
+	return -3;
     } else {
 	// remainder of pzstd skippable frame, now we know it is one
 	if (4 != hread(fp->hfp, buf+8, 4))
