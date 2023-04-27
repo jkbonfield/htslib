@@ -248,6 +248,19 @@ void bgzf2_buffer_free(bgzf2_buffer *b) {
     free(b);
 }
 
+static pthread_once_t bgzf2_comp_once = PTHREAD_ONCE_INIT;
+static pthread_key_t bgzf2_comp_key;
+
+static void bgzf2_tls_comp_free(void *ptr) {
+    ZSTD_CStream *zcs = (ZSTD_CStream *)ptr;
+    if (zcs)
+	ZSTD_freeCStream(zcs);
+}
+
+static void bgzf2_tls_comp_init(void) {
+    pthread_key_create(&bgzf2_comp_key, bgzf2_tls_comp_free);
+}
+
 /*
  * Compresses a block of data.
  * The output buffer is dynamically grown and can be reused between calls.
@@ -267,6 +280,7 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
     // Currently we use Zstd only.
     // For now we create and configure new streams each time, but we
     // could consider reusing the same zstd stream (NB: needs 1 per thread).
+#if 0
     ZSTD_CStream *zcs = ZSTD_createCStream();
     if (!zcs)
 	return -1;
@@ -279,7 +293,6 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_checksumFlag, 1);
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_contentSizeFlag, 1);
 
-#if 0
     // A bit slower and more system call time.
     ZSTD_inBuffer input = {
 	.src = uncomp,
@@ -294,7 +307,50 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
 
     size_t csize = ZSTD_compressStream2(zcs, &output, &input, ZSTD_e_end);
     return ZSTD_isError(csize) || csize != 0 ? -1 : output.pos;
+#elif 1
+    // Cache one ZSTD_CStream per running thread.  Little differnce on fast
+    // compression, but matters when doing high levels with large blocks as
+    // memory usage in the context becomes significant.
+    //
+    // ./bgzip2 -b8M -11 -@8 enwik9
+    // => 18.6s / 2m24s / 1.3s this   -5% real time
+    // vs 19.5s / 2m31s / 1.4s below
+    //
+    // -15
+    // => 43.3s / 5m37s / 1.6s this
+    // vs 44.3s / 5m41s / 5.0s below
+    pthread_once(&bgzf2_comp_once, bgzf2_tls_comp_init);
+    ZSTD_CStream *zcs = pthread_getspecific(bgzf2_comp_key);
+    if (!zcs) {
+	zcs = ZSTD_createCStream();
+	pthread_setspecific(bgzf2_comp_key, zcs);
+
+	if (ZSTD_initCStream(zcs, level) != 0) {
+	    ZSTD_freeCStream(zcs);
+	    return -1;
+	}
+    }
+    ZSTD_CCtx_reset(zcs, ZSTD_reset_session_only);
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_checksumFlag, 1);
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_contentSizeFlag, 1);
+    ZSTD_initCStream(zcs, level);
+
+    size_t csize = ZSTD_compress2(zcs, comp, comp_alloc, uncomp, uncomp_sz);
+    return ZSTD_isError(csize) ? -1 : csize;
+
 #else
+    ZSTD_CStream *zcs = ZSTD_createCStream();
+    if (!zcs)
+	return -1;
+
+    if (ZSTD_initCStream(zcs, level) != 0) {
+	ZSTD_freeCStream(zcs);
+	return -1;
+    }
+
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_checksumFlag, 1);
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_contentSizeFlag, 1);
+
     size_t csize = ZSTD_compress2(zcs, comp, comp_alloc, uncomp, uncomp_sz);
     ZSTD_freeCStream(zcs);
     return ZSTD_isError(csize) ? -1 : csize;
@@ -1236,14 +1292,13 @@ static pthread_once_t bgzf2_once = PTHREAD_ONCE_INIT;
 static pthread_key_t bgzf2_key;
 
 static void bgzf2_tls_free(void *ptr) {
-    ZSTD_DStream *zcs = (ZSTD_DStream *)ptr;
-    if (zcs)
-	ZSTD_freeDStream(zcs);
+    ZSTD_DStream *zds = (ZSTD_DStream *)ptr;
+    if (zds)
+	ZSTD_freeDStream(zds);
 }
 
 static void bgzf2_tls_init(void) {
     pthread_key_create(&bgzf2_key, bgzf2_tls_free);
-    pthread_setspecific(bgzf2_key, ZSTD_createDStream());
 }
 
 /*static*/
