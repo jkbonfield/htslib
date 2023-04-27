@@ -165,6 +165,7 @@ struct bgzf2 {
     bgzf2_index_t *index; // index entries
     int nindex;           // used size of index array
     int aindex;           // allocated size of index array
+    int errcode;          // FIXME
 
     bgzf2_buffer *uncomp; // uncompressed data
     bgzf2_buffer *comp;   // compressed data
@@ -185,6 +186,7 @@ struct bgzf2 {
     pthread_mutex_t command_m; // for messaging with io_task
     pthread_cond_t command_c;
     enum mtaux_cmd command;
+    uint64_t seek_to;
 };
 
 /*----------------------------------------------------------------------
@@ -660,9 +662,25 @@ static void *bgzf2_encode_func(void *vp) {
  * MT decoding
  */
 
+/*
+ * Performs the seek (called by reader thread).
+ *
+ * This simply drains the entire queue, throwing away blocks, seeks,
+ * and starts it up again.  Brute force, but maybe sufficient.
+ */
 static void bgzf2_mt_seek(bgzf2 *fp) {
+    hts_tpool_process_reset(fp->out_queue, 0);
+
+    pthread_mutex_lock(&fp->job_pool_m);
+    if (hseek(fp->hfp, fp->seek_to, SEEK_SET) < 0)
+        fp->errcode = 99; // BGZF_ERR_IO FIXME
+    else
+	fp->errcode = 0;
     fp->hit_eof = 0;
-    abort();
+    fp->command = SEEK_DONE;
+    pthread_mutex_unlock(&fp->job_pool_m);
+
+    pthread_cond_signal(&fp->command_c);
 }
 
 static void bgzf2_mt_eof(bgzf2 *fp) {
@@ -1771,15 +1789,43 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
     assert(upos >= idx->pos);
     //assert(upos < idx->pos + idx->uncomp); // can fail due to skippable
 
-    // Load the relevant block
-    if (idx->cpos != hseek(fp->hfp, idx->cpos, SEEK_SET))
-	return -1;
+    if (fp->pool) {
+	// The multi-threaded reader runs asynchronously (fp->io_task).
+	// We send it a command to do the seek instead od doing this ourselves.
+        pthread_mutex_lock(&fp->command_m);
+	fp->command = SEEK;
+	fp->seek_to = upos;
+        pthread_cond_signal(&fp->command_c);
+        hts_tpool_wake_dispatch(fp->out_queue);
 
-    if (bgzf2_decode_block(fp) < 0)
-	return -1;
+	// Now we wait for the io_task to give us the error code back.
+	do {
+            pthread_cond_wait(&fp->command_c, &fp->command_m);
+            switch (fp->command) {
+            case SEEK_DONE: break;
+            case SEEK:
+                // Resend signal intended for bgzf2_mt_reader(), incase
+		// we were woke up by something else.
+                pthread_cond_signal(&fp->command_c);
+                break;
+            default:
+                abort();  // Should not get to any other state
+            }
+	} while (fp->command != SEEK_DONE);
+	fp->command = NONE;
+        pthread_mutex_unlock(&fp->command_m);
 
-    // Skip past any partial data
-    fp->uncomp->pos = upos - idx->pos;
+    } else {
+	if (idx->cpos != hseek(fp->hfp, idx->cpos, SEEK_SET))
+	    return -1;
+
+	// Load the relevant block
+	if (bgzf2_decode_block(fp) < 0)
+	    return -1;
+
+	// Skip past any partial data
+	fp->uncomp->pos = upos - idx->pos;
+    }
 
     return 0;
 }
