@@ -1,3 +1,5 @@
+// TODO: have a way to set end coord so MT decode doesn't waste cycles.
+
 // NB: previous commit was considerably more efficient when overcomitting on
 // threads vs CPU count.
 
@@ -172,6 +174,7 @@ struct bgzf2 {
     struct bgzf2_job *job_free_list;
     int jobs_pending;
     int flush_pending;
+    int own_pool;
     hts_tpool *pool;
     hts_tpool_process *out_queue;
     int hit_eof;
@@ -749,6 +752,8 @@ static void *bgzf2_mt_reader(void *vp) {
 restart:
     if (!(j = bgzf2_job_new(fp)))
 	goto err;
+    j->errcode = 0;
+    j->hit_eof = 0;
     j->fp = fp;
 
     while (bgzf2_mt_read_block(fp, j) > 0) {
@@ -794,11 +799,6 @@ restart:
             return NULL;
         }
 	j->fp = fp;
-        //j->errcode = 0;
-        //j->comp_len = 0;
-        //j->uncomp_len = 0;
-        //j->hit_eof = 0;
-        //j->fp = fp;
     }
 
     if (j->errcode == 2 /* FIXME */) {
@@ -869,6 +869,7 @@ restart:
     }
 
  err:
+    fprintf(stderr, "Err\n");
     pthread_mutex_lock(&fp->command_m);
     fp->command = CLOSE;
     pthread_cond_signal(&fp->command_c);
@@ -896,7 +897,9 @@ static int bgzf2_decode_block_mt(bgzf2 *fp) {
 	return -1;
 
     bgzf2_job *j = (bgzf2_job *)hts_tpool_result_data(r);
+    hts_tpool_delete_result(r, 0);
     if (j->hit_eof) {
+	fp->hit_eof = 1;
 	bgzf2_job_free(j);
 	return 0;
     }
@@ -924,6 +927,7 @@ static int bgzf2_decode_block_mt(bgzf2 *fp) {
  *        -1 on failure
  */
 int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize) {
+    fp->own_pool = 0;
     fp->pool = pool;
     if (!qsize)
         qsize = hts_tpool_size(pool)*2;
@@ -1167,11 +1171,36 @@ int bgzf2_close(bgzf2 *fp) {
 	bgzf2_job_really_free(j);
     }
 
-    if (fp->job_pool)
-	pool_destroy(fp->job_pool);
-
     if (fp->comp)   bgzf2_buffer_free(fp->comp);
     if (fp->uncomp) bgzf2_buffer_free(fp->uncomp);
+
+    if (fp->pool) {
+	if (!fp->is_write) {
+	    // Tell the reader to shutdown and wait for it
+	    pthread_mutex_lock(&fp->command_m);
+	    fp->command = CLOSE;
+	    pthread_cond_signal(&fp->command_c);
+	    hts_tpool_wake_dispatch(fp->out_queue); // unstick the reader
+	    pthread_mutex_unlock(&fp->command_m);
+
+	    if (hts_tpool_process_is_shutdown(fp->out_queue) > 1)
+		ret = -1;
+	}
+
+	// out_queue has a ref count, so can we this both here and in threads
+	hts_tpool_process_destroy(fp->out_queue);
+
+	void *retval = NULL;
+	pthread_join(fp->io_task, &retval);
+	ret = retval != NULL ? -1 : ret;
+
+	pthread_mutex_destroy(&fp->job_pool_m);
+	pthread_mutex_destroy(&fp->command_m);
+	pthread_cond_destroy(&fp->command_c);
+	pool_destroy(fp->job_pool);
+	if (fp->own_pool)
+	    hts_tpool_destroy(fp->pool);
+    }
 
     free(fp->index);
     free(fp);
