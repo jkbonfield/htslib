@@ -138,15 +138,16 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
 #else
     const char *buf0;
     while (remaining > 0 &&
-           (n = bgzf2_read_zero_copy(fp_in, &buf0, BUFSZ)) > 0) {
-        if (hwrite(fp_out, buf0, MIN(n, remaining)) != n)
+           (n = bgzf2_read_zero_copy(fp_in, &buf0,
+                                     MIN(BUFSZ,remaining))) > 0) {
+        if (hwrite(fp_out, buf0, n) != n)
             goto err;
 
         remaining -= n;
     }
 #endif
 
-    if (n == 0)
+    if (n == 0 || remaining == 0)
         ret = 0;
 
  err:
