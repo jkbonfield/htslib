@@ -95,8 +95,14 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
     int ret = 1;
     size_t remaining = end ? end - start : INT64_MAX;
 
-    fp_in = bgzf2_open(in, "r");
-    fp_out = hopen(out, "w");
+    if (!(fp_in = bgzf2_open(in, "r"))) {
+        perror(in);
+        return -1;
+    }
+    if (!(fp_out = hopen(out, "w"))) {
+        perror(out);
+        return -1;
+    }
 
     if (nthreads) {
         hts_tpool *pool = hts_tpool_init(nthreads);
@@ -120,7 +126,7 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
         }
     }
 
-    ssize_t n;
+    ssize_t n = 0;
 #if 0
     char buffer[BUFSZ];
     while (remaining > 0 && (n = bgzf2_read(fp_in, buffer, BUFSZ)) > 0) {
