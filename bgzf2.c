@@ -149,6 +149,7 @@ enum mtaux_cmd {
     NONE = 0,
     SEEK,
     SEEK_DONE,
+    SEEK_FAIL,
     HAS_EOF,
     HAS_EOF_DONE,
     CLOSE,
@@ -667,17 +668,42 @@ static void *bgzf2_encode_func(void *vp) {
  *
  * This simply drains the entire queue, throwing away blocks, seeks,
  * and starts it up again.  Brute force, but maybe sufficient.
+ *
+ * Returns 0 on success
+ *        <0 on failure (same codes as load_seekabel_index)
  */
+int load_seekable_index(bgzf2 *fp);
+bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos);
 static void bgzf2_mt_seek(bgzf2 *fp) {
+    if (!fp->index) {
+	int err;
+	if ((err = load_seekable_index(fp)) < 0) {
+	    pthread_mutex_lock(&fp->job_pool_m);
+	    fp->errcode = -err;
+	    fp->command = SEEK_FAIL;
+	    pthread_mutex_unlock(&fp->job_pool_m);
+	    return;
+	}
+    }
     hts_tpool_process_reset(fp->out_queue, 0);
 
     pthread_mutex_lock(&fp->job_pool_m);
-    if (hseek(fp->hfp, fp->seek_to, SEEK_SET) < 0)
+
+    bgzf2_index_t *idx = index_query(fp, fp->seek_to);
+    if (!idx)
+	fp->errcode = 1; // FIXME
+
+    if (hseek(fp->hfp, idx->cpos, SEEK_SET) < 0)
         fp->errcode = 99; // BGZF_ERR_IO FIXME
     else
 	fp->errcode = 0;
     fp->hit_eof = 0;
     fp->command = SEEK_DONE;
+
+    // The block is loaded later, as before, but we need to start with
+    // pos part way through it.  We do this by modifying seek_to, which
+    // is used in bgzf2_decode_block_mt.
+    fp->seek_to -= idx->pos;
     pthread_mutex_unlock(&fp->job_pool_m);
 
     pthread_cond_signal(&fp->command_c);
@@ -767,6 +793,17 @@ static void *bgzf2_mt_reader(void *vp) {
     bgzf2 *fp = (bgzf2 *)vp;
     bgzf2_job *j;
 
+    // Note we may have started with load_seekable_index being called by
+    // the main application, and we're now in an IO thread. So hread
+    // caches represent a data race.  We know however the index isn't
+    // loaded after this function starts, so we explicitly lock and unlock
+    // to avoid a false positive race.
+    //
+    // As an alternative, consider making the index load implicit
+    // and done on-demand after the initial open, so it's part of this?
+    pthread_mutex_lock(&fp->command_m);
+    pthread_mutex_unlock(&fp->command_m);
+
 restart:
     if (!(j = bgzf2_job_new(fp)))
 	goto err;
@@ -786,7 +823,8 @@ restart:
         pthread_mutex_lock(&fp->command_m);
         switch (fp->command) {
         case SEEK:
-            bgzf2_mt_seek(fp);  // Sets fp->command to SEEK_DONE
+	    // Sets fp->command to SEEK_DONE
+            bgzf2_mt_seek(fp);
             pthread_mutex_unlock(&fp->command_m);
             goto restart;
 
@@ -929,7 +967,12 @@ static int bgzf2_decode_block_mt(bgzf2 *fp) {
 
     bgzf2_job_free(j);
 
-    fp->uncomp->pos = 0;
+    // We may need to start part way into this block if we've just done a
+    // seek.  Seek_to is reset from absolute uncompressed offset before the
+    // seek, to relative offset to seek block after the seek.
+    fp->uncomp->pos = fp->seek_to;
+    fp->seek_to = 0;
+
     return fp->uncomp->sz;
 }
 
@@ -1799,12 +1842,7 @@ bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos) {
  * TODO: consider "whence" and returning off_t, like lseek?
  */
 int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
-    // Query in index
-    bgzf2_index_t *idx = index_query(fp, upos);
-    if (!idx)
-	return -1;
-    assert(upos >= idx->pos);
-    //assert(upos < idx->pos + idx->uncomp); // can fail due to skippable
+    int ret = 0;
 
     if (fp->pool) {
 	// The multi-threaded reader runs asynchronously (fp->io_task).
@@ -1819,7 +1857,11 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
 	do {
             pthread_cond_wait(&fp->command_c, &fp->command_m);
             switch (fp->command) {
-            case SEEK_DONE: break;
+	    case SEEK_FAIL:
+		ret = -1;
+		break;
+            case SEEK_DONE:
+		break;
             case SEEK:
                 // Resend signal intended for bgzf2_mt_reader(), incase
 		// we were woke up by something else.
@@ -1828,11 +1870,25 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
             default:
                 abort();  // Should not get to any other state
             }
-	} while (fp->command != SEEK_DONE);
+	} while (fp->command != SEEK_DONE && fp->command != SEEK_FAIL);
 	fp->command = NONE;
         pthread_mutex_unlock(&fp->command_m);
 
     } else {
+	if (!fp->index) {
+	    int err;
+	    if ((err = load_seekable_index(fp)) < 0) {
+		fp->errcode = -err;
+		return -1;
+	    }
+	}
+
+	// Query in index
+	bgzf2_index_t *idx = index_query(fp, upos);
+	if (!idx)
+	    return -1;
+	assert(upos >= idx->pos);
+
 	if (idx->cpos != hseek(fp->hfp, idx->cpos, SEEK_SET))
 	    return -1;
 
@@ -1844,6 +1900,6 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
 	fp->uncomp->pos = upos - idx->pos;
     }
 
-    return 0;
+    return ret;
 }
 
