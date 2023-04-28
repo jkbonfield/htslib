@@ -991,7 +991,7 @@ static int bgzf2_write_block(bgzf2 *fp, bgzf2_buffer *buf) {
     if (write_pzstd_skippable(fp, fp->comp->sz) < 0)
 	return -1;
 
-    int ret = bgzf2_add_index(fp, buf->sz, fp->comp->sz);
+    int ret = bgzf2_add_index(fp, buf->pos, fp->comp->sz);
 
     if (hwrite(fp->hfp, fp->comp->buf, fp->comp->sz) != fp->comp->sz)
 	return -1;
@@ -1743,34 +1743,51 @@ int load_seekable_index(bgzf2 *fp) {
  * position upos.  If the index has pzstd skippable frames, we point to
  * that element.  This ensures we know the size of the next data container.
  *
+ * NB: Index entries are non-overlapping.  So A to B, B+1 to C, C+1 to D.
+ *
  * Returns an index entry on success,
  *         NULL on failure (errno==ERANGE if beyond end of file)
  */
 bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos) {
-    int idx_start = 0;
-    int idx_end = fp->nindex;
+    int istart = 0;
+    int iend = fp->nindex-1;
+    int imid;
     bgzf2_index_t *idx = fp->index;
 
-    while (idx_start < idx_end) {
-	int mid = (idx_start + idx_end) / 2;
-	if (upos < idx[mid].pos)
-	    idx_end = mid;
-	else if (upos >= idx[mid].pos + idx[mid].uncomp)
-	    idx_start = mid;
-	else {
-	    idx_start = mid;
-	    break;
+    // Find approximate location
+    for (imid = (iend+1)/2; imid != istart; imid = (istart+iend)/2) {
+	if (idx[imid].pos >= upos)
+	    iend = imid;
+	else
+	    istart = imid;
+    }
+
+    // We end with either imid or next (non-skip) imid being correct.
+    // Select non-skippable frame
+    while (imid+1 < fp->nindex && idx[imid].uncomp == 0)
+	imid++;
+
+    // We end with correct being idx[imid] or idx[imid+1]
+    if (idx[imid].pos + idx[imid].uncomp <= upos) {
+	// Select next non-skippable frame
+	if (imid+1 < fp->nindex)
+	    imid++;
+	while (imid+1 < fp->nindex && idx[imid].uncomp == 0)
+	    imid++;
+
+	// Check for upos being end of index
+	if (idx[imid].pos + idx[imid].uncomp <= upos) {
+	    errno = ERANGE;
+	    return NULL;
 	}
     }
 
-//    fprintf(stderr, "Found %ld at %d: %ld + %ld\n",
-//	    (long)upos, idx_start, idx[idx_start].pos, idx[idx_start].uncomp);
+    // Finally walk back back to include skippable frames prior to this
+    // offset, as these hold our meta-data.
+    while (imid > 0 && idx[imid-1].uncomp == 0)
+	imid--;
 
-    // Skip back including skippable frames
-    while (idx_start > 0 && idx[idx_start-1].uncomp == 0)
-	idx_start--;
-
-    return &idx[idx_start];
+    return &idx[imid];
 }
 
 /*
