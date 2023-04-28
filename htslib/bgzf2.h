@@ -122,15 +122,13 @@ int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz);
 int bgzf2_flush(bgzf2 *fp);
 
 /*
- * Loads a seekable index from a bgzf2 file.
+ * Seeks to uncompressed position upos in a bgzf file opened for read.
  *
  * Returns 0 on success,
- *        -1 on error,
- *        -2 on non-seekable stream.
- *        -3 if no index found.
+ *        -1 on failure
+ *
+ * TODO: consider "whence" and returning off_t, like lseek?
  */
-int load_seekable_index(bgzf2 *fp);
-
 int bgzf2_seek(bgzf2 *fp, uint64_t upos);
 
 /**

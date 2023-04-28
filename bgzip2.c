@@ -114,13 +114,6 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
     }
 
     if (end) {
-        int err = load_seekable_index(fp_in);
-        if (err < -2)
-            fprintf(stderr, "BGZF2 seekable-index not found\n");
-
-        if (err < 0)
-            goto err;
-
         errno = 0;
         if (bgzf2_seek(fp_in, start) < 0) {
             if (errno == ERANGE) {
@@ -271,9 +264,11 @@ int main(int argc, char **argv) {
     if (!level)
         level = BGZF2_DEFAULT_LEVEL;
 
+    int ret;
     if (compress) {
-        return convert(infn, outfn, level, blk_size, nthreads) ? 1 : 0;
+        ret = convert(infn, outfn, level, blk_size, nthreads) ? 1 : 0;
     } else {
-        return decode(infn, outfn, start, end, nthreads) ? 1 : 0;
+        ret = decode(infn, outfn, start, end, nthreads) ? 1 : 0;
     }
+    return ret;
 }
