@@ -690,20 +690,25 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
     pthread_mutex_lock(&fp->job_pool_m);
 
     bgzf2_index_t *idx = index_query(fp, fp->seek_to);
-    if (!idx)
+    if (!idx) {
 	fp->errcode = 1; // FIXME
+	fp->command = SEEK_FAIL;
+    } else {
+	if (hseek(fp->hfp, idx->cpos, SEEK_SET) < 0) {
+	    fp->errcode = 99; // BGZF_ERR_IO FIXME
+	    fp->command = SEEK_FAIL;
+	} else {
+	    fp->errcode = 0;
+	    fp->command = SEEK_DONE;
+	}
 
-    if (hseek(fp->hfp, idx->cpos, SEEK_SET) < 0)
-        fp->errcode = 99; // BGZF_ERR_IO FIXME
-    else
-	fp->errcode = 0;
+	// The block is loaded later, as before, but we need to start with
+	// pos part way through it.  We do this by modifying seek_to, which
+	// is used in bgzf2_decode_block_mt.
+	fp->seek_to -= idx->pos;
+    }
     fp->hit_eof = 0;
-    fp->command = SEEK_DONE;
 
-    // The block is loaded later, as before, but we need to start with
-    // pos part way through it.  We do this by modifying seek_to, which
-    // is used in bgzf2_decode_block_mt.
-    fp->seek_to -= idx->pos;
     pthread_mutex_unlock(&fp->job_pool_m);
 
     pthread_cond_signal(&fp->command_c);
@@ -925,7 +930,7 @@ restart:
     }
 
  err:
-    fprintf(stderr, "Err\n");
+    // We get here if out_queue has been shutdown as we're closing the fp
     pthread_mutex_lock(&fp->command_m);
     fp->command = CLOSE;
     pthread_cond_signal(&fp->command_c);
@@ -1223,18 +1228,6 @@ int bgzf2_close(bgzf2 *fp) {
 	ret |= write_seekable_index(fp);
     }
 
-    ret |= hclose(fp->hfp);
-
-    bgzf2_job *j, *n;
-    for (j = fp->job_free_list; j; j = n) {
-	//fprintf(stderr, "free job %d\n", j->job_num);
-	n = j->next;
-	bgzf2_job_really_free(j);
-    }
-
-    if (fp->comp)   bgzf2_buffer_free(fp->comp);
-    if (fp->uncomp) bgzf2_buffer_free(fp->uncomp);
-
     if (fp->pool) {
 	if (!fp->is_write) {
 	    // Tell the reader to shutdown and wait for it
@@ -1258,10 +1251,23 @@ int bgzf2_close(bgzf2 *fp) {
 	pthread_mutex_destroy(&fp->job_pool_m);
 	pthread_mutex_destroy(&fp->command_m);
 	pthread_cond_destroy(&fp->command_c);
+
+	bgzf2_job *j, *n;
+	for (j = fp->job_free_list; j; j = n) {
+	    //fprintf(stderr, "free job %d\n", j->job_num);
+	    n = j->next;
+	    bgzf2_job_really_free(j);
+	}
+
 	pool_destroy(fp->job_pool);
 	if (fp->own_pool)
 	    hts_tpool_destroy(fp->pool);
     }
+
+    if (fp->comp)   bgzf2_buffer_free(fp->comp);
+    if (fp->uncomp) bgzf2_buffer_free(fp->uncomp);
+
+    ret |= hclose(fp->hfp);
 
     free(fp->index);
     free(fp);
