@@ -45,6 +45,8 @@ static int convert(char *in, char *out, int level, long block_size,
     hFILE *fp_in = NULL;
     bgzf2 *fp_out = NULL;
     char buffer[BUFSZ];
+    int ret = -1;
+    hts_tpool *pool = NULL;
 
     fp_in = hopen(in, "r");
     if (!fp_in) goto err;
@@ -55,7 +57,7 @@ static int convert(char *in, char *out, int level, long block_size,
     if (!fp_out) goto err;
 
     if (nthreads) {
-        hts_tpool *pool = hts_tpool_init(nthreads);
+        pool = hts_tpool_init(nthreads);
         if (!pool)
             goto err;
         if (bgzf2_thread_pool(fp_out, pool, 0) < 0)
@@ -71,11 +73,7 @@ static int convert(char *in, char *out, int level, long block_size,
 	    goto err;
     }
     
-    if (hclose(fp_in) < 0 || bgzf2_close(fp_out) < 0)
-	return -1;
-
-    return 0;
-
+    ret = 0;
  err:
     if (fp_in)
         if (hclose(fp_in))
@@ -84,7 +82,10 @@ static int convert(char *in, char *out, int level, long block_size,
     if (fp_out)
         bgzf2_close(fp_out);
 
-    return -1;
+    if (pool)
+        hts_tpool_destroy(pool);
+
+    return ret;
 }
 
 
@@ -95,6 +96,7 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
     hFILE *fp_out = NULL;
     int ret = 1;
     size_t remaining = end ? end - start : INT64_MAX;
+    hts_tpool *pool = NULL;
 
     if (!(fp_in = bgzf2_open(in, "r"))) {
         perror(in);
@@ -106,7 +108,7 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
     }
 
     if (nthreads) {
-        hts_tpool *pool = hts_tpool_init(nthreads);
+        pool = hts_tpool_init(nthreads);
         if (!pool)
             goto err;
         if (bgzf2_thread_pool(fp_in, pool, 0) < 0)
@@ -153,6 +155,9 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
  err:
     if (fp_in)  ret |= (bgzf2_close(fp_in) < 0);
     if (fp_out) ret |= (hclose(fp_out) < 0);
+
+    if (pool)
+        hts_tpool_destroy(pool);
 
     if (ret)
         fprintf(stderr, "Error decoding file\n");
