@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <getopt.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "htslib/bgzf2.h"
 #include "htslib/hfile.h"
@@ -120,9 +121,15 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
         if (err < 0)
             goto err;
 
+        errno = 0;
         if (bgzf2_seek(fp_in, start) < 0) {
-            fprintf(stderr, "Failed to seek in bgzf2 file\n");
-            goto err;
+            if (errno == ERANGE) {
+                fprintf(stderr, "Range is beyond end of file\n");
+                goto success;
+            } else {
+                fprintf(stderr, "Failed to seek in bgzf2 file\n");
+                goto err;
+            }
         }
     }
 
@@ -149,7 +156,7 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
 
     if (n == 0 || remaining == 0)
         ret = 0;
-
+ success:
  err:
     if (fp_in)  ret |= (bgzf2_close(fp_in) < 0);
     if (fp_out) ret |= (hclose(fp_out) < 0);
