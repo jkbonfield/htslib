@@ -567,6 +567,14 @@ int hts_detect_format2(hFILE *hfile, const char *fname, htsFormat *fmt)
 #endif
     }
     else if (len >= 4 && memcmp(s, "\x28\xb5\x2f\xfd", 4) == 0) {
+        // Basic zstd, detecting via a skippable frame.  This may also
+        // mislabel some LZ4 as zstd though, so we may wish to be more
+        // rigorous when we actually use the data stream.
+        fmt->compression = zstd_compression;
+        return 0;
+    } else if (len >= 4 && memcmp(s+1, "\x2a\x4d\x18", 3) == 0
+               && s[0] >= 0x50 && s[0] <= 0x5f) {
+        // Zstd with skippable frames
         fmt->compression = zstd_compression;
         return 0;
     }
