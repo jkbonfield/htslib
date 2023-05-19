@@ -1,5 +1,9 @@
 // TODO: have a way to set end coord so MT decode doesn't waste cycles.
 
+// TODO: Make first block fit within 4k so hpeek can work.
+
+// TODO: EOF block - can check via seekable index.
+
 // NB: previous commit was considerably more efficient when overcomitting on
 // threads vs CPU count.
 
@@ -158,6 +162,10 @@ enum mtaux_cmd {
 // INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
 // a blank one here)
 struct bgzf2 {
+    // Shared with BGZF to provide an easy redirect for code that
+    // doesn't want to have lots of conditionals.
+    unsigned dummy1:16, is_zstd:1, dummy2:15;
+
     struct hFILE *hfp;    // actual file handle
     int format;           // encoding format (unused, but zlib, zstd, bsc, ...)
     int level;            // compression level
@@ -1166,22 +1174,9 @@ int bgzf2_set_block_size(bgzf2 *fp, size_t sz) {
     return bgzf2_buffer_grow(&fp->uncomp, sz);
 }
 
-/*
- * Opens a bgzf2 file 'fn' for read ("r") or write ("w", or "w1" to "w19").
- *
- * Returns bgzf2 file handle on success,
- *         or NULL on failure.
- */
-bgzf2 *bgzf2_open(const char *fn, const char *mode) {
-    bgzf2 *fp = calloc(1, sizeof(*fp));
-    if (!fp)
-	return NULL;
-
-    fp->hfp = hopen(fn, mode);
-    if (!fp->hfp) {
-	free(fp);
-	return NULL;
-    }
+static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) { 
+    fp->is_zstd = 1;
+    fp->hfp = hfp;
 
     if (*mode == 'w') {
 	fp->is_write = 1;
@@ -1213,6 +1208,41 @@ bgzf2 *bgzf2_open(const char *fn, const char *mode) {
 
     return fp;
 }
+
+/*
+ * Opens a bgzf2 file from an existing hfile for read ("r") or write
+ * ("w", or "w1" to "w19").
+ *
+ * Returns bgzf2 file handle on success,
+ *         or NULL on failure.
+ */
+bgzf2 *bgzf2_hopen(hFILE *hfp, const char *mode) {
+    bgzf2 *fp = calloc(1, sizeof(*fp));
+    if (!fp)
+	return NULL;
+
+    return bgzf2_open_common(fp, hfp, mode);
+}
+/*
+ * Opens a bgzf2 file 'fn' for read ("r") or write ("w", or "w1" to "w19").
+ *
+ * Returns bgzf2 file handle on success,
+ *         or NULL on failure.
+ */
+bgzf2 *bgzf2_open(const char *fn, const char *mode) {
+    bgzf2 *fp = calloc(1, sizeof(*fp));
+    if (!fp)
+	return NULL;
+
+    fp->hfp = hopen(fn, mode);
+    if (!fp->hfp) {
+	free(fp);
+	return NULL;
+    }
+
+    return bgzf2_open_common(fp, fp->hfp, mode);
+}
+
 
 /*
  * Closes a bgzf2 file.
