@@ -1868,6 +1868,8 @@ int hts_set_thread_pool(htsFile *fp, htsThreadPool *p) {
         return bgzf_thread_pool(hts_get_bgzfp(fp), p->pool, p->qsize);
     } else if (fp->format.format == cram) {
         return hts_set_opt(fp, CRAM_OPT_THREAD_POOL, p);
+    } else if (fp->format.compression == zstd_compression) {
+        return bgzf2_thread_pool(fp->fp.bgzf2, p->pool, p->qsize);
     }
     else return 0;
 }
