@@ -1224,6 +1224,9 @@ int bgzf_read_block(BGZF *fp)
 
 ssize_t bgzf_read(BGZF *fp, void *data, size_t length)
 {
+    if (fp->is_zstd)
+        return bgzf2_read((bgzf2 *)fp, data, length);
+
     ssize_t bytes_read = 0;
     uint8_t *output = (uint8_t*)data;
     if (length <= 0) return 0;
@@ -1531,6 +1534,8 @@ int bgzf_mt_read_block(BGZF *fp, bgzf_job *j)
 
 static int bgzf_check_EOF_common(BGZF *fp)
 {
+    if (fp->is_zstd) return 1; // FIXME
+
     uint8_t buf[28];
     off_t offset = htell(fp->fp);
     if (hseek(fp->fp, -28, SEEK_END) < 0) {

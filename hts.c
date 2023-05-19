@@ -49,6 +49,9 @@ DEALINGS IN THE SOFTWARE.  */
 #endif
 #endif
 
+// TODO: add ifdefs
+#include <zstd.h>
+
 #include "htslib/hts.h"
 #include "htslib/bgzf.h"
 #include "cram/cram.h"
@@ -365,6 +368,43 @@ decompress_peek_xz(hFILE *fp, unsigned char *dest, size_t destsize)
 }
 #endif
 
+static ssize_t
+decompress_peek_zstd(hFILE *fp, unsigned char *dest, size_t destsize)
+{
+    unsigned char buffer[4096];
+    ssize_t npeek = hpeek(fp, buffer, sizeof buffer);
+    ssize_t sz = -1;
+
+    if (npeek < 0) return -1;
+
+    ZSTD_DStream *zds = ZSTD_createDStream();
+    if (!zds) return -1;
+
+    ZSTD_inBuffer input = {
+        .src  = buffer,
+        .size = npeek,
+        .pos  = 0
+    };
+    ZSTD_outBuffer output = {
+        .dst  = dest,
+        .size = destsize,
+        .pos  = 0
+    };
+
+    while (input.pos < input.size && output.pos < output.size) {
+        size_t ret = ZSTD_decompressStream(zds, &output, &input);
+        if (ZSTD_isError(ret)) {
+            sz = -1;
+            goto err;
+        }
+    }
+
+    sz = output.pos;
+ err:
+    ZSTD_freeDStream(zds);
+    return sz;
+}
+
 // Parse "x.y" text, taking care because the string is not NUL-terminated
 // and filling in major/minor only when the digits are followed by a delimiter,
 // so we don't misread "1.10" as "1.1" due to reaching the end of the buffer.
@@ -566,17 +606,17 @@ int hts_detect_format2(hFILE *hfile, const char *fname, htsFormat *fmt)
         return 0;
 #endif
     }
-    else if (len >= 4 && memcmp(s, "\x28\xb5\x2f\xfd", 4) == 0) {
-        // Basic zstd, detecting via a skippable frame.  This may also
-        // mislabel some LZ4 as zstd though, so we may wish to be more
-        // rigorous when we actually use the data stream.
+    else if (len >= 4 &&
+             (memcmp(s, "\x28\xb5\x2f\xfd", 4) == 0 ||
+              (memcmp(s+1, "\x2a\x4d\x18", 3) == 0 &&
+               s[0] >= 0x50 && s[0] <= 0x5f))) {
+        // Basic zstd by the magic number, or potential pzstd detected
+        // by skippable frame.  Note this may also mislabel some
+        // LZ4 data as zstd, but we'll validate this.
         fmt->compression = zstd_compression;
-        return 0;
-    } else if (len >= 4 && memcmp(s+1, "\x2a\x4d\x18", 3) == 0
-               && s[0] >= 0x50 && s[0] <= 0x5f) {
-        // Zstd with skippable frames
-        fmt->compression = zstd_compression;
-        return 0;
+        len = decompress_peek_zstd(hfile, s, sizeof s);
+        if (len == -1)
+            fmt->compression = no_compression;
     }
     else {
         len = hpeek(hfile, s, sizeof s);
@@ -1476,7 +1516,12 @@ htsFile *hts_hopen(hFILE *hfile, const char *fn, const char *mode)
     case binary_format:
     case bam:
     case bcf:
-        fp->fp.bgzf = bgzf_hopen(hfile, simple_mode);
+        if (fp->format.compression = zstd_compression)
+            fp->fp.bgzf2 = bgzf2_hopen(hfile, simple_mode);
+        else
+            fp->fp.bgzf = bgzf_hopen(hfile, simple_mode);
+
+        // union, so bgzf == bgzf2 pointer
         if (fp->fp.bgzf == NULL) goto error;
         fp->is_bin = fp->is_bgzf = 1;
         break;

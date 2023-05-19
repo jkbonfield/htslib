@@ -40,6 +40,7 @@
 
 #include "htslib/hts_defs.h"
 #include "htslib/thread_pool.h"
+#include "htslib/hfile.h"
 
 // Ensure ssize_t exists within this header. All #includes must precede this,
 // and ssize_t must be undefined again at the end of this header.
@@ -57,6 +58,15 @@ typedef struct bgzf2 bgzf2;
 #define BGZF2_DEFAULT_BLOCK_SIZE 256000
 #define BGZF2_DEFAULT_LEVEL 5
 #define BGZF2_MAX_BLOCK_SIZE (1<<30)
+
+/*
+ * Opens a bgzf2 file from an existing hfile for read ("r") or write
+ * ("w", or "w1" to "w19").
+ *
+ * Returns bgzf2 file handle on success,
+ *         or NULL on failure.
+ */
+bgzf2 *bgzf2_hopen(hFILE *hfp, const char *mode);
 
 /*
  * Opens a bgzf2 file 'fn' for read ("r") or write ("w", or "w1" to "w19").
