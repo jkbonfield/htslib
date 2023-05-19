@@ -1534,7 +1534,7 @@ int bgzf_mt_read_block(BGZF *fp, bgzf_job *j)
 
 static int bgzf_check_EOF_common(BGZF *fp)
 {
-    if (fp->is_zstd) return 1; // FIXME
+    if (fp->is_zstd) return bgzf2_check_EOF((bgzf2 *)fp);
 
     uint8_t buf[28];
     off_t offset = htell(fp->fp);

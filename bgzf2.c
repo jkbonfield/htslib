@@ -1950,3 +1950,36 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
     return ret;
 }
 
+/*
+ * Check for known EOF by detection of seekable index footer.
+ *
+ * Returns 0 if marker is absent,
+ *         1 if present,
+ *         2 if unable to check (eg cannot seek),
+ *        -1 for I/O error, with errno set.
+ */
+int bgzf2_check_EOF(bgzf2 *fp) {
+    off_t offset = htell(fp->hfp);
+    if (hseek(fp->hfp, -4, SEEK_END) < 0) {
+        if (
+#ifdef _WIN32
+	    errno == EINVAL ||
+#endif
+	    errno == ESPIPE) {
+	    hclearerr(fp->hfp);
+	    return 2;
+	}
+
+	return -1;
+    }
+
+    uint8_t buf[4];
+    if (hread(fp->hfp, buf, 4) != 4)
+	return -1;
+
+    if (hseek(fp->hfp, offset, SEEK_SET) < 0)
+	return -1;
+
+    return (memcmp(buf, "\xb1\xea\x92\x8f", 4) == 0) ? 1 : 0;
+}
+
