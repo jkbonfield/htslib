@@ -141,6 +141,16 @@ int bgzf2_flush(bgzf2 *fp);
  */
 int bgzf2_seek(bgzf2 *fp, uint64_t upos);
 
+/*
+ * Check for known EOF by detection of seekable index footer.
+ *
+ * Returns 0 if marker is absent,
+ *         1 if present,
+ *         2 if unable to check (eg cannot seek),
+ *        -1 for I/O error, with errno set.
+ */
+int bgzf2_check_EOF(bgzf2 *fp);
+
 /**
  * Enable multi-threading via a shared thread pool.  This means
  * both encoder and decoder can balance usage across a single pool
