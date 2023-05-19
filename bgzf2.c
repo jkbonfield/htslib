@@ -347,6 +347,14 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
     ZSTD_CCtx_reset(zcs, ZSTD_reset_session_only);
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_checksumFlag, 1);
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_contentSizeFlag, 1);
+
+// Helps on bigger buffer sizes (or higher compression levels?)
+//    ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, 6);
+//    ZSTD_CCtx_setParameter(zcs, ZSTD_c_minMatch, 6);
+//    ZSTD_CCtx_setParameter(zcs, ZSTD_c_enableLongDistanceMatching, 1);
+//    ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmBucketSizeLog, 4);
+//    ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashRateLog, 7); // 4 at -3
+
     ZSTD_initCStream(zcs, level);
 
     size_t csize = ZSTD_compress2(zcs, comp, comp_alloc, uncomp, uncomp_sz);
@@ -369,14 +377,6 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
     ZSTD_freeCStream(zcs);
     return ZSTD_isError(csize) ? -1 : csize;
 #endif
-
-// Helps on bigger buffer sizes (or higher compression levels?)
-//        ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, 6);
-//        ZSTD_CCtx_setParameter(zcs, ZSTD_c_minMatch, 6);
-//        ZSTD_CCtx_setParameter(zcs, ZSTD_c_enableLongDistanceMatching, 1);
-//        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmBucketSizeLog, 4);
-//        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashRateLog, 7); // 4 at -3
-	
 }
 
 /*
