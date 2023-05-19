@@ -164,7 +164,7 @@ enum mtaux_cmd {
 struct bgzf2 {
     // Shared with BGZF to provide an easy redirect for code that
     // doesn't want to have lots of conditionals.
-    unsigned dummy1:16, is_zstd:1, dummy2:15;
+    unsigned dummy1:16, is_zstd:1, first_block:1, dummy2:14;
 
     struct hFILE *hfp;    // actual file handle
     int format;           // encoding format (unused, but zlib, zstd, bsc, ...)
@@ -1109,15 +1109,22 @@ static int bgzf2_write_block_mt(bgzf2 *fp, bgzf2_buffer *buf) {
  *        -1 on failure
  */
 int bgzf2_flush(bgzf2 *fp) {
+    int ret;
     if (!fp->uncomp->pos)
 	return 0;
 
     if (fp->pool) {
-	int ret = bgzf2_write_block_mt(fp, fp->uncomp);
-	return ret;
+	ret = bgzf2_write_block_mt(fp, fp->uncomp);
     } else {
-	return bgzf2_write_block(fp, fp->uncomp);
+	ret = bgzf2_write_block(fp, fp->uncomp);
     }
+
+    if (fp->first_block) {
+	fp->first_block = 0;
+	ret = bgzf2_buffer_grow(&fp->uncomp, fp->block_size);
+    }
+
+    return ret;
 }
 
 /*
@@ -1171,11 +1178,15 @@ int bgzf2_set_block_size(bgzf2 *fp, size_t sz) {
 	if (bgzf2_flush(fp) < 0)
 	    return -1;
 
+    if (fp->first_block)
+	sz = sz < 1024 ? sz : 1024;
+
     return bgzf2_buffer_grow(&fp->uncomp, sz);
 }
 
 static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) { 
     fp->is_zstd = 1;
+    fp->first_block = 1;
     fp->hfp = hfp;
 
     if (*mode == 'w') {
