@@ -246,7 +246,8 @@ struct hts_filter_t;
 //    Note is_bgzf being set does not indicate the flag is BGZF compressed,
 //    nor even whether it is compressed at all (eg on naked BAMs).
 typedef struct htsFile {
-    uint32_t is_bin:1, is_write:1, is_be:1, is_cram:1, is_bgzf:1, dummy:27;
+    uint32_t is_bin:1, is_write:1, is_be:1, is_cram:1, is_bgzf:1, is_bgzf2:1,
+        dummy:26;
     int64_t lineno;
     kstring_t line;
     char *fn, *fn_aux;

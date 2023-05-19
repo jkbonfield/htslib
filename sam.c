@@ -2233,6 +2233,8 @@ int sam_hdr_write(htsFile *fp, const sam_hdr_t *h)
         }
         if (fp->is_bgzf) {
             if (bgzf_flush(fp->fp.bgzf) != 0) return -1;
+        } else if (fp->is_bgzf2) {
+            if (bgzf2_flush(fp->fp.bgzf2) != 0) return -1;
         } else {
             if (hflush(fp->fp.hfile) != 0) return -1;
         }

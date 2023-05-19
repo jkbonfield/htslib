@@ -1516,14 +1516,16 @@ htsFile *hts_hopen(hFILE *hfile, const char *fn, const char *mode)
     case binary_format:
     case bam:
     case bcf:
-        if (fp->format.compression = zstd_compression)
+        if (fp->format.compression == zstd_compression) {
             fp->fp.bgzf2 = bgzf2_hopen(hfile, simple_mode);
-        else
+            fp->is_bin = fp->is_bgzf2 = 1;
+        } else {
             fp->fp.bgzf = bgzf_hopen(hfile, simple_mode);
+            fp->is_bin = fp->is_bgzf = 1;
+        }
 
         // union, so bgzf == bgzf2 pointer
         if (fp->fp.bgzf == NULL) goto error;
-        fp->is_bin = fp->is_bgzf = 1;
         break;
 
     case cram:

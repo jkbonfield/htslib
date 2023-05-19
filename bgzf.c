@@ -2066,6 +2066,9 @@ static void bgzf_close_mt(BGZF *fp) {
 
 int bgzf_close(BGZF* fp)
 {
+    if (fp->is_zstd)
+        return bgzf2_close((bgzf2 *)fp);
+
     int ret, block_length;
     if (fp == 0) return -1;
     if (fp->is_write && fp->is_compressed) {
