@@ -59,6 +59,7 @@ enum test_op {
     WRITE_COMPRESSED   = 32, // eg vcf.gz, sam.gz, fastq.gz
     WRITE_FASTQ        = 64,
     WRITE_FASTA        = 128,
+    WRITE_COMPRESSED_ZSTD = 256, // eg vcf.zst, sam.zst, bam (bgzf2)
 };
 
 int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, htsFile *out) {
@@ -305,7 +306,16 @@ int main(int argc, char *argv[])
         case 't': opts.fn_ref = optarg; break;
         case 'i': if (hts_opt_add(&in_opts, optarg)) return 1; break;
         case 'b': opts.flag |= WRITE_BINARY_COMP; break;
-        case 'z': opts.flag |= WRITE_COMPRESSED; break;
+        case 'z':
+            // toggle between bgzf and bgzf2
+            if (opts.flag & WRITE_COMPRESSED) {
+                opts.flag &= ~WRITE_COMPRESSED;
+                opts.flag |= WRITE_COMPRESSED_ZSTD;
+            } else {
+                opts.flag &= ~WRITE_COMPRESSED_ZSTD;
+                opts.flag |= WRITE_COMPRESSED;
+            }
+            break;
         case 'C': opts.flag |= WRITE_CRAM; break;
         case 'f': opts.flag |= WRITE_FASTQ; break;
         case 'F': opts.flag |= WRITE_FASTA; break;
@@ -368,6 +378,7 @@ int main(int argc, char *argv[])
     else if (opts.flag & WRITE_BINARY_COMP) strcat(modew, "b");
     else if (opts.flag & WRITE_COMPRESSED) strcat(modew, "z");
     else if (opts.flag & WRITE_UNCOMPRESSED) strcat(modew, "bu");
+    if (opts.flag & WRITE_COMPRESSED_ZSTD) strcat(modew, "Z");
     if (opts.flag & WRITE_FASTQ) strcat(modew, "f");
     else if (opts.flag & WRITE_FASTA) strcat(modew, "F");
     out = hts_open(out_fn, modew);

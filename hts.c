@@ -606,7 +606,14 @@ int hts_detect_format2(hFILE *hfile, const char *fname, htsFormat *fmt)
         return 0;
 #endif
     }
-    else if (len >= 4 &&
+    else if (len >= 12 &&
+             memcmp(s, "\x5b\x2a\x4d\x18", 4) == 0 &&
+             memcmp(s+8, "BGZ2", 4) == 0) {
+        len = le_to_u32(s+4);
+        if (len > 1024-12) len = 1024-12;
+        memmove(s, s+12, len);
+        fmt->compression = bgzf2_compression;
+    } else if (len >= 4 &&
              (memcmp(s, "\x28\xb5\x2f\xfd", 4) == 0 ||
               (memcmp(s+1, "\x2a\x4d\x18", 3) == 0 &&
                s[0] >= 0x50 && s[0] <= 0x5f))) {
@@ -826,6 +833,7 @@ char *hts_format_description(const htsFormat *format)
     case razf_compression:   kputs(" legacy-RAZF-compressed", &str); break;
     case xz_compression:     kputs(" XZ-compressed", &str); break;
     case zstd_compression:   kputs(" Zstandard-compressed", &str); break;
+    case bgzf2_compression:  kputs(" BGZF2-compressed", &str); break;
     case custom: kputs(" compressed", &str); break;
     case gzip:   kputs(" gzip-compressed", &str); break;
     case bgzf:
@@ -1489,6 +1497,7 @@ htsFile *hts_hopen(hFILE *hfile, const char *fn, const char *mode)
         else fmt->format = text_format;
 
         if (strchr(simple_mode, 'z')) fmt->compression = bgzf;
+        else if (strchr(simple_mode, 'Z')) fmt->compression = bgzf2_compression;
         else if (strchr(simple_mode, 'g')) fmt->compression = gzip;
         else if (strchr(simple_mode, 'u')) fmt->compression = no_compression;
         else {
@@ -1516,7 +1525,7 @@ htsFile *hts_hopen(hFILE *hfile, const char *fn, const char *mode)
     case binary_format:
     case bam:
     case bcf:
-        if (fp->format.compression == zstd_compression) {
+        if (fp->format.compression == bgzf2_compression) {
             fp->fp.bgzf2 = bgzf2_hopen(hfile, simple_mode);
             fp->is_bin = fp->is_bgzf2 = 1;
         } else {
@@ -1544,9 +1553,13 @@ htsFile *hts_hopen(hFILE *hfile, const char *fn, const char *mode)
     case sam:
     case vcf:
         if (fp->format.compression != no_compression) {
-            fp->fp.bgzf = bgzf_hopen(hfile, simple_mode);
-            if (fp->fp.bgzf == NULL) goto error;
+            if (fp->format.compression == bgzf2_compression) {
+                fp->fp.bgzf2 = bgzf2_hopen(hfile, simple_mode);
+            } else {
+                fp->fp.bgzf = bgzf_hopen(hfile, simple_mode);
+            }
             fp->is_bgzf = 1;
+            if (fp->fp.bgzf == NULL) goto error;
         }
         else
             fp->fp.hfile = hfile;
@@ -1868,7 +1881,7 @@ int hts_set_thread_pool(htsFile *fp, htsThreadPool *p) {
         return bgzf_thread_pool(hts_get_bgzfp(fp), p->pool, p->qsize);
     } else if (fp->format.format == cram) {
         return hts_set_opt(fp, CRAM_OPT_THREAD_POOL, p);
-    } else if (fp->format.compression == zstd_compression) {
+    } else if (fp->format.compression == bgzf2_compression) {
         return bgzf2_thread_pool(fp->fp.bgzf2, p->pool, p->qsize);
     }
     else return 0;
@@ -1973,6 +1986,10 @@ int hts_getline(htsFile *fp, int delimiter, kstring_t *str)
     case gzip:
     case bgzf:
         ret = bgzf_getline(fp->fp.bgzf, '\n', str);
+        break;
+
+    case bgzf2_compression:
+        ret = bgzf2_getline(fp->fp.bgzf2, '\n', str);
         break;
 
     default:

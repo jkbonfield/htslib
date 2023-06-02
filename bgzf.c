@@ -1279,6 +1279,8 @@ ssize_t bgzf_read(BGZF *fp, void *data, size_t length)
 
 // -1 for EOF, -2 for error, 0-255 for byte.
 int bgzf_peek(BGZF *fp) {
+    if (fp->is_zstd) return bgzf2_peek((bgzf2 *)fp);
+
     int available = fp->block_length - fp->block_offset;
     if (available <= 0) {
         if (bgzf_read_block(fp) < 0) {
@@ -1988,6 +1990,9 @@ int bgzf_flush_try(BGZF *fp, ssize_t size)
 
 ssize_t bgzf_write(BGZF *fp, const void *data, size_t length)
 {
+    if (fp->is_zstd)
+        return bgzf2_write((bgzf2 *)fp, data, length, 0);
+
     if ( !fp->is_compressed ) {
         size_t push = length + (size_t) fp->block_offset;
         fp->block_offset = push % BGZF_MAX_BLOCK_SIZE;
