@@ -110,10 +110,15 @@ other header meta-data.
 #include "htslib/hts_endian.h"
 #include "htslib/thread_pool.h"
 #include "htslib/bgzf2.h"
+#include "htslib/kstring.h"
 #include "cram/pooled_alloc.h"
 
 #ifndef MIN
 #  define MIN(a,b) ((a)<(b)?(a):(b))
+#endif
+
+#ifndef MAX
+#  define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
 // INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
@@ -239,6 +244,10 @@ int bgzf2_buffer_grow(bgzf2_buffer **bp, size_t n) {
 	if (!b)
 	    return -1;
     }
+
+//    if (n < b->sz)
+//	return 0;
+
     b->sz = n;
     if (n <= b->alloc)
 	return 0;
@@ -377,6 +386,21 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
     ZSTD_freeCStream(zcs);
     return ZSTD_isError(csize) ? -1 : csize;
 #endif
+}
+
+/*
+ * Write a BGZF2 header block as a skippable frame.  This is just enough
+ * data, uncompressed, to auto-detect the internal file format.
+ */
+static int bgzf2_write_header(bgzf2 *fp) {
+    uint8_t buf[16+8+4];
+    int len = MIN(16, fp->uncomp->sz);
+    u32_to_le(0x184D2A5B, buf);
+    u32_to_le(len+4, buf+4);
+    memcpy(buf+8, "BGZ2", 4);
+    memcpy(buf+12, fp->uncomp->buf, len);
+
+    return hwrite(fp->hfp, buf, 12+len) == 12+len ? 0 : -1;
 }
 
 /*
@@ -1113,15 +1137,15 @@ int bgzf2_flush(bgzf2 *fp) {
     if (!fp->uncomp->pos)
 	return 0;
 
+    if (fp->first_block) {
+	fp->first_block = 0;
+	ret |= bgzf2_write_header(fp);
+    }
+
     if (fp->pool) {
 	ret = bgzf2_write_block_mt(fp, fp->uncomp);
     } else {
 	ret = bgzf2_write_block(fp, fp->uncomp);
-    }
-
-    if (fp->first_block) {
-	fp->first_block = 0;
-	ret = bgzf2_buffer_grow(&fp->uncomp, fp->block_size);
     }
 
     return ret;
@@ -1178,8 +1202,8 @@ int bgzf2_set_block_size(bgzf2 *fp, size_t sz) {
 	if (bgzf2_flush(fp) < 0)
 	    return -1;
 
-    if (fp->first_block)
-	sz = sz < 1024 ? sz : 1024;
+//    if (fp->first_block)
+//	sz = sz < 1024 ? sz : 1024;
 
     return bgzf2_buffer_grow(&fp->uncomp, sz);
 }
@@ -1325,7 +1349,7 @@ int bgzf2_close(bgzf2 *fp) {
  * Returns number of bytes written on success
  *        -1 on failure
  */
-int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
+int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
     int r = 0;
 
     do {
@@ -1354,7 +1378,8 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
 	    // Can't split and doesn't fit, so flush and write this new item
 	    // as a new block if it's too large.
 	    int err = bgzf2_flush(fp);
-	    if (err || bgzf2_buffer_grow(&fp->uncomp, buf_sz) < 0)
+	    if (err || bgzf2_buffer_grow(&fp->uncomp,
+					 MAX(buf_sz, fp->block_size)) < 0)
 		return -1;
 	    memcpy(fp->uncomp->buf, buf, buf_sz);
 
@@ -1362,7 +1387,7 @@ int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split) {
 	}
     } while (buf_sz);
 
-    return 0;
+    return r;
 }
 
 /*
@@ -1673,6 +1698,31 @@ static int bgzf2_decode_block(bgzf2 *fp) {
 }
 
 /*
+ * Refill fp->uncomp when we're out of uncompressed data.
+ * Returns >0 on success (number of bytes refilled)
+ *        -1 on eof
+ *        -2 on failure
+ */
+static int bgzf2_refill_uncomp(bgzf2 *fp) {
+    size_t n = 0;
+
+    if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
+	// out of buffered content, fetch some more
+	n = fp->pool
+	    ? bgzf2_decode_block_mt(fp)
+	    : bgzf2_decode_block(fp);
+	if (n < 0)
+	    return -2; // err
+	else if (n == 0) {
+	    fp->hit_eof = 1;
+	    return -1; // eof
+	}
+    }
+
+    return n;
+}
+
+/*
  * Reads a data from a bgzf2 file handle.
  *
  * Returns number of bytes read on success
@@ -1689,6 +1739,12 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
     //        read a block to comp, decompress it, store in buffer
     //    copy from buffer to buf
     while (buf_sz) {
+#if 1
+	switch (bgzf2_refill_uncomp(fp)) {
+	case -1:  return decoded; // EOF
+	case -2:  return -1;      // error
+	}
+#else
 	if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
 	    // out of buffered content, fetch some more
 	    size_t n = fp->pool
@@ -1701,6 +1757,7 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
 		return decoded; // EOF
 	    }
 	}
+#endif
 
 	size_t n = MIN(buf_sz, fp->uncomp->sz - fp->uncomp->pos);
 	memcpy(buf, fp->uncomp->buf + fp->uncomp->pos, n);
@@ -1983,3 +2040,58 @@ int bgzf2_check_EOF(bgzf2 *fp) {
     return (memcmp(buf, "\xb1\xea\x92\x8f", 4) == 0) ? 1 : 0;
 }
 
+/**
+ * Read one line from a BGZF file. It is faster than bgzf_getc()
+ *
+ * @param fp     BGZF file handler
+ * @param delim  delimiter
+ * @param str    string to write to; must be initialized
+ * @return       length of the string (capped at INT_MAX);
+ *               -1 on end-of-file; <= -2 on error
+ */
+int bgzf2_getline(bgzf2 *fp, int delim, kstring_t *str) {
+    int state = 0;
+    str->l = 0;
+    do {
+	ssize_t n = 0;
+	if ((n = bgzf2_refill_uncomp(fp)) < 0)
+	    return n; // EOF (-1) or error (-2)
+
+	// Find end of line, or point to end of buffer if continues.
+	// NB: this latter case shouldn't happen as we should always have
+	// whole records in a bgzf2 block, but this is to protect against
+	// extreme data (eg >4GB line lengths) and just for extra safety.
+	char *eol = memchr(fp->uncomp->buf + fp->uncomp->pos, delim,
+			   fp->uncomp->sz - fp->uncomp->pos);
+	if (eol)
+	    state = 1; // any +ve value; found delim
+	else
+	    eol = fp->uncomp->buf + fp->uncomp->sz; // end of buffer
+	n = eol - (fp->uncomp->buf + fp->uncomp->pos);
+
+	// Copy the whole or partial line
+        if (ks_expand(str, n + 2) < 0) {
+	    state = -3;
+	    break;
+	}
+        memcpy(str->s + str->l, fp->uncomp->buf + fp->uncomp->pos, n);
+	fp->uncomp->pos += n+1;
+	str->l += n;
+    } while (state == 0);
+
+    if (state < -1) return state;
+    if (str->l == 0 && state < 0) return state;
+
+    if ( delim=='\n' && str->l>0 && str->s[str->l-1]=='\r' ) str->l--;
+    str->s[str->l] = 0;
+    return str->l <= INT_MAX ? (int) str->l : INT_MAX;
+}
+
+// -1 for EOF, -2 for error, 0-255 for byte.
+int bgzf2_peek(bgzf2 *fp) {
+    size_t n = 0;
+    if ((n = bgzf2_refill_uncomp(fp)) < 0)
+	return n; // EOF (-1) or error (-2)
+
+    return fp->uncomp->buf[fp->uncomp->pos];
+}

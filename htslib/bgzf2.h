@@ -40,6 +40,7 @@
 
 #include "htslib/hts_defs.h"
 #include "htslib/thread_pool.h"
+#include "htslib/kstring.h"
 #include "htslib/hfile.h"
 
 // Ensure ssize_t exists within this header. All #includes must precede this,
@@ -102,7 +103,7 @@ int bgzf2_set_block_size(bgzf2 *fp, size_t sz);
  * Returns number of bytes written on success
  *        -1 on failure
  */
-int bgzf2_write(bgzf2 *fp, char *buf, size_t buf_sz, int can_split);
+int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split);
 
 /*
  * Reads a block of data from a bgzf2 file handle.
@@ -161,6 +162,26 @@ int bgzf2_check_EOF(bgzf2 *fp);
  * @param qsize       Size of job queue, 0 for auto
  */
 int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize);
+
+/**
+ * Read one line from a BGZF file. It is faster than bgzf_getc()
+ *
+ * @param fp     BGZF file handler
+ * @param delim  delimiter
+ * @param str    string to write to; must be initialized
+ * @return       length of the string (capped at INT_MAX);
+ *               -1 on end-of-file; <= -2 on error
+ */
+int bgzf2_getline(bgzf2 *fp, int delim, kstring_t *str);
+
+/**
+ * Returns the next byte in the file without consuming it.
+ * @param fp     BGZF file handler
+ * @return       -1 on EOF,
+ *               -2 on error,
+ *               otherwise the unsigned byte value.
+ */
+int bgzf2_peek(bgzf2 *fp);
 
 #ifdef __cplusplus
 }
