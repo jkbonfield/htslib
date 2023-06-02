@@ -33,6 +33,10 @@ TODO
                        ^                  ^
 
       Optimally, two key points to seek to within this frame.
+    - Possibly multiple overlapping indices covering different length
+      data (via RG -> LB?).
+      - Tracks start locations for long reads
+      - May be "good enough".
 
 
 BGZF2
@@ -53,21 +57,73 @@ BGZF2 can be viewed as a union of the pzstd and seekable_format
 File Layout
 -----------
 
-[bgzip2 header skippable frame]
+[bgzf2 header skippable frame]
 [pzstd skippable frame]
 [zstd data frame]
 [pzstd skippable frame]
 [zstd data frame]
 ...
-[bgzip2 index skippable frame]
+[bgzf2 index skippable frame]
 [seekable_format skippable frame (index)]
 
-The first zstd data frame should be end within the first 4KB of the
-file, so that htslib hpeek() function can provide enough data to
-decompress the frame and determine the internal format.
+Extensive use of zstd skippable frames are used.  These are ZSTD
+compliant frames which carry no compressed payload, so can be skipped
+over by any ZSTD decoder.  Instead they carry meta-data useful for
+file type detection, rapid parallel decoding, and internal indices.
 
-[TODO: consider an additional meta-data skippable frame that
-duplicates this, avoiding this peek issue?]
+In order for standard zstd tools to be able to skip past these custom
+meta-data frames, the skippable frames have a specific data layout:
+
+- 4 bytes of magic number: 0x184D2A50 to 0x184D2A5F
+- 4 bytes of remaining frame length "N"
+- N bytes of meta-data
+
+
+This combination of skippable frames means the following tools can
+decompress a bgzf2 file:
+bgzf2 data:
+
+- "zstd".
+  This provides single threaded streaming decode.
+
+- "pzstd", from Zstd's contrib/pzstd directory.
+  This provides a parallel decompression capability.
+
+- "seekable_decompression" from Zstd's contrib/seekable_format directory.
+  This provides random access via byte ranges in the uncompressed data.
+
+- "bgzip2" and htslib.
+  These provide all of the above, but also offers random access by
+  genomic region or a range of record numbers.
+
+
+Bgzf2 header frame
+------------------
+
+[TODO: Maybe we want to make it more feature
+rich, and to add specific BGZF2 wrapper version numbering in there
+too, so we can extend it with additional key/value meta-data (one of
+which is file type).]
+
+The header frame has magic number 0x184D2A5B.
+The data contents are an uncompressed copy of the first data bytes,
+used for file format detection.  There is no fixed limit on this
+length, but it is recommended to be not significantly more than is
+required to accurately determine file type and some basic versioning.
+
+An example header frame:
+
+ 4: 0x184D2A5B (bgzf2 magic number)
+ 4: 23 (length of meta-data in header)
+ 4: "BGZ2" identifier
+19: "BAM\x01????@HD.VN:1.4.SO:coordinate\n"
+
+Tools should be capable of working with reduced meta-data here, for
+example having just "BAM\x01".
+
+
+PZstd skippable frames
+----------------------
 
 The pzstd skippable frames hold the size of the next compressed zstd
 data frame (as this is not part of the zstd format).  They are 12
@@ -75,7 +131,115 @@ bytes long, consisting of 3 little-endian values.
 
 - 0x184D2A50: the magic number for pzstd's skippable frame
 - 4: the length of the remaining skippable frame data
-- comp_sz: the compressed size of the next data frame.
+- comp_sz: the compressed size of the next data frame
+
+We have one pzstd skippable frame preceeding each zstd compressed data
+frame.
+
+BGZF2 index frame
+-----------------
+
+[TODO]
+
+This is a genomic coordinate index used for random access by
+chromosome and position sorted data, or by record number if unsorted.
+The index itself is self-indexing, meaning it is possible to hop
+around within it via precomputed offsets.  In practice however it is
+likely the most performant use is to load the entire index into
+memory, especially if compressed.
+
+This is another skippable frame with the same magic numebr as the
+bgzf2 header.
+
+ 4: 0x184D2A5B (bgzf2 magic number)
+ 4: N+1 (length of meta-data in header)
+ 1: index flags
+ N: An array of index entries
+
+Index flags use the following bit-field
+
+Bit 0:    1 if the remaining bytes are zstd compressed, 0 if uncompressed
+Bits 1-7: 0 (reserved)
+
+The remaining N bytes may be zstd compressed.  Once decompressed, the
+format of the index is as follows.
+
+[ Should we use variable sized integer encoding instead?  It's a bit
+more faffing, but not too much and it makes things totally data size
+agnostic. However it makes decoding also trickier, especially random
+access to within an index.]
+
+1: global flag
+   Bit 0: 1 if aligned, 0 otherwise
+   Bit 1: 1 if genomic sorted 
+   Bit 2-7: 0 (reserved)
+4: number of references NR
+4: number of index entries NI (matching number of compressed data frames)
+4: size of meta-data MDG
+MDG: meta-data
+
+[ Per NR references]
+1: reference flag
+   Bit 0: 1 if long ref (>= 4GB)
+   Bit 1-7: 0 (reserved)
+4 or 8: length of reference (see ref flag)
+?: Nul-terminated name of reference.
+4: byte offset into NI index table for start of this reference
+4: number of bytes in NI index table for this reference
+4: size of meta-data for this reference MD
+MD: meta-data
+
+[ per NI index entry]
+1: flag
+   Bit 0: 1 if multiple references are within this data frame
+   Bit 1: 1 if all records in data frame are unmapped (also set if
+          (global.flag & 1) == 0)
+   Bit 2: 1 if multiple references are present and data is mapped
+   Bit 3-7: 0 (reserved)
+4: NIR: Number of references (if NI.flag bit 2 set),
+   otherwise 1 if NI.flag bit 1 is clear,
+   otherwise 0.
+[ Per NIR ]
+4: Reference number
+4 or 8: reference start (size from NR.flag bit 0)
+4 or 8: reference span (end-start+1)
+4: Number of records aligned
+4: Number of records unaligned
+
+[ TODO: maybe a self-describing index format so we can add extra
+meta-data columns. Eg number of QC failures, or number of secondary
+alignments. ]
+
+Global and per-ref meta-data is key\0value\0 pairs.  It replaces the
+magic bin numbers used in BAI and CSI.  We can view it aggregated
+together for the entire file, or on a per-reference basis.
+
+TODO: add a controlled dictionary here.  Eg nrec_mapped,
+nrec_unmapped, nbase_mapped, nbase_unmapped, etc.
+
+Tips on usage:
+
+- The index can be loaded into a nested containment list.  This is a
+  list of items where all curr.start >= last.start and curr.end >=
+  last.end. Ie we never have items that are smaller than their previous
+  one and entirely contained within it.  If that happens, the item
+  itself becomes a new nested containment list, in a recursive manner.
+
+- We can then do binary searching to find overlaps.  Search on start
+  to find first item overlapping the range.  We can then linearly step
+  right until we get to the first item beyond the range.
+
+  - For items containing sub-lists (containments), recurse.
+
+
+Seekable index frame
+--------------------
+
+We have one seekable-format index frame as dodcumented in
+
+https://github.com/facebook/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md
+
+This is always the last frame in the file.
 
 The "seekable" index frame consists of the standard skippable frame
 header (using the magic number 0x184D2A5E and a length holding the
@@ -83,8 +247,5 @@ remaining size of the skippable frame), a series of index entries
 (compressed size, uncompressed size and an optional CRC) and a footer
 with the number of index entries, a flag byte, and ending with a
 magic number (0x8F92EAB1).
-
-The Seekable format skippable frame is documented in
-https://github.com/facebook/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md
 
 The seekable index trailing magic number is used as an EOF detector.
