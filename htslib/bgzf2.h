@@ -133,6 +133,15 @@ int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz);
 int bgzf2_flush(bgzf2 *fp);
 
 /*
+ * Tests whether a write of 'size' would spill over to the next block. If so
+ * flush this current one, so we always end blocks on a whole record.
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+int bgzf2_flush_try(bgzf2 *fp, ssize_t size);
+
+/*
  * Seeks to uncompressed position upos in a bgzf file opened for read.
  *
  * Returns 0 on success,
