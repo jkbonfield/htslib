@@ -38,10 +38,10 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#include "htslib/hts_defs.h"
-#include "htslib/thread_pool.h"
-#include "htslib/kstring.h"
-#include "htslib/hfile.h"
+#include "hts_defs.h"
+#include "thread_pool.h"
+#include "kstring.h"
+#include "hfile.h"
 
 // Ensure ssize_t exists within this header. All #includes must precede this,
 // and ssize_t must be undefined again at the end of this header.
@@ -55,6 +55,8 @@ extern "C" {
 #endif
 
 typedef struct bgzf2 bgzf2;
+
+#include "hts.h"
 
 #define BGZF2_DEFAULT_BLOCK_SIZE 256000
 #define BGZF2_DEFAULT_LEVEL 5
@@ -191,6 +193,14 @@ int bgzf2_getline(bgzf2 *fp, int delim, kstring_t *str);
  *               otherwise the unsigned byte value.
  */
 int bgzf2_peek(bgzf2 *fp);
+
+/*
+ * Adds a record to the index.
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end,
+		  int is_mapped);
 
 #ifdef __cplusplus
 }

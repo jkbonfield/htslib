@@ -130,6 +130,18 @@ typedef struct {
     off_t cpos;    // cumulative compression poisition in file
 } bgzf2_index_t;
 
+// Genomic index.  We maintain one of these per chromosome, indexed by
+// the internal "tid" number.
+// TODO: do we use a variable sized integer encoding, or just store in
+// 32/64-bit little endian and rely on compression?
+typedef struct {
+    off_t frame_start;   // points to pzstd frame prior to data frame
+    size_t frame_offset; // offset within a frame
+    size_t frame_len;    // length of data from offset onwards
+    size_t nmapped;      // number of mapped items in this frame/chr
+    size_t nunmapped;    // number of unmapped items in this frame/chr
+} bgzf2_gindex_t;
+
 // Note this is just a kstring with a linked list.
 // We could perhaps embed the link into the ks->s pointer, so empty ones
 // are linked together via their data itself.
@@ -183,6 +195,11 @@ struct bgzf2 {
 
     bgzf2_buffer *uncomp; // uncompressed data
     bgzf2_buffer *comp;   // compressed data
+
+    // Genomic indices
+    off_t index_upos;     // current uncompressed offset (writing)
+    int nchr;             // number of chromosomes
+    bgzf2_gindex_t *gindex; // genomic index per chr / tid
 
     // Multi-threading support
     pthread_mutex_t job_pool_m; // when updating this struct
@@ -468,6 +485,8 @@ static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
     idx->comp = comp;
     idx->uncomp = uncomp;
     //idx->pos += uncomp; // not needed while writing
+
+    fp->index_upos += uncomp;
 
     return 0;
 }
@@ -1226,6 +1245,7 @@ static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) {
     fp->is_zstd = 1;
     fp->first_block = 1;
     fp->hfp = hfp;
+    fp->index_upos = 0;
 
     if (*mode == 'w') {
 	fp->is_write = 1;
@@ -2108,4 +2128,16 @@ int bgzf2_peek(bgzf2 *fp) {
 	return n; // EOF (-1) or error (-2)
 
     return fp->uncomp->buf[fp->uncomp->pos];
+}
+
+/*
+ * Adds a record to the genomic index.
+ * Note this differs from the seekable index which is file offset based.
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end,
+		  int is_mapped) {
+    
 }
