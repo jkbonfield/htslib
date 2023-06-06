@@ -1984,6 +1984,9 @@ int bgzf_flush(BGZF *fp)
 
 int bgzf_flush_try(BGZF *fp, ssize_t size)
 {
+    if (fp->is_zstd)
+	return bgzf2_flush_try((bgzf2 *)fp, size);
+
     if (fp->block_offset + size > BGZF_BLOCK_SIZE) return lazy_flush(fp);
     return 0;
 }
