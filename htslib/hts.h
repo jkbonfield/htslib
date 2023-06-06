@@ -36,6 +36,25 @@ DEALINGS IN THE SOFTWARE.  */
 #include "hts_log.h"
 #include "kstring.h"
 #include "kroundup.h"
+
+// Almost INT64_MAX, but when cast into a 32-bit int it's
+// also INT_MAX instead of -1.  This avoids bugs with old code
+// using the new hts_pos_t data type.
+#define HTS_POS_MAX ((((int64_t)INT_MAX)<<32)|INT_MAX)
+#define HTS_POS_MIN INT64_MIN
+#define PRIhts_pos PRId64
+typedef int64_t hts_pos_t;
+
+// For comparison with previous release:
+//
+// #define HTS_POS_MAX INT_MAX
+// #define HTS_POS_MIN INT_MIN
+// #define PRIhts_pos PRId32
+// typedef int32_t hts_pos_t;
+
+// This uses hts_pos_t, so include after the above definition.
+// Alternatively we can remove it from hts.h and use an equivalent to
+// the HTS_BGZF_TYPEDEF below.
 #include "bgzf2.h"
 
 #ifdef __cplusplus
@@ -784,21 +803,6 @@ When REST or NONE is used, idx is also ignored and may be NULL.
 #define HTS_FMT_TBI 2
 #define HTS_FMT_CRAI 3
 #define HTS_FMT_FAI 4
-
-// Almost INT64_MAX, but when cast into a 32-bit int it's
-// also INT_MAX instead of -1.  This avoids bugs with old code
-// using the new hts_pos_t data type.
-#define HTS_POS_MAX ((((int64_t)INT_MAX)<<32)|INT_MAX)
-#define HTS_POS_MIN INT64_MIN
-#define PRIhts_pos PRId64
-typedef int64_t hts_pos_t;
-
-// For comparison with previous release:
-//
-// #define HTS_POS_MAX INT_MAX
-// #define HTS_POS_MIN INT_MIN
-// #define PRIhts_pos PRId32
-// typedef int32_t hts_pos_t;
 
 typedef struct hts_pair_pos_t {
    hts_pos_t beg, end;

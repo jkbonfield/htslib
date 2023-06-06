@@ -192,6 +192,9 @@ struct bgzidx_t
  *        -1 on failure
  */
 int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, hts_pos_t beg, hts_pos_t end, uint64_t offset, int is_mapped) {
+    if (fp->is_zstd)
+	return bgzf2_idx_add((bgzf2 *)fp, tid, beg, end, is_mapped);
+
     hts_idx_cache_entry *e;
     mtaux_t *mt = fp->mt;
 

@@ -136,6 +136,24 @@ bytes long, consisting of 3 little-endian values.
 We have one pzstd skippable frame preceeding each zstd compressed data
 frame.
 
+TODO: can we augment this with additional data, such as the region
+being used (eg see the CRAM container struct).  This would provide a
+way to gather information about the upcoming frame as we're streaming,
+without needing the index.  This in turn can lead to efficient partial
+decode where we skip over data that's going to be filtered out as it
+doesn't match a region filter.  (An index and random access is
+preferable, but not always feasible.)
+
+If not supported by pzstd, it may still be useful to do and just break
+from the pzstd standard.  Should use a generic key-value pair
+mechanism, with BGZF2 indicating specific keys in use.  That makes
+this format a generic one for any data type.
+
+Examples: count records (mapped and unmapped), skip data outside of a
+region, distributed processing to turn one BGZF2 to multi sub-BGZF2
+without any decompression and recompression.
+
+
 BGZF2 index frame
 -----------------
 
