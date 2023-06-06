@@ -1152,6 +1152,20 @@ int bgzf2_flush(bgzf2 *fp) {
 }
 
 /*
+ * Tests whether a write of 'size' would spill over to the next block. If so
+ * flush this current one, so we always end blocks on a whole record.
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+int bgzf2_flush_try(bgzf2 *fp, ssize_t size) {
+    if (fp->uncomp && fp->uncomp->pos + size > fp->uncomp->sz)
+	return bgzf2_flush(fp);
+
+    return 0;
+}
+
+/*
  * Flushes data and drains any asynchronous I/O still waiting to be
  * written.
  *
