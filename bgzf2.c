@@ -135,11 +135,20 @@ typedef struct {
 // TODO: do we use a variable sized integer encoding, or just store in
 // 32/64-bit little endian and rely on compression?
 typedef struct {
+    int tid;             // chromosome
+    hts_pos_t beg, end;  // inclusive range within chromosome
+
+    // or frame number, so we can combine with linear frame index?
     off_t frame_start;   // points to pzstd frame prior to data frame
-    size_t frame_offset; // offset within a frame
-    size_t frame_len;    // length of data from offset onwards
-    size_t nmapped;      // number of mapped items in this frame/chr
-    size_t nunmapped;    // number of unmapped items in this frame/chr
+//    size_t frame_offset; // offset within a frame (if multi-ref frames)
+//    size_t frame_len;    // length of data from offset onwards
+
+//    // necessary for stats?  Would maybe be better to have nmapped, unmapped,
+//    // aligned-bases, etc inline in the pzstd-ish frame, as we can go from
+//    // here to there quickly.  We only need one single data point per
+//    // chromosome, not per frame, for idxstats meta-data.
+//    size_t nmapped;      // number of mapped items in this frame/chr
+//    size_t nunmapped;    // number of unmapped items in this frame/chr
 } bgzf2_gindex_t;
 
 // Note this is just a kstring with a linked list.
@@ -193,13 +202,20 @@ struct bgzf2 {
     int aindex;           // allocated size of index array
     int errcode;          // FIXME
 
+    off_t frame_pos;      // uncompressed offset of current frame start
     bgzf2_buffer *uncomp; // uncompressed data
     bgzf2_buffer *comp;   // compressed data
 
-    // Genomic indices
-    off_t index_upos;     // current uncompressed offset (writing)
-    int nchr;             // number of chromosomes
-    bgzf2_gindex_t *gindex; // genomic index per chr / tid
+    // Genomic indices.
+    // We map chr:start-end to uncompressed offsets (use with frame index).
+    //
+    // OR: CSI style mapping chr/pos to uncompressed offset.
+    //     => Same as current, but not a virtual offset. (TODO?)
+    int nchr;                // number of chromosomes; size of gindex_sz
+    // FIXME: need nchr for 'tid' index, but also number used.
+    // Maybe nchr has holes?
+    size_t *gindex_sz;       // size of gindex[chr]; consider used+alloc sz
+    bgzf2_gindex_t **gindex; // genomic index per chr / tid
 
     // Multi-threading support
     pthread_mutex_t job_pool_m; // when updating this struct
@@ -408,6 +424,9 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
 /*
  * Write a BGZF2 header block as a skippable frame.  This is just enough
  * data, uncompressed, to auto-detect the internal file format.
+ *
+ * Returns the number of bytes written on success,
+ *         <0 on failure
  */
 static int bgzf2_write_header(bgzf2 *fp) {
     uint8_t buf[16+8+4];
@@ -417,8 +436,71 @@ static int bgzf2_write_header(bgzf2 *fp) {
     memcpy(buf+8, "BGZ2", 4);
     memcpy(buf+12, fp->uncomp->buf, len);
 
-    return hwrite(fp->hfp, buf, 12+len) == 12+len ? 0 : -1;
+    return hwrite(fp->hfp, buf, 12+len);
 }
+
+/*
+ * Write a genomic index to be used in conjunction with the seekable index
+ * to turn chr:start-end ranges into file offsets.
+ *
+ * This is more similar to the CRAM index by design, permitting index
+ * entries covering all data frames regardless of whether the data is
+ * mapped.
+ *
+ * TODO: maybe this isn't ideal.  We could consider using a CSI index here
+ * with virtual offsets be uncompressed positions (to be used with seekable
+ * index).
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+static int write_genomic_index(bgzf2 *fp) {
+    kstring_t ks = {0,0};
+
+    // Header
+    ks_resize(&ks, 13); // try 8192
+    u32_to_le(0x184D2A5B, (uint8_t *)ks.s); // BGZF2 skippable frame
+    ks.l += 8; // fill out [4..7] later
+
+    // flag
+    kputc_(0, &ks); // uncompressed
+
+    // TODO: per file index meta-data.  Basically some bits of "idxstats"
+
+    // Number of chromosomes
+    u32_to_le(fp->nchr, (uint8_t *)ks.s + ks.l); ks.l += 4;
+
+    int i;
+    for (i = 0; i < fp->nchr; i++) {
+	ks_resize(&ks, ks.l + 5 + 12*fp->gindex_sz[i]);
+
+	// flag
+	kputc_(0, &ks); // is_aligned, is_sorted... TODO
+	// frame count for this chr
+	u32_to_le(fp->gindex_sz[i], (uint8_t *)ks.s + ks.l); ks.l += 4;
+	// TODO: per-ref meta-data.  Eg other bits of "idxstats"
+
+	bgzf2_gindex_t *g = fp->gindex[i];
+	int j;
+	for (j = 0; j < fp->gindex_sz[i]; j++) {
+	    // Should we delta these?  Or change to frame no. + offset?
+	    u32_to_le(g[j].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
+	    u32_to_le(g[j].beg, (uint8_t *)ks.s + ks.l); ks.l += 4;
+	    u32_to_le(g[j].end, (uint8_t *)ks.s + ks.l); ks.l += 4;
+	}
+    }
+
+    // Finish up header and write index
+    size_t sz = ks.l;
+    u32_to_le(sz-8, (uint8_t *)ks.s+4); // size of skippable frame
+
+    //write(3, ks.s, sz);
+    int ret = (sz == hwrite(fp->hfp, ks.s, sz) ? 0 : -1);
+    free(ks.s);
+
+    return ret;
+}
+
 
 /*
  * Write an index in the format expected by zstd seekable-format
@@ -485,8 +567,6 @@ static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
     idx->comp = comp;
     idx->uncomp = uncomp;
     //idx->pos += uncomp; // not needed while writing
-
-    fp->index_upos += uncomp;
 
     return 0;
 }
@@ -1158,8 +1238,11 @@ int bgzf2_flush(bgzf2 *fp) {
 
     if (fp->first_block) {
 	fp->first_block = 0;
-	ret |= bgzf2_write_header(fp);
+	ret |= bgzf2_write_header(fp) < 0;
     }
+
+    // uncompressed position of next frame
+    fp->frame_pos += fp->uncomp->pos;
 
     if (fp->pool) {
 	ret = bgzf2_write_block_mt(fp, fp->uncomp);
@@ -1245,7 +1328,7 @@ static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) {
     fp->is_zstd = 1;
     fp->first_block = 1;
     fp->hfp = hfp;
-    fp->index_upos = 0;
+    fp->frame_pos = 0;
 
     if (*mode == 'w') {
 	fp->is_write = 1;
@@ -1324,6 +1407,7 @@ int bgzf2_close(bgzf2 *fp) {
 
     if (fp->is_write) {
 	ret |= (bgzf2_drain(fp) < 0);
+	ret |= write_genomic_index(fp);
 	ret |= write_seekable_index(fp);
     }
 
@@ -1367,6 +1451,12 @@ int bgzf2_close(bgzf2 *fp) {
     if (fp->uncomp) bgzf2_buffer_free(fp->uncomp);
 
     ret |= hclose(fp->hfp);
+
+    int i;
+    for (i = 0; i < fp->nchr; i++)
+	free(fp->gindex[i]);
+    free(fp->gindex);
+    free(fp->gindex_sz);
 
     free(fp->index);
     free(fp);
@@ -2137,7 +2227,51 @@ int bgzf2_peek(bgzf2 *fp) {
  * Returns 0 on success,
  *        <0 on failure
  */
-int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end,
-		  int is_mapped) {
-    
+int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
+    if (tid >= fp->nchr) {
+	size_t *t = realloc(fp->gindex_sz, (tid+1)*sizeof(*t));
+	if (!t)
+	    return -1;
+	fp->gindex_sz = t;
+
+	bgzf2_gindex_t **t2 = realloc(fp->gindex, (tid+1)*sizeof(*t2));
+	if (!t)
+	    return -1;
+	fp->gindex = t2;
+
+	while (fp->nchr <= tid) {
+	    fp->gindex_sz[fp->nchr] = 0;
+	    fp->gindex[fp->nchr]    = NULL;
+	    fp->nchr++;
+	}
+    }
+
+    // Check for current entry, or allocate a new one
+    bgzf2_gindex_t *idx = NULL;
+    if (fp->gindex_sz[tid] > 0)
+	idx = &fp->gindex[tid][fp->gindex_sz[tid]-1];
+
+    if (!idx || idx->frame_start != fp->frame_pos) {
+	// A new frame, so add to the index
+	bgzf2_gindex_t *t = realloc(fp->gindex[tid],
+				    (fp->gindex_sz[tid]+1) * sizeof(*t));
+	if (!t)
+	    return -1;
+	fp->gindex[tid] = t;
+
+	idx = &fp->gindex[tid][fp->gindex_sz[tid]++];
+	idx->frame_start = fp->frame_pos;
+	idx->tid = tid;
+	idx->beg = beg;
+	idx->end = end;
+    }
+
+    if (idx->beg > beg)
+	idx->beg = beg;
+    if (idx->end < end)
+	idx->end = end;
+
+    return 0;
 }
+
+

@@ -119,7 +119,7 @@ sub save_vcf
     open(my $fh,"| $FindBin::Bin/../bgzip -c > $fname") or error("$FindBin::Bin/../bgzip -c > $fname: !");
     print $fh qq[##fileformat=VCFv4.3\n];
     print $fh qq[##FILTER=<ID=PASS,Description="All filters passed">\n];
-    print $fh qq[##contig=<ID=1>\n];
+    print $fh qq[##contig=<ID=1:2>\n];
     print $fh qq[##contig=<ID=2>\n];
     print $fh '#'. join("\t", qw(CHROM POS ID  REF ALT QUAL    FILTER  INFO))."\n";
     for my $var (@$vars)
@@ -133,7 +133,7 @@ sub save_vcf
             $ref = $xref;
             push @alts,$alt;
         }
-        print $fh join("\t", (1,100,'.',$ref,join(',',@alts),'.','.','.'))."\n";
+        print $fh join("\t", ("1:2",100,'.',$ref,join(',',@alts),'.','.','.'))."\n";
     }
     for my $var (@$vars)
     {
@@ -146,7 +146,7 @@ sub save_vcf
             $ref = $xref;
             push @alts,$alt;
         }
-        print $fh join("\t", (1,300,'.',$ref,join(',',@alts),'.','.','.'))."\n";
+        print $fh join("\t", ("1:2",300,'.',$ref,join(',',@alts),'.','.','.'))."\n";
     }
     for my $var (@$vars)
     {
@@ -278,6 +278,7 @@ sub run_test
     #for my $logic (qw(snps))
     {
         print STDERR "$FindBin::Bin/test-bcf-sr $$opts{tmp}/list.txt -p $logic > $$opts{tmp}/rmme.bin.out\n" unless !$$opts{verbose};
+	print "CMD1 $FindBin::Bin/test-bcf-sr $$opts{tmp}/list.txt -p $logic > $$opts{tmp}/rmme.bin.out\n";
         cmd("$FindBin::Bin/test-bcf-sr $$opts{tmp}/list.txt -p $logic > $$opts{tmp}/rmme.bin.out");
 
         open(my $fh,'>',"$$opts{tmp}/rmme.perl.out") or error("$$opts{tmp}/rmme.perl.out: $!");
@@ -592,6 +593,8 @@ sub test_no_index {
     close($fh) || error("$$opts{tmp}/no_index_1.txt : $!");
 
     my $cmd = "$FindBin::Bin/test-bcf-sr --no-index -p all $$opts{tmp}/no_index_1.txt > $$opts{tmp}/no_index_1.out 2> $$opts{tmp}/no_index_1.err";
+    print "CMD2 $cmd\n";
+
     my ($ret) = _cmd($cmd);
     if ($ret) {
         error("The command failed [$ret]: $cmd\n");
@@ -622,6 +625,7 @@ sub test_no_index {
         close($fh) || error("$$opts{tmp}/no_index_$count.txt : $!");
 
         $cmd = "$FindBin::Bin/test-bcf-sr --no-index -p all $$opts{tmp}/no_index_$count.txt > $$opts{tmp}/no_index_$count.out 2> $$opts{tmp}/no_index_$count.err";
+	print "CMD3 $cmd\n";
         my ($ret) = _cmd($cmd);
         if ($ret == 0) {
             error("Failed to detect $badness: $cmd\n");

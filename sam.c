@@ -1071,6 +1071,9 @@ int sam_idx_init(htsFile *fp, sam_hdr_t *h, int min_shift, const char *fnidx) {
 // Finishes an index. Call after the last record has been written.
 // Returns 0 on success, <0 on failure.
 int sam_idx_save(htsFile *fp) {
+    if (fp->is_bgzf2)
+        return 0;
+
     if (fp->format.format == bam || fp->format.format == bcf ||
         fp->format.format == vcf || fp->format.format == sam) {
         int ret;

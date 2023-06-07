@@ -193,7 +193,7 @@ struct bgzidx_t
  */
 int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, hts_pos_t beg, hts_pos_t end, uint64_t offset, int is_mapped) {
     if (fp->is_zstd)
-	return bgzf2_idx_add((bgzf2 *)fp, tid, beg, end, is_mapped);
+	return bgzf2_idx_add((bgzf2 *)fp, tid, beg, end);
 
     hts_idx_cache_entry *e;
     mtaux_t *mt = fp->mt;
@@ -248,6 +248,9 @@ int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, hts_pos_t beg, hts_pos_t e
  * is the end of a block rather than the start of the next.
  */
 void bgzf_idx_amend_last(BGZF *fp, hts_idx_t *hidx, uint64_t offset) {
+    if (fp->is_zstd)
+      return;
+
     mtaux_t *mt = fp->mt;
     if (!mt) {
         hts_idx_amend_last(hidx, offset);
