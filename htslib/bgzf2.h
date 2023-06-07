@@ -199,8 +199,7 @@ int bgzf2_peek(bgzf2 *fp);
  * Returns 0 on success,
  *        <0 on failure
  */
-int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end,
-		  int is_mapped);
+int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end);
 
 #ifdef __cplusplus
 }
