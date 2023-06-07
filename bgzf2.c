@@ -197,6 +197,7 @@ struct bgzf2 {
     int level;            // compression level
     int is_write;         // open for write
     int block_size;       // ideal block size
+    size_t index_sz;      // size of seekable index frame
     bgzf2_index_t *index; // index entries
     int nindex;           // used size of index array
     int aindex;           // allocated size of index array
@@ -485,11 +486,16 @@ static int write_genomic_index(bgzf2 *fp) {
 	for (j = 0; j < fp->gindex_sz[i]; j++) {
 	    // Should we delta these?  Or change to frame no. + offset?
 	    u32_to_le(g[j].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
+	    // FIXME: beg and end are int64.  May want varint.
 	    u32_to_le(g[j].beg, (uint8_t *)ks.s + ks.l); ks.l += 4;
 	    u32_to_le(g[j].end, (uint8_t *)ks.s + ks.l); ks.l += 4;
 	}
     }
 
+    // Footer; used for seeking backwards to start of frame
+    u32_to_le(ks.l, (uint8_t *)ks.s + ks.l); ks.l += 4;
+    u32_to_le(0x8F92EABB, (uint8_t *)ks.s + ks.l); ks.l += 4;
+    
     // Finish up header and write index
     size_t sz = ks.l;
     u32_to_le(sz-8, (uint8_t *)ks.s+4); // size of skippable frame
@@ -501,6 +507,94 @@ static int write_genomic_index(bgzf2 *fp) {
     return ret;
 }
 
+int load_seekable_index(bgzf2 *fp);
+
+/*
+ * Loads the genomic index is present.
+ * Called after reading the seekable index.
+ *
+ * Returns 0 on success,
+ *        -1 on error,
+ *        -2 on non-seekable stream,
+ *        -3 if no index found.
+ */
+static int load_genomic_index(bgzf2 *fp) {
+    if (fp->gindex)
+	return 0;
+
+    if (!fp->index) {
+	int err;
+	if ((err = load_seekable_index(fp)) < 0)
+	    return err;
+    }
+    
+    // Look for and validate genomic index footer.  This is appear immediately
+    // before the seekable index.
+    if (hseek(fp->hfp, -(fp->index_sz+8), SEEK_END) < 0)
+	return -1 - (errno == ESPIPE);
+
+    uint8_t footer[8];
+    if (8 != hread(fp->hfp, footer, 8))
+	return -1;
+
+    if (le_to_u32(footer+4) != 0x8F92EABB)
+	return -3; // index not found
+
+    // load the index into memory
+    uint32_t sz = le_to_u32(footer);
+    if (hseek(fp->hfp, -sz, SEEK_CUR) < 0)
+	return -1;
+
+    uint8_t *buf = malloc(sz);
+    if (!sz)
+	return -1;
+    if (sz != hread(fp->hfp, buf, sz))
+	goto err;
+
+    if (le_to_u32(buf) != 0x184D2A5B) {
+	free(buf);
+	return -3; // index not found
+    }
+
+    // buf[4..7] = skippable frame size, could validate if we wanted to.
+    // buf[9] = flag. TODO
+    uint8_t *cp = buf+9;
+    fp->nchr = le_to_u32(cp);  cp += 4;
+    fprintf(stderr, "Index: nchr %d\n", fp->nchr);
+    
+    fp->gindex_sz = calloc(fp->nchr, sizeof(*fp->gindex_sz));
+    fp->gindex    = calloc(fp->nchr, sizeof(*fp->gindex));
+    if (!fp->gindex_sz || !fp->gindex)
+	goto err;
+    
+    uint32_t i, j;
+    for (i = 0; i < fp->nchr; i++) {
+	int flag = *cp++; // TODO
+	fp->gindex_sz[i] = le_to_u32(cp); cp += 4;
+	fprintf(stderr, "Index: chr %d, nframe %ld\n", i, fp->gindex_sz[i]);
+
+	fp->gindex[i] = calloc(fp->gindex_sz[i], sizeof(*fp->gindex[i]));
+	if (!fp->gindex[i])
+	    goto err;
+
+	bgzf2_gindex_t *g = fp->gindex[i];
+	for (j = 0; j < fp->gindex_sz[i]; j++) {
+	    g[j].tid = le_to_u32(cp); cp += 4;
+	    // FIXME: beg and end are int64.  May want varint.
+	    g[j].beg = le_to_u32(cp); cp += 4;
+	    g[j].end = le_to_u32(cp); cp += 4;
+
+	    fprintf(stderr, "Index: tid %d, %ld..%ld\n",
+		    g[j].tid, (long)g[j].beg, (long)g[j].end);
+	}
+    }
+
+    return 0;
+    
+ err:
+    free(buf);
+    return -1;
+}
 
 /*
  * Write an index in the format expected by zstd seekable-format
@@ -800,10 +894,9 @@ static void *bgzf2_encode_func(void *vp) {
  * This simply drains the entire queue, throwing away blocks, seeks,
  * and starts it up again.  Brute force, but maybe sufficient.
  *
- * Returns 0 on success
- *        <0 on failure (same codes as load_seekabel_index)
+ * Returns number of bytes read on success (size of index)
+ *        <0 on failure (same codes as load_seekable_index)
  */
-int load_seekable_index(bgzf2 *fp);
 bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos);
 static void bgzf2_mt_seek(bgzf2 *fp) {
     if (!fp->index) {
@@ -1941,7 +2034,7 @@ int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz) {
  *
  * Returns 0 on success,
  *        -1 on error,
- *        -2 on non-seekable stream.
+ *        -2 on non-seekable stream,
  *        -3 if no index found.
  */
 int load_seekable_index(bgzf2 *fp) {
@@ -1978,6 +2071,7 @@ int load_seekable_index(bgzf2 *fp) {
 	return -3;
 
     // Decode index
+    fp->index_sz = sz;
     fp->index = idx = malloc(nframes * sizeof(*idx));
     fp->nindex = fp->aindex = nframes;
     if (!idx)

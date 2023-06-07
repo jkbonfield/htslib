@@ -47,6 +47,7 @@ struct hts_json_token {
 };
 
 struct cram_fd;
+struct bgzf2;
 
 /*
  * Adjust CSI index parameters to support max_len_in bases
@@ -100,6 +101,14 @@ typedef struct hts_cram_idx_t {
     int fmt;
     struct cram_fd *cram;
 } hts_cram_idx_t;
+
+// Similarly for BGZF2.
+// Consider making these a generic redirect of fmt, itr_query func pointer
+// and void *fp.
+typedef struct hts_bgzf2_idx_t {
+    int fmt;
+    struct bgzf2 *fp;
+} hts_bgzf2_idx_t;
 
 // Determine whether the string's contents appear to be UTF-16-encoded text.
 // Returns 1 if they are, 2 if there is also a BOM, or 0 otherwise.
