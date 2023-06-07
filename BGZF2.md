@@ -157,6 +157,69 @@ without any decompression and recompression.
 BGZF2 index frame
 -----------------
 
+BGZF indices can be BAI, CSI and TBI.  They are also external files.
+This myriad of index formats leads to a variety of problems:
+
+- The naming differs between tools, sometimes it is foo.bam.bai and
+  sometimes foo.bai.
+
+- If multiple indices exist (.bai and .csi) there are undocumented
+  precedence rules.
+
+- Multiple files causes problems when downloading from object stores
+  where the filenames are content hashes.
+
+- There is potential for catastrophy when the bam file is rewritten
+  without the index being recreated.  Indices do not have time stamps
+  or shared secrets with their BAM counterparts, making it hard to
+  detect this problem.
+
+- These indexes are only for aligned data, so there is no index
+  capability on unmapped records, name-sorted or unsorted data.  Some
+  of these are covered by yet another index format: GZI.
+
+So in BGZF2 the index is embedded within the file. It is also
+partially distributed. [TODO]
+
+The main global index is at the end of the file.  The purpose of our
+index is two fold:
+
+- To map genomic coordinates to file offsets, for random access.
+
+- For parallel processing by splitting data into discrete work units,
+  regardless of whether it has been aligned and sorted.
+
+  This latter use case is already covered by the seekable index. So is
+  ignored here.
+
+For genomic sorted data, we are given a region and turn it into one or
+more zstd frames that hold data covering that region.  Minimally, we
+must do a zstd decompression of either an entire frame, or from the
+start of a frame until we have finished the region query.  Hence the
+global index simply needs to map region to frame offset, or region to
+uncompressed offset (and use the seekable index to convert).
+
+(If we're using uncompressed offsets, our resolution of genomic region
+queries do not need to match the resolution of zstd data frames.)
+
+Prior to each compressed data frame we have an uncompressed meta-data
+frame, currently pzstd and holding only the next frame size.  This
+will be extended to also hold arbitrary meta-data such as chromosome
+and range.  This permits a streaming mode where we skip data.  We
+still have the I/O requirement, but we do not need to decompress data
+if it doesn't match our desired range.
+
+Furthermore, we can also provide additional genomic indexing within
+the uncompressed frame, so for example a multiple-reference frame may
+list the offset within the uncompressed frame for each new chromosome,
+or perhaps every 16kb into that chromosome.  This is like the BAI
+linear index, but instead it can be stream inline with the data.  This
+distributed nature makes the indexing capabilities more efficient when
+seeking is unavailable.
+
+Hence in this section, we can focus on a simplistic index capability.
+How to map a genomic range to the start of a zstd frame.
+
 [TODO]
 
 This is a genomic coordinate index used for random access by
@@ -173,6 +236,7 @@ bgzf2 header.
  4: N+1 (length of meta-data in header)
  1: index flags
  N: An array of index entries
+ 8: Footer (another magic number and size, to permit reverse reading)
 
 Index flags use the following bit-field
 
@@ -223,6 +287,11 @@ MD: meta-data
 4 or 8: reference span (end-start+1)
 4: Number of records aligned
 4: Number of records unaligned
+
+
+[ Footer ]
+4: distance back to start of zstd frame
+4: 0x8F92EABB: BGZF2 index magic number
 
 [ TODO: maybe a self-describing index format so we can add extra
 meta-data columns. Eg number of QC failures, or number of secondary
