@@ -1347,7 +1347,7 @@ hts_itr_t *sam_itr_regarray(const hts_idx_t *idx, sam_hdr_t *hdr, char **regarra
     @return >= 0 on success; -1 when there is no more data; < -1 on error
  */
 static inline int sam_itr_next(htsFile *htsfp, hts_itr_t *itr, bam1_t *r) {
-    if (!htsfp->is_bgzf && !htsfp->is_cram) {
+    if (!htsfp->is_bgzf && !htsfp->is_cram && !htsfp->is_bgzf2) {
         hts_log_error("%s not BGZF compressed", htsfp->fn ? htsfp->fn : "File");
         return -2;
     }

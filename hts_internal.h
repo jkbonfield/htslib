@@ -46,6 +46,7 @@ struct hts_json_token {
 };
 
 struct cram_fd;
+struct bgzf2;
 
 /*
  * Check the existence of a local index file using part of the alignment file name.
@@ -81,6 +82,14 @@ typedef struct hts_cram_idx_t {
     int fmt;
     struct cram_fd *cram;
 } hts_cram_idx_t;
+
+// Similarly for BGZF2.
+// Consider making these a generic redirect of fmt, itr_query func pointer
+// and void *fp.
+typedef struct hts_bgzf2_idx_t {
+    int fmt;
+    struct bgzf2 *fp;
+} hts_bgzf2_idx_t;
 
 
 // Entry point to hFILE_multipart backend.

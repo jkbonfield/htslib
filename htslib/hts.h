@@ -798,11 +798,12 @@ When REST or NONE is used, idx is also ignored and may be NULL.
 #define HTS_IDX_REST   (-4)
 #define HTS_IDX_NONE   (-5)
 
-#define HTS_FMT_CSI 0
-#define HTS_FMT_BAI 1
-#define HTS_FMT_TBI 2
-#define HTS_FMT_CRAI 3
-#define HTS_FMT_FAI 4
+#define HTS_FMT_CSI   0
+#define HTS_FMT_BAI   1
+#define HTS_FMT_TBI   2
+#define HTS_FMT_CRAI  3
+#define HTS_FMT_FAI   4
+#define HTS_FMT_BGZF2 5
 
 typedef struct hts_pair_pos_t {
    hts_pos_t beg, end;
@@ -871,7 +872,8 @@ typedef int64_t hts_tell_func(void *fp);
  */
 
 typedef struct hts_itr_t {
-    uint32_t read_rest:1, finished:1, is_cram:1, nocoor:1, multi:1, dummy:27;
+    uint32_t read_rest:1, finished:1, is_cram:1, nocoor:1, multi:1,
+             is_bgzf2, dummy:26;
     int tid, n_off, i, n_reg;
     hts_pos_t beg, end;
     hts_reglist_t *reg_list;

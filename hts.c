@@ -2206,6 +2206,7 @@ static char * idx_format_name(int fmt) {
         case HTS_FMT_BAI: return "bai";
         case HTS_FMT_TBI: return "tbi";
         case HTS_FMT_CRAI: return "crai";
+        case HTS_FMT_BGZF2: return "bgzf2";
         default: return "unknown";
     }
 }
@@ -2592,6 +2593,12 @@ void hts_idx_destroy(hts_idx_t *idx)
         return;
     }
 
+    if (idx->fmt == HTS_FMT_BGZF2) {
+        // main index closed when the bgzf2 fp is closed
+        free(idx);
+	return;
+    }
+
     for (i = 0; i < idx->m; ++i) {
         bidx_t *bidx = idx->bidx[i];
         free(idx->lidx[i].offset);
@@ -2948,6 +2955,7 @@ int hts_idx_nseq(const hts_idx_t *idx) {
 int hts_idx_get_stat(const hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* unmapped)
 {
     if (!idx) return -1;
+    // TODO: BGZF2
     if ( idx->fmt == HTS_FMT_CRAI ) {
         *mapped = 0; *unmapped = 0;
         return -1;
@@ -2968,6 +2976,7 @@ int hts_idx_get_stat(const hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* 
 
 uint64_t hts_idx_get_n_no_coor(const hts_idx_t* idx)
 {
+    // TODO: BGZF2
     if (idx->fmt == HTS_FMT_CRAI) return 0;
     return idx->n_no_coor;
 }
@@ -4679,6 +4688,7 @@ int hts_idx_check_local(const char *fn, int fmt, char **fnidx) {
         else
             return 0;
     }
+    // TODO: BGZF2
 
     free(fnidx_tmp);
     return 0;
