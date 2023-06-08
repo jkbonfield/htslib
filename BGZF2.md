@@ -38,6 +38,28 @@ TODO
       - Tracks start locations for long reads
       - May be "good enough".
 
+- Break from pzstd and use a generic next frame meta-data block.
+  This will allow us to encode arbitrary key-value pairs.
+  Like CRAM header (from cram_dump):
+
+  Container pos 9495 size 607898
+      Ref id:            0
+      Ref pos:           10001 + 594302
+      Rec counter:       0
+      No. recs:          10000
+      No. bases          1000000
+
+  But we'd permit more than one ref:start-end range per meta-data block.
+  This means we can switch chromosome in a middle of a data frame *if
+  we wish* (but it may be ideal not to).
+
+  We should also consider things like no. (un)mapped reads / bases for
+  crude depth plots, and possibly linear indices.
+
+- Add more key/value pair fields in the header.
+  That includes a mandatory file format version number!
+
+
 
 BGZF2
 -----
