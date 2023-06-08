@@ -105,6 +105,10 @@ rich, and to add specific BGZF2 wrapper version numbering in there
 too, so we can extend it with additional key/value meta-data (one of
 which is file type).]
 
+[TODO: this breaks pzstd detection.  Maybe we should make the initial
+pzstd frame bigger and merge in with this?  Does that work?  It looks
+likely not as it only reads 12 bytes in contrib/pzstd/SkippableFrame.cpp]
+
 The header frame has magic number 0x184D2A5B.
 The data contents are an uncompressed copy of the first data bytes,
 used for file format detection.  There is no fixed limit on this

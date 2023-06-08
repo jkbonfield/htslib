@@ -144,6 +144,31 @@ int bgzf2_flush(bgzf2 *fp);
 int bgzf2_flush_try(bgzf2 *fp, ssize_t size);
 
 /*
+ * Finds the uncompressed file offset associated with a specific range.
+ * This offset is only suitable for passing into bgzf2_seek.
+ *
+ * Note will not likely be the exact location the first record covers this
+ * region, but it will be prior to it.  The caller is expected to them
+ * discard data out of range.
+ *
+ * TODO: or should we cache beg/end here and do the discard ourselves?
+ * That's how CRAM's API works, and it may be more amenable to a
+ * "bgzf2_query_many" func that can operate on multiple regions in a
+ * threaded read-away way.
+ *
+ * If tid is outside of the bounds of the index, this is an error.
+ * If tid is in the index but has no coverage, or we are beyond the end of
+ * this reference, then we return the fp offset for the next tid.  This
+ * then makes the calling loop immediately hit EOF on range checking.
+ *
+ * Returns seekable offset on success,
+ *        -1 on error,
+ *        -2 on non-seekable stream,
+ *        -3 if no index found.
+ */
+int64_t bgzf2_query(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end);
+
+/*
  * Seeks to uncompressed position upos in a bgzf file opened for read.
  *
  * Returns 0 on success,
