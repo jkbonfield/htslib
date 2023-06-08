@@ -4102,8 +4102,13 @@ hts_itr_t *hts_itr_regions(const hts_idx_t *idx, hts_reglist_t *reglist, int cou
     return itr;
 }
 
+// sam.c
+int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data);
 int hts_itr_next(BGZF *fp, hts_itr_t *iter, void *r, void *data)
 {
+    if (fp && fp->is_zstd)
+        return bgzf2_itr_next((bgzf2 *)fp, iter, r, data);
+
     int ret, tid;
     hts_pos_t beg, end;
     if (iter == NULL || iter->finished) return -1;

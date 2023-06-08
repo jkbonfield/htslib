@@ -1359,7 +1359,10 @@ static inline int sam_itr_next(htsFile *htsfp, hts_itr_t *itr, bam1_t *r) {
     if (itr->multi)
         return hts_itr_multi_next(htsfp, itr, r);
     else
-        return hts_itr_next(htsfp->is_bgzf ? htsfp->fp.bgzf : NULL, itr, r, htsfp);
+        return hts_itr_next(htsfp->is_bgzf || htsfp->is_bgzf2
+                                ? htsfp->fp.bgzf
+                                : NULL,
+                            itr, r, htsfp);
 }
 
 /// Get the next read from a BAM/CRAM multi-iterator

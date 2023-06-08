@@ -1,3 +1,6 @@
+// TODO: sanitize naming so all funcs are sindex and gindex for seekable
+// and genomic.
+
 // TODO: have a way to set end coord so MT decode doesn't waste cycles.
 
 // TODO: Make first block fit within 4k so hpeek can work.
@@ -135,10 +138,12 @@ typedef struct {
 // TODO: do we use a variable sized integer encoding, or just store in
 // 32/64-bit little endian and rely on compression?
 typedef struct {
-    int tid;             // chromosome
+    int tid;             // chromosome+1.  Unused as it's indexed by this?
     hts_pos_t beg, end;  // inclusive range within chromosome
 
     // or frame number, so we can combine with linear frame index?
+    // TODO: rename this.  It's uncomp position and could be within a
+    // frame, eg when a frame has multiple references in it.
     off_t frame_start;   // points to pzstd frame prior to data frame
 //    size_t frame_offset; // offset within a frame (if multi-ref frames)
 //    size_t frame_len;    // length of data from offset onwards
@@ -204,6 +209,8 @@ struct bgzf2 {
     int errcode;          // FIXME
 
     off_t frame_pos;      // uncompressed offset of current frame start
+    off_t tid_pos;        // uncompressed offset of tid within frame.
+    off_t last_flush_try; // offset in buffer of last flush attempt
     bgzf2_buffer *uncomp; // uncompressed data
     bgzf2_buffer *comp;   // compressed data
 
@@ -236,6 +243,8 @@ struct bgzf2 {
     enum mtaux_cmd command;
     uint64_t seek_to;
 };
+
+static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp);
 
 /*----------------------------------------------------------------------
  * Utility functions shared by both single and multi-threaded implementations
@@ -437,6 +446,10 @@ static int bgzf2_write_header(bgzf2 *fp) {
     memcpy(buf+8, "BGZ2", 4);
     memcpy(buf+12, fp->uncomp->buf, len);
 
+    // Add index entry so offsets work
+    if (bgzf2_add_index(fp, 0, 12+len) < 0)
+	return -1;
+
     return hwrite(fp->hfp, buf, 12+len);
 }
 
@@ -473,7 +486,7 @@ static int write_genomic_index(bgzf2 *fp) {
 
     int i;
     for (i = 0; i < fp->nchr; i++) {
-	ks_resize(&ks, ks.l + 5 + 12*fp->gindex_sz[i]);
+	ks_resize(&ks, ks.l + 5 + 20*fp->gindex_sz[i]);
 
 	// flag
 	kputc_(0, &ks); // is_aligned, is_sorted... TODO
@@ -484,16 +497,20 @@ static int write_genomic_index(bgzf2 *fp) {
 	bgzf2_gindex_t *g = fp->gindex[i];
 	int j;
 	for (j = 0; j < fp->gindex_sz[i]; j++) {
-	    // Should we delta these?  Or change to frame no. + offset?
+	    // Tid isn't needed here.  It belongs out of the loop (so we can
+	    // have a mismap between tid values to index and array elements).
 	    u32_to_le(g[j].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
+	    // Should we delta these?  Or change to frame no. + offset?
 	    // FIXME: beg and end are int64.  May want varint.
 	    u32_to_le(g[j].beg, (uint8_t *)ks.s + ks.l); ks.l += 4;
 	    u32_to_le(g[j].end, (uint8_t *)ks.s + ks.l); ks.l += 4;
+	    u64_to_le(g[j].frame_start, (uint8_t *)ks.s + ks.l); ks.l += 8;
 	}
     }
 
     // Footer; used for seeking backwards to start of frame
-    u32_to_le(ks.l, (uint8_t *)ks.s + ks.l); ks.l += 4;
+    ks_resize(&ks, ks.l + 8);
+    u32_to_le(ks.l + 8, (uint8_t *)ks.s + ks.l); ks.l += 4;
     u32_to_le(0x8F92EABB, (uint8_t *)ks.s + ks.l); ks.l += 4;
     
     // Finish up header and write index
@@ -519,6 +536,8 @@ int load_seekable_index(bgzf2 *fp);
  *        -3 if no index found.
  */
 static int load_genomic_index(bgzf2 *fp) {
+    uint8_t *buf = NULL;
+
     if (fp->gindex)
 	return 0;
 
@@ -542,12 +561,14 @@ static int load_genomic_index(bgzf2 *fp) {
 
     // load the index into memory
     uint32_t sz = le_to_u32(footer);
-    if (hseek(fp->hfp, -sz, SEEK_CUR) < 0)
-	return -1;
-
-    uint8_t *buf = malloc(sz);
     if (!sz)
 	return -1;
+    //if (hseek(fp->hfp, -sz, SEEK_CUR) < 0) // why doesn't SEEK_CUR work?
+    if (hseek(fp->hfp, -(fp->index_sz + sz), SEEK_END) < 0)
+	return -1;
+
+    if (!(buf = malloc(sz)))
+	goto err;
     if (sz != hread(fp->hfp, buf, sz))
 	goto err;
 
@@ -560,7 +581,7 @@ static int load_genomic_index(bgzf2 *fp) {
     // buf[9] = flag. TODO
     uint8_t *cp = buf+9;
     fp->nchr = le_to_u32(cp);  cp += 4;
-    fprintf(stderr, "Index: nchr %d\n", fp->nchr);
+//    fprintf(stderr, "Index: nchr %d\n", fp->nchr);
     
     fp->gindex_sz = calloc(fp->nchr, sizeof(*fp->gindex_sz));
     fp->gindex    = calloc(fp->nchr, sizeof(*fp->gindex));
@@ -569,9 +590,9 @@ static int load_genomic_index(bgzf2 *fp) {
     
     uint32_t i, j;
     for (i = 0; i < fp->nchr; i++) {
-	int flag = *cp++; // TODO
+	cp++; //int flag = *cp++; // TODO
 	fp->gindex_sz[i] = le_to_u32(cp); cp += 4;
-	fprintf(stderr, "Index: chr %d, nframe %ld\n", i, fp->gindex_sz[i]);
+//	fprintf(stderr, "Index: chr %d, nframe %ld\n", i, fp->gindex_sz[i]);
 
 	fp->gindex[i] = calloc(fp->gindex_sz[i], sizeof(*fp->gindex[i]));
 	if (!fp->gindex[i])
@@ -583,17 +604,79 @@ static int load_genomic_index(bgzf2 *fp) {
 	    // FIXME: beg and end are int64.  May want varint.
 	    g[j].beg = le_to_u32(cp); cp += 4;
 	    g[j].end = le_to_u32(cp); cp += 4;
+	    g[j].frame_start = le_to_u64(cp); cp += 8;
 
-	    fprintf(stderr, "Index: tid %d, %ld..%ld\n",
-		    g[j].tid, (long)g[j].beg, (long)g[j].end);
+//	    fprintf(stderr, "Index: tid %d, %ld..%ld %ld\n",
+//		    g[j].tid, (long)g[j].beg, (long)g[j].end,
+//		    g[j].frame_start);
 	}
     }
 
+    free(buf);
     return 0;
     
  err:
     free(buf);
     return -1;
+}
+
+/*
+ * Finds the uncompressed file offset associated with a specific range.
+ * This offset is only suitable for passing into bgzf2_seek.
+ *
+ * Note will not likely be the exact location the first record covers this
+ * region, but it will be prior to it.  The caller is expected to them
+ * discard data out of range.
+ *
+ * TODO: or should we cache beg/end here and do the discard ourselves?
+ * That's how CRAM's API works, and it may be more amenable to a
+ * "bgzf2_query_many" func that can operate on multiple regions in a
+ * threaded read-away way.
+ *
+ * If tid is outside of the bounds of the index, this is an error.
+ * If tid is in the index but has no coverage, or we are beyond the end of
+ * this reference, then we return the fp offset for the next tid.  This
+ * then makes the calling loop immediately hit EOF on range checking.
+ *
+ * Returns seekable offset on success,
+ *        -1 on error,
+ *        -2 on non-seekable stream,
+ *        -3 if no index found.
+ */
+int64_t bgzf2_query(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
+    int err;
+    if ((err = load_genomic_index(fp) < 0))
+	return err;
+
+    // TODO: splitting chromosomes over a frame should provide a new starting
+    // point part way into the frame, so we never get the last chromosomes
+    // worth of data when doing a tid query. This neatly avoids all questions
+    // over whether order of refs in file must match order in header and
+    // hence must be incrementing (with -1 wrapping around at end).
+
+    tid++; // unmapped becomes tid 0, even though sorted if diff order.
+    if (tid < 0 || tid >= fp->nchr)
+	return -1;
+
+    // Brute force for now, just to get something running.
+    // We can replace this with a Nested Containment List (see cram_index.c).
+    int i;
+    for (i = 0; i < fp->gindex_sz[tid]; i++) {
+	if (fp->gindex[tid][i].end < beg)
+	    continue;
+
+	if (fp->gindex[tid][i].end >= beg)
+	    return fp->gindex[tid][i].frame_start;
+    }
+
+    // Couldn't find it, so use next covered pos
+    while (++tid < fp->nchr) {
+	if (fp->gindex_sz[tid])
+	    return fp->gindex[tid][0].frame_start;
+    }
+
+    // Could find any, so it's EOF.
+    return UINT64_MAX;
 }
 
 /*
@@ -646,6 +729,11 @@ static int write_seekable_index(bgzf2 *fp) {
  */
 static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
     bgzf2_index_t *idx;
+
+    static size_t acc = 0;
+//    fprintf(stderr, "cpos %ld, upos %ld, sz %ld %ld\n",
+//	    htell(fp->hfp), acc, uncomp, comp);
+    acc += comp;
 
     // Grow index
     if (fp->nindex >= fp->aindex) {
@@ -1328,7 +1416,7 @@ int bgzf2_flush(bgzf2 *fp) {
     int ret;
     if (!fp->uncomp->pos)
 	return 0;
-
+    
     if (fp->first_block) {
 	fp->first_block = 0;
 	ret |= bgzf2_write_header(fp) < 0;
@@ -1343,6 +1431,8 @@ int bgzf2_flush(bgzf2 *fp) {
 	ret = bgzf2_write_block(fp, fp->uncomp);
     }
 
+    fp->last_flush_try = 0;
+
     return ret;
 }
 
@@ -1356,6 +1446,8 @@ int bgzf2_flush(bgzf2 *fp) {
 int bgzf2_flush_try(bgzf2 *fp, ssize_t size) {
     if (fp->uncomp && fp->uncomp->pos + size > fp->uncomp->sz)
 	return bgzf2_flush(fp);
+
+    fp->last_flush_try = fp->uncomp->pos;
 
     return 0;
 }
@@ -2049,7 +2141,7 @@ int load_seekable_index(bgzf2 *fp) {
 
     if (le_to_u32(footer+5) != 0x8F92EAB1 || (footer[4] & 0x7C) != 0)
 	return -3;
-    int has_chksum = footer[4] & 0x80;
+    int has_chksum = footer[4] & 0x80 ? 1 : 0;
 
     // Read entire index frame
     uint32_t nframes = le_to_u32(footer);
@@ -2085,6 +2177,9 @@ int load_seekable_index(bgzf2 *fp) {
 	idx[i].cpos   = cpos;
 	idx[i].comp   = le_to_u32(idxp);
 	idx[i].uncomp = le_to_u32(idxp+4);
+//	fprintf(stderr, "frame %ld..%ld  %ld..%ld\n",
+//		cpos, cpos+idx[i].comp,
+//		pos, pos+idx[i].uncomp);
 	idxp += 4*(2+has_chksum);
 	pos += idx[i].uncomp;
 	cpos += idx[i].comp;
@@ -2318,10 +2413,29 @@ int bgzf2_peek(bgzf2 *fp) {
  * Adds a record to the genomic index.
  * Note this differs from the seekable index which is file offset based.
  *
+ * As our index maps genomic coordinates to uncompressed offsets, and the
+ * seekable index turns uncompressed offsets to compressed frame positions,
+ * we can have multiple index items per frame if we choose, permitting us
+ * to skip ahead.
+ *
+ * Minimally however we require 1 index entry item per chromosome, so this
+ * is potentially multiple entries per frame.  Ideally we also require at
+ * least index entry per frame to maintain efficiency.  More than one doesn't
+ * harm, but is best done through checkpointing in-line with a frame
+ * (appending to the pzstd preceeding frame) so that streaming filters are
+ * also efficient.
+ *
  * Returns 0 on success,
  *        <0 on failure
  */
 int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
+    tid++; // so unmapped becomes 0
+    if (tid < 0)
+	return -1;
+
+    if (tid == 0)
+	beg = end = 0;
+
     if (tid >= fp->nchr) {
 	size_t *t = realloc(fp->gindex_sz, (tid+1)*sizeof(*t));
 	if (!t)
@@ -2333,11 +2447,14 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
 	    return -1;
 	fp->gindex = t2;
 
+	// Fill in any holes with a while loop, also skips over unmapped
 	while (fp->nchr <= tid) {
 	    fp->gindex_sz[fp->nchr] = 0;
 	    fp->gindex[fp->nchr]    = NULL;
 	    fp->nchr++;
 	}
+
+	fp->tid_pos = fp->last_flush_try;
     }
 
     // Check for current entry, or allocate a new one
@@ -2354,8 +2471,8 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
 	fp->gindex[tid] = t;
 
 	idx = &fp->gindex[tid][fp->gindex_sz[tid]++];
-	idx->frame_start = fp->frame_pos;
-	idx->tid = tid;
+	idx->frame_start = fp->frame_pos + fp->last_flush_try;
+	idx->tid = tid-1;
 	idx->beg = beg;
 	idx->end = end;
     }

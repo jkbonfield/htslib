@@ -1948,6 +1948,9 @@ static inline int lazy_flush(BGZF *fp)
 
 int bgzf_flush(BGZF *fp)
 {
+    if (fp->is_zstd)
+        return bgzf2_flush((bgzf2 *)fp);
+
     if (!fp->is_write) return 0;
 #ifdef BGZF_MT
     if (fp->mt) {

@@ -1044,7 +1044,9 @@ int bam_index_build(const char *fn, int min_shift)
 int sam_idx_init(htsFile *fp, sam_hdr_t *h, int min_shift, const char *fnidx) {
     fp->fnidx = fnidx;
     if (fp->format.format == bam || fp->format.format == bcf ||
-        (fp->format.format == sam && fp->format.compression == bgzf)) {
+        (fp->format.format == sam &&
+         (fp->format.compression == bgzf ||
+          fp->format.compression == bgzf2_compression))) {
         int n_lvls, fmt = HTS_FMT_CSI;
         if (min_shift > 0) {
             int64_t max_len = 0, s;
@@ -1698,9 +1700,81 @@ static hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
     hts_itr_t *iter = (hts_itr_t *)calloc(1, sizeof(hts_itr_t));
     if (iter == NULL) return NULL;
 
-    // TODO:
+    if (tid == HTS_IDX_NOCOOR)
+	tid = -1;
+
+    int64_t pos = bgzf2_query(bidx->fp, tid, beg, end);
+    
+    // hts_itr_t is public and extremely BGZF(1) specific.
+    // We fill out tid, beg, end from arguments here, and we reuse
+    // curr_off to hold the seek position with n_off=1.
+    // On first use we seek there and set n_off=0 to indicate we've
+    // moved.  We don't seek immediately as we wish to separate querying
+    // from seeking.  (We may in theory query multiple places and then seek
+    // back to them later on.)
+
+    // An alternative to this would be to put all bgzf2 specific region
+    // functionality internal to the bgzf2 fp, as was done with cram_fd.
+    // This may be preferable long term for handling multi-region iterators.
+
+    iter->is_bgzf2 = 1;
+    iter->tid = tid;
+    iter->beg = tid == -1 ? -1 : beg;
+    iter->end = tid == -1 ?  0 : end;
+    iter->n_off = 1;
+    iter->curr_off = pos;
+    iter->readrec = readrec;
     
     return iter;
+}
+
+int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
+    if (!iter || iter->finished)
+        return -1;
+
+    if (!iter->is_bgzf2)
+        return -2;
+
+    if (iter->n_off) {
+        iter->n_off = 0;
+        if (bgzf2_seek(fp, iter->curr_off) < 0) {
+            hts_log_error("Failed to seek to offset %"PRIu64"%s%s",
+                          iter->curr_off,
+                          errno ? ": " : "", strerror(errno));
+            return -2;
+        }
+    }
+
+    int ret, tid;
+    hts_pos_t beg, end;
+
+    // Ensure sort works so -1 is after all others.
+    // Or, we could just cast to uint32_t before cmp and force wrap around.
+    if (iter->tid == -1)
+        iter->tid = INT_MAX;
+
+    do {
+        ret = iter->readrec((BGZF *)fp, data, r, &tid, &beg, &end);
+        if (tid == -1)
+            tid = INT_MAX;
+        if (ret < 0) {
+            iter->finished = 1;
+            return ret; // EOF or error
+        }
+    } while (tid <= iter->tid && end <= iter->beg);
+
+    if (tid != iter->tid || beg > iter->end) {
+        iter->finished = 1;
+        return -1; // EOF
+    }
+
+    // These are part of the public API and things like
+    // samtools view can use them in error messages.
+    iter->curr_tid = tid;
+    iter->curr_beg = beg;
+    iter->curr_end = end;
+
+    return 0;
 }
 
 
@@ -3546,7 +3620,8 @@ static void *sam_dispatcher_write(void *vp) {
                 }
 
                 bam1_t *b = &gb->bams[count++];
-                if (fp->format.compression == bgzf) {
+                if (fp->format.compression == bgzf ||
+                    fp->format.compression == bgzf2_compression) {
                     if (bgzf_idx_push(fp->fp.bgzf, fp->idx,
                                       b->core.tid, b->core.pos, bam_endpos(b),
                                       bgzf_tell(fp->fp.bgzf),
@@ -4521,7 +4596,8 @@ int sam_write1(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
             }
 
             if (fp->idx) {
-                if (fp->format.compression == bgzf) {
+                if (fp->format.compression == bgzf ||
+                    fp->format.compression == bgzf2_compression) {
                     if (bgzf_idx_push(fp->fp.bgzf, fp->idx, b->core.tid, b->core.pos, bam_endpos(b),
                                       bgzf_tell(fp->fp.bgzf), !(b->core.flag&BAM_FUNMAP)) < 0) {
                         hts_log_error("Read '%s' with ref_name='%s', ref_length=%"PRIhts_pos", flags=%d, pos=%"PRIhts_pos" cannot be indexed",
