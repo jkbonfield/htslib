@@ -730,10 +730,10 @@ static int write_seekable_index(bgzf2 *fp) {
 static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
     bgzf2_index_t *idx;
 
-    static size_t acc = 0;
+//    static size_t acc = 0; // STATIC but for debugging only
 //    fprintf(stderr, "cpos %ld, upos %ld, sz %ld %ld\n",
 //	    htell(fp->hfp), acc, uncomp, comp);
-    acc += comp;
+//    acc += comp;
 
     // Grow index
     if (fp->nindex >= fp->aindex) {
@@ -908,7 +908,10 @@ static void *bgzf2_mt_writer(void *vp) {
 	if (write_pzstd_skippable(fp, j->comp->sz) < 0)
 	    goto err;
 
-	if (bgzf2_add_index(fp, j->uncomp->sz, j->comp->sz) < 0)
+        pthread_mutex_lock(&fp->job_pool_m);
+	int ret = bgzf2_add_index(fp, j->uncomp->pos, j->comp->sz);
+        pthread_mutex_unlock(&fp->job_pool_m);
+	if (ret < 0)
 	    goto err;
 
         if (hwrite(fp->hfp, j->comp->buf, j->comp->sz) != j->comp->sz)
@@ -2433,6 +2436,8 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     if (tid < 0)
 	return -1;
 
+    //fprintf(stderr, "bgzf2_idx_add: %d %ld %ld\n", tid, beg, end);
+
     if (tid == 0)
 	beg = end = 0;
 
@@ -2475,6 +2480,9 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
 	idx->tid = tid-1;
 	idx->beg = beg;
 	idx->end = end;
+
+	//fprintf(stderr, "bgzf2_idx_add: %d %ld %ld: %ld %ld\n", tid, beg, end,
+	//	fp->frame_pos, fp->last_flush_try);
     }
 
     if (idx->beg > beg)
