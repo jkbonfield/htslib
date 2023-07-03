@@ -401,6 +401,7 @@ static size_t compress_block(char *uncomp, size_t uncomp_sz,
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_contentSizeFlag, 1);
 
 // Helps on bigger buffer sizes (or higher compression levels?)
+// Maybe 4-5% smaller for VCF and BCF with similar times.
 //    ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, 6);
 //    ZSTD_CCtx_setParameter(zcs, ZSTD_c_minMatch, 6);
 //    ZSTD_CCtx_setParameter(zcs, ZSTD_c_enableLongDistanceMatching, 1);
