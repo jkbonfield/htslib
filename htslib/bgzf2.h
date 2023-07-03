@@ -59,7 +59,7 @@ typedef struct bgzf2 bgzf2;
 #include "hts.h"
 
 #define BGZF2_DEFAULT_BLOCK_SIZE 256000
-#define BGZF2_DEFAULT_LEVEL 5
+#define BGZF2_DEFAULT_LEVEL 5 // on VCF/BCF 5 10 15 all good settings
 #define BGZF2_MAX_BLOCK_SIZE (1<<30)
 
 /*

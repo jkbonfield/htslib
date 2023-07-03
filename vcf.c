@@ -1379,7 +1379,7 @@ bcf_hdr_t *bcf_hdr_read(htsFile *hfp)
         return NULL;
     }
 
-    assert(hfp->is_bgzf);
+    assert(hfp->is_bgzf || hfp->is_bgzf2);
 
     BGZF *fp = hfp->fp.bgzf;
     uint8_t magic[5];

@@ -3832,6 +3832,8 @@ int sam_set_thread_pool(htsFile *fp, htsThreadPool *p) {
 
     if (fp->format.compression == bgzf)
         return bgzf_thread_pool(fp->fp.bgzf, p->pool, p->qsize);
+    else if (fp->format.compression == bgzf2_compression)
+        return bgzf2_thread_pool(fp->fp.bgzf2, p->pool, p->qsize);
 
     return 0;
 }
