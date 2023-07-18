@@ -193,6 +193,11 @@ indexed.
   and other as bam. A pool of 4 threads is created and shared for both read
   and write.
 
+### More Information
+
+More detailed documentation is available in the [DEMO.md][DEMO] with worked
+examples per demonstration tool.
+
 
 [Flags]: flags_demo.c
 [Split]: split.c
@@ -221,3 +226,4 @@ indexed.
 [Flags_field]: flags_htsopt_field.c
 [Split_thread1]: split_thread1.c
 [Split_thread2]: split_thread2.c
+[DEMO]: DEMO.md
