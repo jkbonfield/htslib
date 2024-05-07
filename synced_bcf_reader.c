@@ -73,7 +73,7 @@ aux_t;
 
 static bcf_sr_regions_t *bcf_sr_regions_alloc(void);
 static int _regions_add(bcf_sr_regions_t *reg, const char *chr, hts_pos_t start, hts_pos_t end);
-static bcf_sr_regions_t *_regions_init_string(const char *str);
+static bcf_sr_regions_t *_regions_init_string(const char *str, bcf_hdr_t *h);
 static int _regions_match_alleles(bcf_sr_regions_t *reg, int als_idx, bcf1_t *rec);
 static void _regions_sort_and_merge(bcf_sr_regions_t *reg);
 static int _bcf_sr_regions_overlap(bcf_sr_regions_t *reg, const char *seq, hts_pos_t start, hts_pos_t end, int missed_reg_handler);
@@ -1056,7 +1056,7 @@ void _regions_sort_and_merge(bcf_sr_regions_t *reg)
 // Recognises regions in the form chr, chr:pos, chr:beg-end, chr:beg-, {weird-chr-name}:pos.
 // Cannot use hts_parse_region() as that requires the header and if header is not present,
 // wouldn't learn the chromosome name.
-static bcf_sr_regions_t *_regions_init_string(const char *str)
+static bcf_sr_regions_t *_regions_init_string(const char *str, bcf_hdr_t *h)
 {
     bcf_sr_regions_t *reg = bcf_sr_regions_alloc();
     if ( !reg ) return NULL;
@@ -1064,9 +1064,26 @@ static bcf_sr_regions_t *_regions_init_string(const char *str)
     kstring_t tmp = {0,0,0};
     const char *sp = str, *ep = str;
     hts_pos_t from, to;
-    while ( 1 )
+    while ( *ep )
     {
         tmp.l = 0;
+        if (h) {
+            // When we have a header we can use hts_parse_regions.  This works
+            // around some ambiguities in parsing and enables the use of colon
+            // in contig names.
+            int tid;
+            hts_pos_t beg, end;
+            ep = hts_parse_region(ep, &tid, &beg, &end,
+                                  (hts_name2id_f)bcf_hdr_name2id, h,
+                                  HTS_PARSE_LIST);
+            if (end == HTS_POS_MAX)
+                end = -1;
+            if (beg <= 0)
+                beg = -1;
+            _regions_add(reg, bcf_hdr_id2name(h, tid), beg, end);
+            continue;
+        }
+
         if ( *ep=='{' )
         {
             while ( *ep && *ep!='}' ) ep++;
@@ -1204,7 +1221,7 @@ bcf_sr_regions_t *bcf_sr_regions_init(const char *regions, int is_file, int ichr
     bcf_sr_regions_t *reg;
     if ( !is_file )
     {
-        reg = _regions_init_string(regions);
+        reg = _regions_init_string(regions, NULL);
         _regions_sort_and_merge(reg);
         return reg;
     }
