@@ -2,7 +2,7 @@ name: Windows/MinGW-W64 CI
 on: [push, pull_request]
 
 jobs:
-  build:
+  build-mingw64:
     runs-on: windows-latest
     steps:
     - name: Checkout
@@ -36,5 +36,41 @@ jobs:
       run: |
         export PATH=/mingw64/bin:$PATH
         export MSYSTEM=MINGW64
+        make test-shlib-exports && make check
+
+  build-clang64:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+    - name: Set up MSYS2 MinGW-W64
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: clang64
+        update: false
+        install: >-
+          git
+          zlib-devel
+          libbz2-devel
+          liblzma-devel
+          mingw-w64-clang-x86_64-toolchain
+          mingw-w64-clang-x86_64-autotools
+          mingw-w64-clang-x86_64-tools-git
+          mingw-w64-clang-x86_64-libdeflate
+    - name: Compile htslib
+      shell: msys2 {0}
+      run: |
+        export PATH=/clang64/bin:$PATH
+        export MSYSTEM=CLANG64
+        autoreconf -i
+        ./configure CC="clang -fsanitize=address,undefined"
+        make -j6
+    - name: Check Htslib
+      shell: msys2 {0}
+      run: |
+        export PATH=/clang64/bin:$PATH
+        export MSYSTEM=CLANG64
         make test-shlib-exports && make check
 
