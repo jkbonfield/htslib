@@ -599,7 +599,7 @@ int hts_detect_format2(hFILE *hfile, const char *fname, htsFormat *fmt)
     char extension[HTS_MAX_EXT_LEN], columns[24];
     unsigned char s[1024];
     int complete = 0;
-    ssize_t len = hpeek(hfile, s, 18);
+    ssize_t len = hpeek(hfile, s, 30);
     if (len < 0) return -1;
 
     fmt->category = unknown_category;
