@@ -36,6 +36,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include "../htslib/sam.h"
 #include "../htslib/vcf.h"
 #include "../htslib/hts_log.h"
+#include "../htslib/tbx.h"
 
 struct opts {
     char *fn_ref;
@@ -215,38 +216,87 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
         }
     }
 
+    // A series of regions.
     if (optind + 1 < argc) {
-        // A series of regions.
-        if ((idx = bcf_index_load(argv[optind])) == 0) {
-            fprintf(stderr, "[E::%s] fail to load the BVCF index\n", __func__);
-            return 1;
-        }
-
-        for (i = optind + 1; i < argc; i++) {
-            hts_itr_t *iter;
-            if ((iter = bcf_itr_querys(idx, h, argv[i])) == 0) {
-                fprintf(stderr, "[E::%s] fail to parse region '%s'\n", __func__, argv[i]);
-                exit_code = 1;
-                break;
+        // VCF
+        if (in->format.format == vcf) {
+            struct tbx_t *tbx = NULL;
+            if ((tbx = tbx_index_load2(argv[optind], NULL)) == 0) {
+                fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
+                        __func__);
+                return 1;
             }
-            while ((r = bcf_itr_next(in, iter, b)) >= 0) {
-                if (!opts->benchmark && bcf_write1(out, h, b) < 0) {
-                    fprintf(stderr, "Error writing output.\n");
+
+            kstring_t line = {0, 0, 0};
+            for (i = optind + 1; i < argc; i++) {
+                hts_itr_t *iter = tbx_itr_querys(tbx, argv[i]);
+                if (!iter) {
+                    fprintf(stderr, "[E::%s] fail to parse region '%s'\n",
+                            __func__, argv[i]);
                     exit_code = 1;
                     break;
                 }
-                if (opts->nreads && --opts->nreads == 0)
-                    break;
-            }
-            if (r < -1) {
-                fprintf(stderr, "Error reading input.\n");
-                exit_code = 1;
-            }
-            hts_itr_destroy(iter);
-            if (exit_code != 0) break;
-        }
 
-        hts_idx_destroy(idx);
+                while ((r = tbx_itr_next(in, tbx, iter, &line)) >= 0) {
+                    if ((r = vcf_parse(&line, h, b)) < 0) {;
+                        r--;
+                        break;
+                    }
+                    if (!opts->benchmark && bcf_write1(out, h, b) < 0) {
+                        fprintf(stderr, "Error writing output.\n");
+                        exit_code = 1;
+                        break;
+                    }
+                    if (opts->nreads && --opts->nreads == 0)
+                        break;
+                }
+                if (r < -1) {
+                    fprintf(stderr, "Error reading input.\n");
+                    exit_code = 1;
+                }
+                hts_itr_destroy(iter);
+                if (exit_code != 0) break;
+            }
+            free(line.s);
+
+            tbx_destroy(tbx);
+
+        } else {
+            // BCF
+            if ((idx = bcf_index_load(argv[optind])) == 0) {
+                fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
+                        __func__);
+                return 1;
+            }
+
+            for (i = optind + 1; i < argc; i++) {
+                hts_itr_t *iter = bcf_itr_querys(idx, h, argv[i]);
+                if (!iter) {
+                    fprintf(stderr, "[E::%s] fail to parse region '%s'\n",
+                            __func__, argv[i]);
+                    exit_code = 1;
+                    break;
+                }
+
+                while ((r = bcf_itr_next(in, iter, b)) >= 0) {
+                    if (!opts->benchmark && bcf_write1(out, h, b) < 0) {
+                        fprintf(stderr, "Error writing output.\n");
+                        exit_code = 1;
+                        break;
+                    }
+                    if (opts->nreads && --opts->nreads == 0)
+                        break;
+                }
+                if (r < -1) {
+                    fprintf(stderr, "Error reading input.\n");
+                    exit_code = 1;
+                }
+                hts_itr_destroy(iter);
+                if (exit_code != 0) break;
+            }
+
+            hts_idx_destroy(idx);
+        }
 
     } else {
         // Whole file
