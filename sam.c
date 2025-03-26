@@ -800,7 +800,7 @@ int bam_read1(BGZF *fp, bam1_t *b)
     if (fp->is_be)
         ed_swap_4p(&block_len);
     if (block_len < 32) return -4;  // block_len includes core data
-    if (fp->block_length - fp->block_offset > 32) {
+    if (fp->block_length - fp->block_offset > 32 && !fp->is_zstd) {
         // Avoid bgzf_read and a temporary copy to a local buffer
         x = (uint8_t *)fp->uncompressed_block + fp->block_offset;
         fp->block_offset += 32;

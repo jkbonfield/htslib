@@ -35,6 +35,7 @@
 #include <sys/types.h>
 
 #include "hts_defs.h"
+#include "bgzf2.h"
 
 // Ensure ssize_t exists within this header. All #includes must precede this,
 // and ssize_t must be undefined again at the end of this header.
@@ -149,6 +150,9 @@ typedef struct BGZF BGZF;
  * See bgzf_read() normal function for return values.
  */
 static inline ssize_t bgzf_read_small(BGZF *fp, void *data, size_t length) {
+    if (fp->is_zstd)
+        return bgzf2_read((bgzf2 *)fp, data, length);
+
     // A block length of 0 implies current block isn't loaded (see
     // bgzf_seek_common).  That means length - offset may be negative, which
     // will be promoted to unsigned for purposes of the comparison.
@@ -187,6 +191,9 @@ static inline ssize_t bgzf_read_small(BGZF *fp, void *data, size_t length) {
  */
 static inline
 ssize_t bgzf_write_small(BGZF *fp, const void *data, size_t length) {
+    if (fp->is_zstd)
+        return bgzf2_write((bgzf2 *)fp, data, length, 0);
+
     if (fp->is_compressed
         && (size_t) (BGZF_BLOCK_SIZE - fp->block_offset) > length) {
         // Short cut the common and easy mode
