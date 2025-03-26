@@ -232,7 +232,7 @@ int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, hts_pos_t beg, hts_pos_t e
 static int bgzf_idx_flush(BGZF *fp,
                           size_t block_uncomp_len, size_t block_comp_len) {
     if (fp->is_zstd)
-      return;
+        return 0;
 
     mtaux_t *mt = fp->mt;
 
