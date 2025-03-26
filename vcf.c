@@ -4818,7 +4818,8 @@ static int vcf_idx_init(htsFile *fp, bcf_hdr_t *h, int min_shift, const char *fn
 int bcf_idx_init(htsFile *fp, bcf_hdr_t *h, int min_shift, const char *fnidx) {
     int n_lvls, nids = 0;
 
-    if (fp->format.compression != bgzf) {
+    if (fp->format.compression != bgzf &&
+        fp->format.compression != bgzf2_compression) {
         hts_log_error("Indexing is only supported on BGZF-compressed files");
         return -3; // Matches no-compression return for bcf_index_build3()
     }
