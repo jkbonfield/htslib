@@ -2362,6 +2362,9 @@ int bgzf_getc(BGZF *fp)
 
 int bgzf_getline(BGZF *fp, int delim, kstring_t *str)
 {
+    if (fp->is_zstd)
+        return bgzf2_getline((bgzf2 *)fp, delim, str);
+
     int l, state = 0;
     str->l = 0;
     do {

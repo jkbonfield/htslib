@@ -226,6 +226,11 @@ int bgzf2_peek(bgzf2 *fp);
  */
 int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end);
 
+/*
+ * Returns the internal temporary kstring associated with this bgzf2 fd.
+ */
+kstring_t *bgzf2_ks(bgzf2 *fp);
+
 #ifdef __cplusplus
 }
 #endif

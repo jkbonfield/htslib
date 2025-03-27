@@ -138,6 +138,7 @@ typedef struct {
 // TODO: do we use a variable sized integer encoding, or just store in
 // 32/64-bit little endian and rely on compression?
 typedef struct {
+    // TODO: add chr name too so we can do name to tid mappings?
     int tid;             // chromosome+1.  Unused as it's indexed by this?
     hts_pos_t beg, end;  // inclusive range within chromosome
 
@@ -242,6 +243,9 @@ struct bgzf2 {
     pthread_cond_t command_c;
     enum mtaux_cmd command;
     uint64_t seek_to;
+
+    // Shared kstring for optimisation of algorithms
+    kstring_t ks;
 };
 
 static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp);
@@ -1649,6 +1653,7 @@ int bgzf2_close(bgzf2 *fp) {
 
     free(fp->index);
     free(fp);
+    free(fp->ks.s);
 
     return ret ? -1 : 0;
 }
@@ -2437,7 +2442,9 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     if (tid < 0)
 	return -1;
 
-    //fprintf(stderr, "bgzf2_idx_add: %d %ld %ld\n", tid, beg, end);
+    // chr22 10511189 rs1234474560 TTTCTTCCCAAATGTGTATTGATTACAC
+    // => bgzf2_idx_add: 22 10511188 10511216
+    fprintf(stderr, "bgzf2_idx_add: %d %ld %ld\n", tid, beg, end);
 
     if (tid == 0)
 	beg = end = 0;
@@ -2492,6 +2499,13 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
 	idx->end = end;
 
     return 0;
+}
+
+/*
+ * Returns the internal temporary kstring associated with this bgzf2 fd.
+ */
+kstring_t *bgzf2_ks(bgzf2 *fp) { 
+   return &fp->ks;
 }
 
 
