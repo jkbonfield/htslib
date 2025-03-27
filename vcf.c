@@ -4634,6 +4634,14 @@ int vcf_write(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
             return -1;
     }
 
+    if (fp->idx && fp->format.compression == bgzf2_compression) {
+        // bgzf2 doesn't need tabix hackery
+        if (bgzf_idx_push(fp->fp.bgzf, fp->idx,
+                          v->rid, v->pos, v->pos + v->rlen,
+                          bgzf_tell(fp->fp.bgzf), 1) < 0)
+            return -1;
+    }
+
     return ret==fp->line.l ? 0 : -1;
 }
 

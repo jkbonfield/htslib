@@ -1354,7 +1354,7 @@ overlaps more than one region, it will only be returned once.
                                 char **regarray, unsigned int regcount);
 
     static inline int bcf_itr_next(htsFile *htsfp, hts_itr_t *itr, void *r) {
-        if (!htsfp->is_bgzf) {
+        if (0 && !htsfp->is_bgzf) { // FIXME
             hts_log_error("Only bgzf compressed files can be used with iterators");
             errno = EINVAL;
             return -2;

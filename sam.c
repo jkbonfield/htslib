@@ -1810,6 +1810,8 @@ int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
 
     do {
         ret = iter->readrec((BGZF *)fp, data, r, &tid, &beg, &end);
+        //fprintf(stderr, "bgzf2_itr_next: %d:%ld-%ld vs %d:%ld-%ld\n",
+        //        tid, beg, end, iter->tid, iter->beg, iter->end);
         if (tid == -1)
             tid = INT_MAX;
         if (ret < 0) {
@@ -1819,12 +1821,14 @@ int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
     } while (tid <= iter->tid && end <= iter->beg);
 
     if (tid != iter->tid || beg > iter->end) {
+        //fprintf(stderr, "finished\n");
         iter->finished = 1;
         return -1; // EOF
     }
 
     // These are part of the public API and things like
     // samtools view can use them in error messages.
+    //fprintf(stderr, "found\n");
     iter->curr_tid = tid;
     iter->curr_beg = beg;
     iter->curr_end = end;

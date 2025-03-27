@@ -37,6 +37,8 @@ DEALINGS IN THE SOFTWARE.  */
 #include "../htslib/vcf.h"
 #include "../htslib/hts_log.h"
 #include "../htslib/tbx.h"
+#include "../htslib/hts_internal.h"
+#include "../htslib/bgzf.h"
 
 struct opts {
     char *fn_ref;
@@ -195,6 +197,72 @@ int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
     return 1;
 }
 
+/*
+ * Query a BGZF2 genomic index on region
+ *
+ * Returns hts_itr_t struct ptr on success,
+ *         NULL on failure
+ */
+// FIXME: copied from sam.c.  Make this generic, maybe in hts.c?
+static hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
+				  int tid,
+				  hts_pos_t beg,
+				  hts_pos_t end,
+				  hts_readrec_func *readrec)
+{
+    const hts_bgzf2_idx_t *bidx = (const hts_bgzf2_idx_t *)idx;
+    hts_itr_t *iter = (hts_itr_t *)calloc(1, sizeof(hts_itr_t));
+    if (iter == NULL) return NULL;
+
+    if (tid == HTS_IDX_NOCOOR)
+	tid = -1;
+
+    int64_t pos = bgzf2_query(bidx->fp, tid, beg, end);
+    
+    // hts_itr_t is public and extremely BGZF(1) specific.
+    // We fill out tid, beg, end from arguments here, and we reuse
+    // curr_off to hold the seek position with n_off=1.
+    // On first use we seek there and set n_off=0 to indicate we've
+    // moved.  We don't seek immediately as we wish to separate querying
+    // from seeking.  (We may in theory query multiple places and then seek
+    // back to them later on.)
+
+    // An alternative to this would be to put all bgzf2 specific region
+    // functionality internal to the bgzf2 fp, as was done with cram_fd.
+    // This may be preferable long term for handling multi-region iterators.
+
+    iter->is_bgzf2 = 1;
+    iter->tid = tid;
+    iter->beg = tid == -1 ? -1 : beg;
+    iter->end = tid == -1 ?  0 : end;
+    iter->n_off = 1;
+    iter->curr_off = pos;
+    iter->readrec = readrec;
+    
+    return iter;
+}
+
+int vcf_readrec(BGZF *fp, void *hp, void *bp,
+                int *tid, hts_pos_t *beg, hts_pos_t *end) {
+    //kstring_t s = {0,0,0}; // FIXME cache this somewhere
+    //int ret = bgzf_getline(fp, '\n', &s);
+    kstring_t *s = bgzf2_ks((bgzf2 *)fp);
+    int ret = bgzf_getline(fp, '\n', s);
+    if (ret < 0)
+        return ret;
+
+    bcf_hdr_t *h = (bcf_hdr_t *)hp;
+    bcf1_t *b = (bcf1_t *)bp;
+    if ((ret = vcf_parse(s, h, b)) < 0)
+        return --ret;
+
+    *tid = b->rid;
+    *beg = b->pos;
+    *end = b->pos+1; // FIXME: look for END= tag too in s.s
+
+    return 0;
+}
+
 int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, htsFile *out) {
     bcf_hdr_t *h = bcf_hdr_read(in);
     bcf1_t *b = bcf_init1();
@@ -221,15 +289,32 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
         // VCF
         if (in->format.format == vcf) {
             struct tbx_t *tbx = NULL;
-            if ((tbx = tbx_index_load2(argv[optind], NULL)) == 0) {
-                fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
-                        __func__);
-                return 1;
+            if (in->format.compression == bgzf2_compression) {
+                // Fake up an index as it's inherently part of the file
+                // descriptor for BGZF2
+                hts_bgzf2_idx_t *idx = malloc(sizeof(*idx));
+                if (idx == NULL) return -1;
+                idx->fmt = HTS_FMT_BGZF2;
+                idx->fp = in->fp.bgzf2;
+                tbx = (tbx_t *)idx;
+            } else {
+                if ((tbx = tbx_index_load2(argv[optind], NULL)) == 0) {
+                    fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
+                            __func__);
+                    return 1;
+                }
+
             }
 
             kstring_t line = {0, 0, 0};
             for (i = optind + 1; i < argc; i++) {
-                hts_itr_t *iter = tbx_itr_querys(tbx, argv[i]);
+                // FIXME: idx is opaque
+                hts_itr_t *iter = *(int *)tbx == HTS_FMT_BGZF2
+                    ? hts_itr_querys((hts_idx_t*)tbx, argv[i],
+                                     //(hts_name2id_f)(tbx_name2id), tbx
+                                     (hts_name2id_f)(bcf_hdr_name2id), h,
+                                     bgzf2_itr_query, vcf_readrec)
+                    : tbx_itr_querys(tbx, argv[i]);
                 if (!iter) {
                     fprintf(stderr, "[E::%s] fail to parse region '%s'\n",
                             __func__, argv[i]);
@@ -237,18 +322,30 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
                     break;
                 }
 
-                while ((r = tbx_itr_next(in, tbx, iter, &line)) >= 0) {
-                    if ((r = vcf_parse(&line, h, b)) < 0) {;
-                        r--;
-                        break;
+                if (in->format.compression == bgzf2_compression) {
+                    while ((r = tbx_itr_next(in, h, iter, b)) >= 0) {
+                        if (!opts->benchmark && bcf_write1(out, h, b) < 0) {
+                            fprintf(stderr, "Error writing output.\n");
+                            exit_code = 1;
+                            break;
+                        }
+                        if (opts->nreads && --opts->nreads == 0)
+                            break;
                     }
-                    if (!opts->benchmark && bcf_write1(out, h, b) < 0) {
-                        fprintf(stderr, "Error writing output.\n");
-                        exit_code = 1;
-                        break;
+                } else {
+                    while ((r = tbx_itr_next(in, tbx, iter, &line)) >= 0) {
+                        if ((r = vcf_parse(&line, h, b)) < 0) {
+                            r--;
+                            break;
+                        }
+                        if (!opts->benchmark && bcf_write1(out, h, b) < 0) {
+                            fprintf(stderr, "Error writing output.\n");
+                            exit_code = 1;
+                            break;
+                        }
+                        if (opts->nreads && --opts->nreads == 0)
+                            break;
                     }
-                    if (opts->nreads && --opts->nreads == 0)
-                        break;
                 }
                 if (r < -1) {
                     fprintf(stderr, "Error reading input.\n");
@@ -259,18 +356,34 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
             }
             free(line.s);
 
-            tbx_destroy(tbx);
+            if (in->format.compression == bgzf2_compression)
+                free(tbx);
+            else
+                tbx_destroy(tbx);
 
         } else {
             // BCF
-            if ((idx = bcf_index_load(argv[optind])) == 0) {
+            if (in->format.compression == bgzf2_compression) {
+                // Fake up an index as it's inherently part of the file
+                // descriptor for BGZF2
+                hts_bgzf2_idx_t *bidx = malloc(sizeof(*bidx));
+                if (bidx == NULL) return -1;
+                bidx->fmt = HTS_FMT_BGZF2;
+                bidx->fp = in->fp.bgzf2;
+                idx = (hts_idx_t *)bidx;
+            } else if ((idx = bcf_index_load(argv[optind])) == 0) {
                 fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
                         __func__);
                 return 1;
             }
 
             for (i = optind + 1; i < argc; i++) {
-                hts_itr_t *iter = bcf_itr_querys(idx, h, argv[i]);
+                // FIXME: idx is opaque
+                hts_itr_t *iter = *(int *)idx == HTS_FMT_BGZF2
+                    ? hts_itr_querys(idx, argv[i],
+                                     (hts_name2id_f)(bcf_hdr_name2id),
+                                     h, bgzf2_itr_query, bcf_readrec)
+                    : bcf_itr_querys(idx, h, argv[i]);
                 if (!iter) {
                     fprintf(stderr, "[E::%s] fail to parse region '%s'\n",
                             __func__, argv[i]);
