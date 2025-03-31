@@ -2564,6 +2564,8 @@ int bcf_write(htsFile *hfp, bcf_hdr_t *h, bcf1_t *v)
     u16_to_le(v->n_info, x + 24);
     u16_to_le(v->n_allele, x + 26);
     u32_to_le((uint32_t)v->n_fmt<<24 | (v->n_sample & 0xffffff), x + 28);
+    if (bgzf_flush_try(fp, 32+v->shared.l+v->indiv.l) < 0)
+        return -1;
     if ( bgzf_write(fp, x, 32) != 32 ) return -1;
     if ( bgzf_write(fp, v->shared.s, v->shared.l) != v->shared.l ) return -1;
     if ( bgzf_write(fp, v->indiv.s, v->indiv.l) != v->indiv.l ) return -1;
