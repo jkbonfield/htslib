@@ -96,6 +96,8 @@ int bgzf2_close(bgzf2 *fp);
  */
 int bgzf2_set_block_size(bgzf2 *fp, size_t sz);
 
+void bgzf2_set_level(bgzf2 *fp, int level);
+
 /*
  * Writes a block of data to a bgzf2 file handle.
  *

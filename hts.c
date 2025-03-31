@@ -1883,8 +1883,12 @@ int hts_set_opt(htsFile *fp, enum hts_fmt_option opt, ...) {
             if (hfile_set_blksize(hf, va_arg(args, int)) != 0)
                 hts_log_warning("Failed to change block size");
             va_end(args);
-        }
-        else {
+        } else if (fp->format.compression == bgzf2_compression) {
+            va_start(args, opt);
+            int blk_size = va_arg(args, int);
+            va_end(args);
+            return bgzf2_set_block_size(fp->fp.bgzf2, blk_size);
+        } else {
             // To do - implement for vcf/bcf.
             hts_log_warning("Cannot change block size for this format");
         }
@@ -1942,9 +1946,12 @@ int hts_set_opt(htsFile *fp, enum hts_fmt_option opt, ...) {
         va_start(args, opt);
         int level = va_arg(args, int);
         va_end(args);
-        if (fp->is_bgzf)
-            fp->fp.bgzf->compress_level = level;
-        else if (fp->format.format == cram)
+        if (fp->is_bgzf || fp->is_bgzf2) {
+            if (fp->format.compression == bgzf2_compression)
+                bgzf2_set_level(fp->fp.bgzf2, level);
+            else
+                fp->fp.bgzf->compress_level = level;
+        } else if (fp->format.format == cram)
             return cram_set_option(fp->fp.cram, opt, level);
         return 0;
     }

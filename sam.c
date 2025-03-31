@@ -1792,6 +1792,8 @@ int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
 
     if (iter->n_off) {
         iter->n_off = 0;
+        // FIXME: gdb -args ./test/test_view /tmp/_2.bcf chr22:10510610-10521610
+        // Check pos and cpos work correctly vs /tmp/_1.bcf
         if (bgzf2_seek(fp, iter->curr_off) < 0) {
             hts_log_error("Failed to seek to offset %"PRIu64"%s%s",
                           iter->curr_off,
