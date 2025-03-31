@@ -1659,8 +1659,8 @@ int bgzf2_close(bgzf2 *fp) {
     free(fp->gindex_sz);
 
     free(fp->index);
-    free(fp);
     free(fp->ks.s);
+    free(fp);
 
     return ret ? -1 : 0;
 }
