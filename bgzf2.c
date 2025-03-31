@@ -663,7 +663,7 @@ int64_t bgzf2_query(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     if (tid < 0 || tid >= fp->nchr)
 	return -1;
 
-    // Brute force for now, just to get something running.
+    // TODO: Brute force for now, just to get something running.
     // We can replace this with a Nested Containment List (see cram_index.c).
     int i;
     for (i = 0; i < fp->gindex_sz[tid]; i++) {
@@ -1507,6 +1507,8 @@ int bgzf2_drain(bgzf2 *fp) {
 int bgzf2_set_block_size(bgzf2 *fp, size_t sz) {
     fp->block_size = sz;
 
+    fprintf(stderr, "bgzf block_size %ld\n", sz);
+
     if (fp->uncomp)
 	if (bgzf2_flush(fp) < 0)
 	    return -1;
@@ -1515,6 +1517,11 @@ int bgzf2_set_block_size(bgzf2 *fp, size_t sz) {
 //	sz = sz < 1024 ? sz : 1024;
 
     return bgzf2_buffer_grow(&fp->uncomp, sz);
+}
+
+void bgzf2_set_level(bgzf2 *fp, int level) {
+    fprintf(stderr, "bgzf level %d\n", level);
+    fp->level = level;
 }
 
 static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) { 
@@ -2444,7 +2451,7 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
 
     // chr22 10511189 rs1234474560 TTTCTTCCCAAATGTGTATTGATTACAC
     // => bgzf2_idx_add: 22 10511188 10511216
-    fprintf(stderr, "bgzf2_idx_add: %d %ld %ld\n", tid, beg, end);
+    //fprintf(stderr, "bgzf2_idx_add: %d %ld %ld\n", tid, beg, end);
 
     if (tid == 0)
 	beg = end = 0;
