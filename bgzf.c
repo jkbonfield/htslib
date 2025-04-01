@@ -2176,10 +2176,14 @@ void bgzf_set_cache_size(BGZF *fp, int cache_size)
 }
 
 int bgzf_check_EOF(BGZF *fp) {
+    if (fp->is_zstd)
+        return bgzf2_check_EOF((bgzf2 *)fp);
+
     int has_eof;
 
     if (fp->mt) {
         pthread_mutex_lock(&fp->mt->command_m);
+
         // fp->mt->command state transitions should be:
         // NONE -> HAS_EOF -> HAS_EOF_DONE -> NONE
         // (HAS_EOF -> HAS_EOF_DONE happens in bgzf_mt_reader thread)
