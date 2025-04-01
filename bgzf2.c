@@ -174,7 +174,7 @@ typedef struct bgzf2_job {
     bgzf2_buffer *uncomp;
     bgzf2_buffer *comp;
     int errcode;
-    int hit_eof; // view from main or view from thread?
+    int hit_eof; // view from main or view from thread? 
     int job_num;
     int known_size;
     struct bgzf2_job *next;
@@ -188,6 +188,10 @@ enum mtaux_cmd {
     SEEK_FAIL,
     HAS_EOF,
     HAS_EOF_DONE,
+    LOAD_SINDEX,
+    LOAD_SINDEX_DONE,
+    LOAD_GINDEX,
+    LOAD_GINDEX_DONE,
     CLOSE,
 };
 
@@ -208,6 +212,7 @@ struct bgzf2 {
     int nindex;           // used size of index array
     int aindex;           // allocated size of index array
     int errcode;          // FIXME
+    int has_eof;          // Has an EOF block
 
     off_t frame_pos;      // uncompressed offset of current frame start
     off_t tid_pos;        // uncompressed offset of tid within frame.
@@ -529,7 +534,65 @@ static int write_genomic_index(bgzf2 *fp) {
     return ret;
 }
 
-int load_seekable_index(bgzf2 *fp);
+static void submit_reader_command(bgzf2 *fp, int command, int done) {
+    pthread_mutex_lock(&fp->command_m);
+    // Signal the reader thread to execute command
+    if (fp->command != CLOSE) {
+	fp->command = command;
+	fp->errcode = 0;
+    }
+    
+    pthread_cond_signal(&fp->command_c);
+    hts_tpool_wake_dispatch(fp->out_queue);
+    do {
+	if (fp->command == CLOSE) {
+	    // possible error in bgzf2_mt_reader
+	    pthread_mutex_unlock(&fp->command_m);
+	    return;
+	}
+	pthread_cond_wait(&fp->command_c, &fp->command_m);
+	//fprintf(stderr, "submit_reader_command sees command = %d\n", fp->command);
+	if (fp->command == command) {
+	    // Resend signal intended for bgzf_mt_reader()
+	    pthread_cond_signal(&fp->command_c);
+	    break;
+	} else if (fp->command == done) {
+	    // FIXME: can we not use a single DONE flag?
+	    // Command has completed, check fp->errcode for command status
+	    break;
+	} else if (fp->command == CLOSE) {
+	    continue;
+	} else {
+	    abort();  // Should not get to any other state
+	}
+    } while (fp->command != done);
+    fp->command = NONE;
+    pthread_mutex_unlock(&fp->command_m);
+}
+
+int load_seekable_index_common(bgzf2 *fp);
+
+static int load_seekable_index_mt(bgzf2 *fp) {
+    pthread_mutex_lock(&fp->job_pool_m);
+    int err = load_seekable_index_common(fp);
+    pthread_mutex_unlock(&fp->job_pool_m);
+    fp->command = LOAD_SINDEX_DONE;
+    pthread_cond_signal(&fp->command_c);
+    return err;
+}
+
+static int load_seekable_index(bgzf2 *fp) {
+    int err;
+    if (fp->pool) {
+	submit_reader_command(fp, LOAD_SINDEX, LOAD_SINDEX_DONE);
+	pthread_mutex_lock(&fp->command_m);
+        err = fp->errcode;
+        pthread_mutex_unlock(&fp->command_m);
+    } else {
+	err = load_seekable_index_common(fp);
+    }
+    return err;
+}
 
 /*
  * Loads the genomic index is present.
@@ -540,7 +603,7 @@ int load_seekable_index(bgzf2 *fp);
  *        -2 on non-seekable stream,
  *        -3 if no index found.
  */
-static int load_genomic_index(bgzf2 *fp) {
+static int load_genomic_index_common(bgzf2 *fp) {
     uint8_t *buf = NULL;
 
     if (fp->gindex)
@@ -548,7 +611,8 @@ static int load_genomic_index(bgzf2 *fp) {
 
     if (!fp->index) {
 	int err;
-	if ((err = load_seekable_index(fp)) < 0)
+
+	if ((err = load_seekable_index_common(fp)) < 0)
 	    return err;
     }
     
@@ -559,7 +623,7 @@ static int load_genomic_index(bgzf2 *fp) {
 
     uint8_t footer[8];
     if (8 != hread(fp->hfp, footer, 8))
-	return -1;
+	goto err;
 
     if (le_to_u32(footer+4) != 0x8F92EABB)
 	return -3; // index not found
@@ -567,10 +631,10 @@ static int load_genomic_index(bgzf2 *fp) {
     // load the index into memory
     uint32_t sz = le_to_u32(footer);
     if (!sz)
-	return -1;
+	goto err;
     //if (hseek(fp->hfp, -sz, SEEK_CUR) < 0) // why doesn't SEEK_CUR work?
     if (hseek(fp->hfp, -(fp->index_sz + sz), SEEK_END) < 0)
-	return -1;
+	goto err;
 
     if (!(buf = malloc(sz)))
 	goto err;
@@ -625,6 +689,28 @@ static int load_genomic_index(bgzf2 *fp) {
     return -1;
 }
 
+static int load_genomic_index_mt(bgzf2 *fp) {
+    pthread_mutex_lock(&fp->job_pool_m);
+    int err = load_genomic_index_common(fp);
+    pthread_mutex_unlock(&fp->job_pool_m);
+    fp->command = LOAD_GINDEX_DONE;
+    pthread_cond_signal(&fp->command_c);
+    return err;
+}
+
+static int load_genomic_index(bgzf2 *fp) {
+    int err;
+    if (fp->pool) {
+	submit_reader_command(fp, LOAD_GINDEX, LOAD_GINDEX_DONE);
+	pthread_mutex_lock(&fp->command_m);
+        err = fp->errcode;
+        pthread_mutex_unlock(&fp->command_m);
+    } else {
+	err = load_genomic_index_common(fp);
+    }
+    return err;
+}
+
 /*
  * Finds the uncompressed file offset associated with a specific range.
  * This offset is only suitable for passing into bgzf2_seek.
@@ -650,8 +736,13 @@ static int load_genomic_index(bgzf2 *fp) {
  */
 int64_t bgzf2_query(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     int err;
-    if ((err = load_genomic_index(fp) < 0))
-	return err;
+    if (!fp->gindex) {
+	err = load_genomic_index(fp);
+
+	if (err < 0)
+	    return err;
+    }
+
 
     // TODO: splitting chromosomes over a frame should provide a new starting
     // point part way into the frame, so we never get the last chromosomes
@@ -817,7 +908,7 @@ static int write_pzstd_skippable(bgzf2 *fp, uint32_t comp_sz) {
  */
 static void bgzf2_job_free(void *vp) {
     bgzf2_job *j = (bgzf2_job *)vp;
-    //fprintf(stderr, "bgzf2_job_free %d\n", j->job_num);
+    //fprintf(stderr, "bgzf2_job_free %p %d\n", j, j->job_num);
 
     bgzf2 *fp = j->fp;
     pthread_mutex_lock(&fp->job_pool_m);
@@ -855,6 +946,12 @@ static bgzf2_job *bgzf2_job_new(bgzf2 *fp) {
 	memset(j, 0, sizeof(*j));
 	//fprintf(stderr, "Alloc new block\n");
     }
+
+    bgzf2_job tmp = *j;
+    memset(j, 0, sizeof(*j));
+    j->uncomp = tmp.uncomp;
+    j->comp   = tmp.comp;
+    j->fp     = tmp.fp;
 
     return j;
 }
@@ -997,7 +1094,7 @@ bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos);
 static void bgzf2_mt_seek(bgzf2 *fp) {
     if (!fp->index) {
 	int err;
-	if ((err = load_seekable_index(fp)) < 0) {
+	if ((err = load_seekable_index_common(fp)) < 0) {
 	    pthread_mutex_lock(&fp->job_pool_m);
 	    fp->errcode = -err;
 	    fp->command = SEEK_FAIL;
@@ -1034,8 +1131,37 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
     pthread_cond_signal(&fp->command_c);
 }
 
+static int bgzf2_check_EOF_common(bgzf2 *fp) {
+    off_t offset = htell(fp->hfp);
+    if (hseek(fp->hfp, -4, SEEK_END) < 0) {
+        if (
+#ifdef _WIN32
+	    errno == EINVAL ||
+#endif
+	    errno == ESPIPE) {
+	    hclearerr(fp->hfp);
+	    return 2;
+	}
+
+	return -1;
+    }
+
+    uint8_t buf[4];
+    if (hread(fp->hfp, buf, 4) != 4)
+	return -1;
+
+    if (hseek(fp->hfp, offset, SEEK_SET) < 0)
+	return -1;
+
+    return (memcmp(buf, "\xb1\xea\x92\x8f", 4) == 0) ? 1 : 0;
+}
+
 static void bgzf2_mt_eof(bgzf2 *fp) {
-    abort();
+    pthread_mutex_lock(&fp->job_pool_m);
+    fp->has_eof = bgzf2_check_EOF_common(fp);
+    pthread_mutex_unlock(&fp->job_pool_m);
+    fp->command = HAS_EOF_DONE;
+    pthread_cond_signal(&fp->command_c);
 }
 
 /*
@@ -1081,6 +1207,10 @@ static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
 
     j->fp = fp;
     j->errcode = 0;
+
+    // DEBUGGING ONLY
+    static int job_num = 0;
+    j->job_num = job_num++;
 
     return usize;
 }
@@ -1146,6 +1276,8 @@ restart:
 
         // Check for command
         pthread_mutex_lock(&fp->command_m);
+	//if (fp->command)
+	//    fprintf(stderr, "Reader has command %d\n", fp->command);
         switch (fp->command) {
         case SEEK:
 	    // Sets fp->command to SEEK_DONE
@@ -1157,8 +1289,18 @@ restart:
             bgzf2_mt_eof(fp);   // Sets fp->command to HAS_EOF_DONE
             break;
 
+	case LOAD_SINDEX:
+	    fp->errcode = load_seekable_index_mt(fp);
+            break;
+
+	case LOAD_GINDEX:
+	    fp->errcode = load_genomic_index_mt(fp);
+            break;
+
         case SEEK_DONE:
         case HAS_EOF_DONE:
+	case LOAD_SINDEX_DONE:
+	case LOAD_GINDEX_DONE:
             pthread_cond_signal(&fp->command_c);
             break;
 
@@ -1181,7 +1323,6 @@ restart:
         }
 	j->fp = fp;
     }
-
     if (j->errcode == 2 /* FIXME */) {
         // Attempt to multi-thread decode a raw gzip stream cannot be done.
         // We tear down the multi-threaded decoder and revert to the old code.
@@ -1237,6 +1378,8 @@ restart:
 
         case SEEK_DONE:
         case HAS_EOF_DONE:
+	case LOAD_SINDEX_DONE:
+	case LOAD_GINDEX_DONE:
             pthread_cond_signal(&fp->command_c);
             pthread_mutex_unlock(&fp->command_m);
             break;
@@ -1331,9 +1474,9 @@ int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize) {
     pthread_cond_init(&fp->command_c, NULL);
     fp->flush_pending = 0;
     fp->jobs_pending = 0;
-    pthread_create(&fp->io_task, NULL,
-                   fp->is_write ? bgzf2_mt_writer : bgzf2_mt_reader, fp);
 
+    pthread_create(&fp->io_task, NULL,
+		   fp->is_write ? bgzf2_mt_writer : bgzf2_mt_reader, fp);
     return 0;
 }
 
@@ -1770,8 +1913,10 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
 	return -2;
     if (usize == ZSTD_CONTENTSIZE_ERROR)
 	return -1;
-    if (usize == 0)
+    if (usize == 0) {
 	return 0; // empty frame => skip to next
+	// FIXME: this isn't an EOF, so try again with a goto next_block?
+    }
 
     return usize;
 }
@@ -2036,9 +2181,9 @@ static int bgzf2_refill_uncomp(bgzf2 *fp) {
 	n = fp->pool
 	    ? bgzf2_decode_block_mt(fp)
 	    : bgzf2_decode_block(fp);
-	if (n < 0)
+	if (n < 0) {
 	    return -2; // err
-	else if (n == 0) {
+	} else if (n == 0) {
 	    fp->hit_eof = 1;
 	    return -1; // eof
 	}
@@ -2145,7 +2290,7 @@ int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz) {
  *        -2 on non-seekable stream,
  *        -3 if no index found.
  */
-int load_seekable_index(bgzf2 *fp) {
+int load_seekable_index_common(bgzf2 *fp) {
     // Look for and validate index footer
     off_t off = hseek(fp->hfp, -9, SEEK_END);
     if (off < 0)
@@ -2345,28 +2490,19 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
  *        -1 for I/O error, with errno set.
  */
 int bgzf2_check_EOF(bgzf2 *fp) {
-    off_t offset = htell(fp->hfp);
-    if (hseek(fp->hfp, -4, SEEK_END) < 0) {
-        if (
-#ifdef _WIN32
-	    errno == EINVAL ||
-#endif
-	    errno == ESPIPE) {
-	    hclearerr(fp->hfp);
-	    return 2;
-	}
+    int has_eof, err = 0;
 
-	return -1;
+    if (fp->pool) {
+	submit_reader_command(fp, HAS_EOF, HAS_EOF_DONE);
+	pthread_mutex_lock(&fp->command_m);
+        has_eof = fp->has_eof;
+	err = fp->errcode;
+        pthread_mutex_unlock(&fp->command_m);
+    } else {
+	has_eof = bgzf2_check_EOF_common(fp);
     }
 
-    uint8_t buf[4];
-    if (hread(fp->hfp, buf, 4) != 4)
-	return -1;
-
-    if (hseek(fp->hfp, offset, SEEK_SET) < 0)
-	return -1;
-
-    return (memcmp(buf, "\xb1\xea\x92\x8f", 4) == 0) ? 1 : 0;
+    return err ? -1 : has_eof;
 }
 
 /**
