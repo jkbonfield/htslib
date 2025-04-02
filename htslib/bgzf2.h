@@ -69,6 +69,7 @@ typedef struct bgzf2 bgzf2;
  * Returns bgzf2 file handle on success,
  *         or NULL on failure.
  */
+HTSLIB_EXPORT
 bgzf2 *bgzf2_hopen(hFILE *hfp, const char *mode);
 
 /*
@@ -77,6 +78,7 @@ bgzf2 *bgzf2_hopen(hFILE *hfp, const char *mode);
  * Returns bgzf2 file handle on success,
  *         or NULL on failure.
  */
+HTSLIB_EXPORT
 bgzf2 *bgzf2_open(const char *fn, const char *mode);
 
 /*
@@ -85,6 +87,7 @@ bgzf2 *bgzf2_open(const char *fn, const char *mode);
  * Returns 0 on success,
  *        <0 on failure
  */
+HTSLIB_EXPORT
 int bgzf2_close(bgzf2 *fp);
 
 /*
@@ -94,8 +97,10 @@ int bgzf2_close(bgzf2 *fp);
  * Returns 0 on success,
  *        -1 on failure
  */
+HTSLIB_EXPORT
 int bgzf2_set_block_size(bgzf2 *fp, size_t sz);
 
+HTSLIB_EXPORT
 void bgzf2_set_level(bgzf2 *fp, int level);
 
 /*
@@ -107,6 +112,7 @@ void bgzf2_set_level(bgzf2 *fp, int level);
  * Returns number of bytes written on success
  *        -1 on failure
  */
+HTSLIB_EXPORT
 int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split);
 
 /*
@@ -115,6 +121,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split);
  * Returns number of bytes read on success
  *        -1 on failure
  */
+HTSLIB_EXPORT
 int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz);
 
 /*
@@ -126,6 +133,7 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz);
  * Returns number of bytes read on success
  *        -1 on failure
  */
+HTSLIB_EXPORT
 int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz);
 
 /*
@@ -134,6 +142,7 @@ int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz);
  * Returns 0 on success,
  *        -1 on failure
  */
+HTSLIB_EXPORT
 int bgzf2_flush(bgzf2 *fp);
 
 /*
@@ -143,6 +152,7 @@ int bgzf2_flush(bgzf2 *fp);
  * Returns 0 on success,
  *        <0 on failure
  */
+HTSLIB_EXPORT
 int bgzf2_flush_try(bgzf2 *fp, ssize_t size);
 
 /*
@@ -168,6 +178,7 @@ int bgzf2_flush_try(bgzf2 *fp, ssize_t size);
  *        -2 on non-seekable stream,
  *        -3 if no index found.
  */
+HTSLIB_EXPORT
 int64_t bgzf2_query(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end);
 
 /*
@@ -178,6 +189,7 @@ int64_t bgzf2_query(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end);
  *
  * TODO: consider "whence" and returning off_t, like lseek?
  */
+HTSLIB_EXPORT
 int bgzf2_seek(bgzf2 *fp, uint64_t upos);
 
 /*
@@ -188,6 +200,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos);
  *         2 if unable to check (eg cannot seek),
  *        -1 for I/O error, with errno set.
  */
+HTSLIB_EXPORT
 int bgzf2_check_EOF(bgzf2 *fp);
 
 /**
@@ -199,6 +212,7 @@ int bgzf2_check_EOF(bgzf2 *fp);
  * @param pool        The thread pool (see hts_create_threads)
  * @param qsize       Size of job queue, 0 for auto
  */
+HTSLIB_EXPORT
 int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize);
 
 /**
@@ -210,6 +224,7 @@ int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize);
  * @return       length of the string (capped at INT_MAX);
  *               -1 on end-of-file; <= -2 on error
  */
+HTSLIB_EXPORT
 int bgzf2_getline(bgzf2 *fp, int delim, kstring_t *str);
 
 /**
@@ -219,6 +234,7 @@ int bgzf2_getline(bgzf2 *fp, int delim, kstring_t *str);
  *               -2 on error,
  *               otherwise the unsigned byte value.
  */
+HTSLIB_EXPORT
 int bgzf2_peek(bgzf2 *fp);
 
 /*
@@ -226,11 +242,13 @@ int bgzf2_peek(bgzf2 *fp);
  * Returns 0 on success,
  *        <0 on failure
  */
+HTSLIB_EXPORT
 int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end);
 
 /*
  * Returns the internal temporary kstring associated with this bgzf2 fd.
  */
+HTSLIB_EXPORT
 kstring_t *bgzf2_ks(bgzf2 *fp);
 
 #ifdef __cplusplus

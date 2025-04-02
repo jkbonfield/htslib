@@ -277,7 +277,7 @@ sub run_test
     #for my $logic (qw(snps))
     {
         print STDERR "$FindBin::Bin/test-bcf-sr $$opts{tmp}/list.txt -p $logic > $$opts{tmp}/rmme.bin.out\n" unless !$$opts{verbose};
-	print "CMD1 $FindBin::Bin/test-bcf-sr $$opts{tmp}/list.txt -p $logic > $$opts{tmp}/rmme.bin.out\n";
+        print "CMD1 $FindBin::Bin/test-bcf-sr $$opts{tmp}/list.txt -p $logic > $$opts{tmp}/rmme.bin.out\n";
         cmd("$FindBin::Bin/test-bcf-sr $$opts{tmp}/list.txt -p $logic > $$opts{tmp}/rmme.bin.out");
 
         open(my $fh,'>',"$$opts{tmp}/rmme.perl.out") or error("$$opts{tmp}/rmme.perl.out: $!");
