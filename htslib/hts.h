@@ -52,11 +52,6 @@ typedef int64_t hts_pos_t;
 // #define PRIhts_pos PRId32
 // typedef int32_t hts_pos_t;
 
-// This uses hts_pos_t, so include after the above definition.
-// Alternatively we can remove it from hts.h and use an equivalent to
-// the HTS_BGZF_TYPEDEF below.
-#include "bgzf2.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -247,6 +242,7 @@ typedef struct htsFormat {
 struct hts_idx_t;
 typedef struct hts_idx_t hts_idx_t;
 struct hts_filter_t;
+typedef struct bgzf2 bgzf2;
 
 /**
  * @brief File handle returned by hts_open() etc.

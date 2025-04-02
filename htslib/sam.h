@@ -1395,6 +1395,14 @@ HTSLIB_EXPORT
 const char *sam_parse_region(sam_hdr_t *h, const char *s, int *tid,
                              hts_pos_t *beg, hts_pos_t *end, int flags);
 
+/// Fake up an hts_idx_t from a bgzf2 index
+HTSLIB_EXPORT
+hts_idx_t *hts_bgzf2_idx_init(void *fp);
+
+/// Fake up an hts_idx_t from a cram index
+HTSLIB_EXPORT
+hts_idx_t *hts_cram_idx_init(void *fp);
+
     /***************
      *** SAM I/O ***
      ***************/

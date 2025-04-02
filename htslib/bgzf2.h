@@ -42,6 +42,7 @@
 #include "thread_pool.h"
 #include "kstring.h"
 #include "hfile.h"
+#include "hts.h"
 
 // Ensure ssize_t exists within this header. All #includes must precede this,
 // and ssize_t must be undefined again at the end of this header.
@@ -250,6 +251,27 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end);
  */
 HTSLIB_EXPORT
 kstring_t *bgzf2_ks(bgzf2 *fp);
+
+/*
+ * Query a BGZF2 genomic index on region
+ *
+ * Returns hts_itr_t struct ptr on success,
+ *         NULL on failure
+ */
+HTSLIB_EXPORT
+hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
+			   int tid,
+			   hts_pos_t beg,
+			   hts_pos_t end,
+			   hts_readrec_func *readrec);
+
+/*
+ * Returns the next item from a bgzf2 iterator.
+ * Returns 0 if found,
+ *        -1 at EOF,
+ *      <=-2 for error.
+ */
+int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data);
 
 #ifdef __cplusplus
 }

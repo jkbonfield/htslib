@@ -37,7 +37,6 @@ DEALINGS IN THE SOFTWARE.  */
 #include "../htslib/vcf.h"
 #include "../htslib/hts_log.h"
 #include "../htslib/tbx.h"
-#include "../hts_internal.h"  // for hts_bgzf2_idx_t
 #include "../htslib/bgzf.h"
 
 struct opts {
@@ -197,56 +196,6 @@ int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
     return 1;
 }
 
-/*
- * Query a BGZF2 genomic index on region
- *
- * Returns hts_itr_t struct ptr on success,
- *         NULL on failure
- */
-// FIXME: copied from sam.c.  Make this generic, maybe in hts.c?
-// This needs moving elsewhere, and then we can avoid hts_internal.h.
-// Really the route cause of the problem is needing to use tbx_itr_querys vs
-// bcf_itr_querys.  We switch to the more generic hts_itr_querys for both with
-// bgzf2, but this needs the iterator function knowing here.  If we could
-// unify bcf and vcf properly then it could all be hidden in hts.c
-static hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
-                                  int tid,
-                                  hts_pos_t beg,
-                                  hts_pos_t end,
-                                  hts_readrec_func *readrec)
-{
-    const hts_bgzf2_idx_t *bidx = (const hts_bgzf2_idx_t *)idx;
-    hts_itr_t *iter = (hts_itr_t *)calloc(1, sizeof(hts_itr_t));
-    if (iter == NULL) return NULL;
-
-    if (tid == HTS_IDX_NOCOOR)
-        tid = -1;
-
-    int64_t pos = bgzf2_query(bidx->fp, tid, beg, end);
-
-    // hts_itr_t is public and extremely BGZF(1) specific.
-    // We fill out tid, beg, end from arguments here, and we reuse
-    // curr_off to hold the seek position with n_off=1.
-    // On first use we seek there and set n_off=0 to indicate we've
-    // moved.  We don't seek immediately as we wish to separate querying
-    // from seeking.  (We may in theory query multiple places and then seek
-    // back to them later on.)
-
-    // An alternative to this would be to put all bgzf2 specific region
-    // functionality internal to the bgzf2 fp, as was done with cram_fd.
-    // This may be preferable long term for handling multi-region iterators.
-
-    iter->is_bgzf2 = 1;
-    iter->tid = tid;
-    iter->beg = tid == -1 ? -1 : beg;
-    iter->end = tid == -1 ?  0 : end;
-    iter->n_off = 1;
-    iter->curr_off = pos;
-    iter->readrec = readrec;
-
-    return iter;
-}
-
 int vcf_readrec(BGZF *fp, void *hp, void *bp,
                 int *tid, hts_pos_t *beg, hts_pos_t *end) {
     //kstring_t s = {0,0,0}; // FIXME cache this somewhere
@@ -297,11 +246,10 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
             if (in->format.compression == bgzf2_compression) {
                 // Fake up an index as it's inherently part of the file
                 // descriptor for BGZF2
-                hts_bgzf2_idx_t *idx = malloc(sizeof(*idx));
-                if (idx == NULL) return -1;
-                idx->fmt = HTS_FMT_BGZF2;
-                idx->fp = in->fp.bgzf2;
-                tbx = (tbx_t *)idx;
+                tbx = (tbx_t *)hts_bgzf2_idx_init(in->fp.bgzf2);
+                if (!tbx)
+                    return -1;
+
             } else {
                 if ((tbx = tbx_index_load2(argv[optind], NULL)) == 0) {
                     fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
@@ -310,6 +258,11 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
                 }
 
             }
+
+// Really the route cause of the problem is needing to use tbx_itr_querys vs
+// bcf_itr_querys.  We switch to the more generic hts_itr_querys for both with
+// bgzf2, but this needs the iterator function knowing here.  If we could
+// unify bcf and vcf properly then it could all be hidden in hts.c
 
             kstring_t line = {0, 0, 0};
             for (i = optind + 1; i < argc; i++) {
@@ -371,11 +324,10 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
             if (in->format.compression == bgzf2_compression) {
                 // Fake up an index as it's inherently part of the file
                 // descriptor for BGZF2
-                hts_bgzf2_idx_t *bidx = malloc(sizeof(*bidx));
-                if (bidx == NULL) return -1;
-                bidx->fmt = HTS_FMT_BGZF2;
-                bidx->fp = in->fp.bgzf2;
-                idx = (hts_idx_t *)bidx;
+                idx = hts_bgzf2_idx_init(in->fp.bgzf2);
+                if (!idx)
+                    return -1;
+
             } else if ((idx = bcf_index_load(argv[optind])) == 0) {
                 fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
                         __func__);

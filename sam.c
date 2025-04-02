@@ -1635,6 +1635,37 @@ static int64_t cram_ptell(void *fp)
     return ret;
 }
 
+static int bam_pseek(void *fp, int64_t offset, int whence)
+{
+    BGZF *fd = (BGZF *)fp;
+
+    return bgzf_seek(fd, offset, whence);
+}
+
+static int64_t bam_ptell(void *fp)
+{
+    BGZF *fd = (BGZF *)fp;
+    if (!fd)
+        return -1L;
+
+    return bgzf_tell(fd);
+}
+
+hts_idx_t *hts_bgzf2_idx_init(void *fp) {
+    hts_bgzf2_idx_t *idx = malloc(sizeof(*idx));
+    if (idx == NULL) return NULL;
+    idx->fmt = HTS_FMT_BGZF2;
+    idx->fp = fp;
+    return (hts_idx_t *)idx;
+}
+
+hts_idx_t *hts_cram_idx_init(void *fp) {
+    hts_cram_idx_t *idx = malloc(sizeof(*idx));
+    if (idx == NULL) return NULL;
+    idx->fmt = HTS_FMT_CRAI;
+    idx->cram = fp;
+    return (hts_idx_t *)idx;
+}
 
 static hts_idx_t *index_load(htsFile *fp, const char *fn, const char *fnidx, int flags)
 {
@@ -1643,25 +1674,16 @@ static hts_idx_t *index_load(htsFile *fp, const char *fn, const char *fnidx, int
     case sam:
         if (fp->format.compression == bgzf2_compression) {
             // Cons up a fake "index" just pointing at the associated cram_fd:
-            hts_bgzf2_idx_t *idx = malloc(sizeof(*idx));
-            if (idx == NULL) return NULL;
-            idx->fmt = HTS_FMT_BGZF2;
-            idx->fp = fp->fp.bgzf2;
-            return (hts_idx_t *)idx;
+            return hts_bgzf2_idx_init(fp->fp.bgzf2);
         }
 
         return hts_idx_load3(fn, fnidx, HTS_FMT_BAI, flags);
 
-    case cram: {
+    case cram:
         if (cram_index_load(fp->fp.cram, fn, fnidx) < 0) return NULL;
 
         // Cons up a fake "index" just pointing at the associated cram_fd:
-        hts_cram_idx_t *idx = malloc(sizeof (hts_cram_idx_t));
-        if (idx == NULL) return NULL;
-        idx->fmt = HTS_FMT_CRAI;
-        idx->cram = fp->fp.cram;
-        return (hts_idx_t *) idx;
-        }
+        return hts_cram_idx_init(fp->fp.cram);
 
     default:
         return NULL; // TODO Would use tbx_index_load if it returned hts_idx_t
@@ -1737,104 +1759,6 @@ static hts_itr_t *cram_itr_query(const hts_idx_t *idx, int tid, hts_pos_t beg, h
     }
 
     return iter;
-}
-
-/*
- * Query a BGZF2 genomic index on region
- *
- * Returns hts_itr_t struct ptr on success,
- *         NULL on failure
- */
-static hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
-                                  int tid,
-                                  hts_pos_t beg,
-                                  hts_pos_t end,
-                                  hts_readrec_func *readrec)
-{
-    const hts_bgzf2_idx_t *bidx = (const hts_bgzf2_idx_t *)idx;
-    hts_itr_t *iter = (hts_itr_t *)calloc(1, sizeof(hts_itr_t));
-    if (iter == NULL) return NULL;
-
-    if (tid == HTS_IDX_NOCOOR)
-        tid = -1;
-
-    int64_t pos = bgzf2_query(bidx->fp, tid, beg, end);
-
-    // hts_itr_t is public and extremely BGZF(1) specific.
-    // We fill out tid, beg, end from arguments here, and we reuse
-    // curr_off to hold the seek position with n_off=1.
-    // On first use we seek there and set n_off=0 to indicate we've
-    // moved.  We don't seek immediately as we wish to separate querying
-    // from seeking.  (We may in theory query multiple places and then seek
-    // back to them later on.)
-
-    // An alternative to this would be to put all bgzf2 specific region
-    // functionality internal to the bgzf2 fp, as was done with cram_fd.
-    // This may be preferable long term for handling multi-region iterators.
-
-    iter->is_bgzf2 = 1;
-    iter->tid = tid;
-    iter->beg = tid == -1 ? -1 : beg;
-    iter->end = tid == -1 ?  0 : end;
-    iter->n_off = 1;
-    iter->curr_off = pos;
-    iter->readrec = readrec;
-
-    return iter;
-}
-
-int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
-    if (!iter || iter->finished)
-        return -1;
-
-    if (!iter->is_bgzf2)
-        return -2;
-
-    if (iter->n_off) {
-        iter->n_off = 0;
-        // Check pos and cpos work correctly vs /tmp/_1.bcf
-        if (bgzf2_seek(fp, iter->curr_off) < 0) {
-            hts_log_error("Failed to seek to offset %"PRIu64"%s%s",
-                          iter->curr_off,
-                          errno ? ": " : "", strerror(errno));
-            return -2;
-        }
-    }
-
-    int ret, tid;
-    hts_pos_t beg, end;
-
-    // Ensure sort works so -1 is after all others.
-    // Or, we could just cast to uint32_t before cmp and force wrap around.
-    if (iter->tid == -1)
-        iter->tid = INT_MAX;
-
-    do {
-        ret = iter->readrec((BGZF *)fp, data, r, &tid, &beg, &end);
-        //fprintf(stderr, "bgzf2_itr_next: %d:%ld-%ld vs %d:%ld-%ld\n",
-        //        tid, beg, end, iter->tid, iter->beg, iter->end);
-        if (tid == -1)
-            tid = INT_MAX;
-        if (ret < 0) {
-            iter->finished = 1;
-            return ret; // EOF or error
-        }
-    } while (tid <= iter->tid && end <= iter->beg);
-
-    if (tid != iter->tid || beg > iter->end) {
-        //fprintf(stderr, "finished\n");
-        iter->finished = 1;
-        return -1; // EOF
-    }
-
-    // These are part of the public API and things like
-    // samtools view can use them in error messages.
-    //fprintf(stderr, "found\n");
-    iter->curr_tid = tid;
-    iter->curr_beg = beg;
-    iter->curr_end = end;
-
-    return 0;
 }
 
 
