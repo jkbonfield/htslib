@@ -86,7 +86,7 @@ gcc_task:
     apt-get install -y --no-install-suggests --no-install-recommends     \
         ca-certificates libc-dev make git autoconf automake              \
         zlib1g-dev libbz2-dev liblzma-dev libcurl4-gnutls-dev libssl-dev \
-        cmake
+        libdeflate-dev libzstd-dev cmake
 
   << : *LIBDEFLATE
   << : *COMPILE
@@ -115,7 +115,7 @@ ubuntu_task:
     - environment:
        # Cirrus-CI's clang isn't installed with ubsan, so we do that in gcc
        USE_CONFIG: yes
-       CFLAGS: -g -O3 -std=c99 -pedantic -Wall -Wformat -Wformat=2
+       CFLAGS: -g -O3 -std=gnu99 -pedantic -Wall -Wformat -Wformat=2
        USE_LIBDEFLATE: yes
 
   # NB: we could consider building a docker image with these
@@ -125,7 +125,7 @@ ubuntu_task:
     apt-get install -y --no-install-suggests --no-install-recommends     \
         ca-certificates clang libc-dev make git autoconf automake        \
         zlib1g-dev libbz2-dev liblzma-dev libcurl4-gnutls-dev libssl-dev \
-        libdeflate-dev
+        libdeflate-dev libzstd-dev
 
   << : *COMPILE
   << : *TEST
@@ -150,7 +150,7 @@ rocky_task:
   install_script: |
     yum install -y autoconf automake make gcc perl-Data-Dumper perl-FindBin \
         zlib-devel bzip2 bzip2-devel xz-devel curl-devel openssl-devel \
-        ncurses-devel diffutils git
+        ncurses-devel diffutils git libzstd-devel
 
   << : *COMPILE
   << : *TEST
@@ -168,7 +168,7 @@ arm_ubuntu_task:
     CIRRUS_CLONE_DEPTH: 1
     DO_UNTRACKED_FILE_CHECK: yes
     USE_CONFIG: yes
-    CFLAGS: -g -Wall -O3 -std=c99 -pedantic
+    CFLAGS: -g -Wall -O3 -std=gnu99 -pedantic
 
   # NB: we could consider building a docker image with these
   # preinstalled and specifying that instead, to speed up testing.
@@ -177,7 +177,7 @@ arm_ubuntu_task:
     apt-get install -y --no-install-suggests --no-install-recommends     \
         ca-certificates clang libc-dev make git autoconf automake        \
         zlib1g-dev libbz2-dev liblzma-dev libcurl4-gnutls-dev libssl-dev \
-        libdeflate-dev
+        libdeflate-dev libzstd-dev
 
   << : *COMPILE
   << : *TEST
@@ -200,15 +200,15 @@ macosx_task:
   matrix:
     - environment:
        USE_CONFIG: no
-       CFLAGS: "-g -O3 -Wall -Werror -arch arm64 -arch x86_64"
+       CFLAGS: "-g -O3 -Wall -Werror -arch arm64 -arch x86_64 -I/opt/homebrew/include -L/opt/homebrew/lib -I/usr/local/include -L/usr/local/lib"
     - environment:
        USE_CONFIG: yes
        USE_LIBDEFLATE: yes
-       CFLAGS: "-g -O3 -Wall -arch arm64 -arch x86_64"
+       CFLAGS: "-g -O3 -Wall -arch arm64 -arch x86_64 -I/opt/homebrew/include -L/opt/homebrew/lib -I/usr/local/include -L/usr/local/lib"
 
   package_install_script: |
     HOMEBREW_NO_AUTO_UPDATE=1 brew install autoconf automake libtool xz git \
-        cmake
+        zstd cmake
 
   << : *LIBDEFLATE
   << : *COMPILE

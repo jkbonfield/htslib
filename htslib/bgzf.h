@@ -151,7 +151,7 @@ typedef struct BGZF BGZF;
  */
 static inline ssize_t bgzf_read_small(BGZF *fp, void *data, size_t length) {
     if (fp->is_zstd)
-        return bgzf2_read((bgzf2 *)fp, data, length);
+        return bgzf2_read((bgzf2 *)fp, (char *)data, length);
 
     // A block length of 0 implies current block isn't loaded (see
     // bgzf_seek_common).  That means length - offset may be negative, which
@@ -192,7 +192,7 @@ static inline ssize_t bgzf_read_small(BGZF *fp, void *data, size_t length) {
 static inline
 ssize_t bgzf_write_small(BGZF *fp, const void *data, size_t length) {
     if (fp->is_zstd)
-        return bgzf2_write((bgzf2 *)fp, data, length, 0);
+        return bgzf2_write((bgzf2 *)fp, (const char *)data, length, 0);
 
     if (fp->is_compressed
         && (size_t) (BGZF_BLOCK_SIZE - fp->block_offset) > length) {

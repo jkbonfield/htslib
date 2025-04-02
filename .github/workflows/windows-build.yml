@@ -29,6 +29,7 @@ jobs:
           mingw-w64-x86_64-tools-git
           mingw-w64-x86_64-xz
           mingw-w64-x86_64-zlib
+          mingw-w64-x86_64-zstd
     - name: Compile htslib
       shell: msys2 {0}
       run: |

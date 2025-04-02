@@ -37,7 +37,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include "../htslib/vcf.h"
 #include "../htslib/hts_log.h"
 #include "../htslib/tbx.h"
-#include "../htslib/hts_internal.h"
+#include "../hts_internal.h"  // for hts_bgzf2_idx_t
 #include "../htslib/bgzf.h"
 
 struct opts {
@@ -204,21 +204,26 @@ int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
  *         NULL on failure
  */
 // FIXME: copied from sam.c.  Make this generic, maybe in hts.c?
+// This needs moving elsewhere, and then we can avoid hts_internal.h.
+// Really the route cause of the problem is needing to use tbx_itr_querys vs
+// bcf_itr_querys.  We switch to the more generic hts_itr_querys for both with
+// bgzf2, but this needs the iterator function knowing here.  If we could
+// unify bcf and vcf properly then it could all be hidden in hts.c
 static hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
-				  int tid,
-				  hts_pos_t beg,
-				  hts_pos_t end,
-				  hts_readrec_func *readrec)
+                                  int tid,
+                                  hts_pos_t beg,
+                                  hts_pos_t end,
+                                  hts_readrec_func *readrec)
 {
     const hts_bgzf2_idx_t *bidx = (const hts_bgzf2_idx_t *)idx;
     hts_itr_t *iter = (hts_itr_t *)calloc(1, sizeof(hts_itr_t));
     if (iter == NULL) return NULL;
 
     if (tid == HTS_IDX_NOCOOR)
-	tid = -1;
+        tid = -1;
 
     int64_t pos = bgzf2_query(bidx->fp, tid, beg, end);
-    
+
     // hts_itr_t is public and extremely BGZF(1) specific.
     // We fill out tid, beg, end from arguments here, and we reuse
     // curr_off to hold the seek position with n_off=1.
@@ -238,7 +243,7 @@ static hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
     iter->n_off = 1;
     iter->curr_off = pos;
     iter->readrec = readrec;
-    
+
     return iter;
 }
 

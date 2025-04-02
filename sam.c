@@ -1641,14 +1641,14 @@ static hts_idx_t *index_load(htsFile *fp, const char *fn, const char *fnidx, int
     switch (fp->format.format) {
     case bam:
     case sam:
-	if (fp->format.compression == bgzf2_compression) {
-	    // Cons up a fake "index" just pointing at the associated cram_fd:
-	    hts_bgzf2_idx_t *idx = malloc(sizeof(*idx));
-	    if (idx == NULL) return NULL;
-	    idx->fmt = HTS_FMT_BGZF2;
-	    idx->fp = fp->fp.bgzf2;
-	    return (hts_idx_t *)idx;
-	}
+        if (fp->format.compression == bgzf2_compression) {
+            // Cons up a fake "index" just pointing at the associated cram_fd:
+            hts_bgzf2_idx_t *idx = malloc(sizeof(*idx));
+            if (idx == NULL) return NULL;
+            idx->fmt = HTS_FMT_BGZF2;
+            idx->fp = fp->fp.bgzf2;
+            return (hts_idx_t *)idx;
+        }
 
         return hts_idx_load3(fn, fnidx, HTS_FMT_BAI, flags);
 
@@ -1746,20 +1746,20 @@ static hts_itr_t *cram_itr_query(const hts_idx_t *idx, int tid, hts_pos_t beg, h
  *         NULL on failure
  */
 static hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
-				  int tid,
-				  hts_pos_t beg,
-				  hts_pos_t end,
-				  hts_readrec_func *readrec)
+                                  int tid,
+                                  hts_pos_t beg,
+                                  hts_pos_t end,
+                                  hts_readrec_func *readrec)
 {
     const hts_bgzf2_idx_t *bidx = (const hts_bgzf2_idx_t *)idx;
     hts_itr_t *iter = (hts_itr_t *)calloc(1, sizeof(hts_itr_t));
     if (iter == NULL) return NULL;
 
     if (tid == HTS_IDX_NOCOOR)
-	tid = -1;
+        tid = -1;
 
     int64_t pos = bgzf2_query(bidx->fp, tid, beg, end);
-    
+
     // hts_itr_t is public and extremely BGZF(1) specific.
     // We fill out tid, beg, end from arguments here, and we reuse
     // curr_off to hold the seek position with n_off=1.
@@ -1779,7 +1779,7 @@ static hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
     iter->n_off = 1;
     iter->curr_off = pos;
     iter->readrec = readrec;
-    
+
     return iter;
 }
 
@@ -1862,9 +1862,9 @@ hts_itr_t *sam_itr_querys(const hts_idx_t *idx, sam_hdr_t *hdr, const char *regi
     const hts_cram_idx_t *cidx = (const hts_cram_idx_t *) idx;
     return hts_itr_querys(idx, region, bam_name2id_wrapper, hdr,
                           cidx->fmt == HTS_FMT_CRAI ? cram_itr_query
-			  : cidx->fmt == HTS_FMT_BGZF2
-			    ? bgzf2_itr_query
-			    : hts_itr_query,
+                          : cidx->fmt == HTS_FMT_BGZF2
+                            ? bgzf2_itr_query
+                            : hts_itr_query,
                           sam_readrec);
 }
 

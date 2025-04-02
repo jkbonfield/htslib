@@ -189,7 +189,7 @@ struct bgzidx_t
  */
 int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, hts_pos_t beg, hts_pos_t end, uint64_t offset, int is_mapped) {
     if (fp->is_zstd)
-	return bgzf2_idx_add((bgzf2 *)fp, tid, beg, end);
+        return bgzf2_idx_add((bgzf2 *)fp, tid, beg, end);
 
     hts_idx_cache_entry *e;
     mtaux_t *mt = fp->mt;
@@ -2033,7 +2033,7 @@ int bgzf_flush(BGZF *fp)
 int bgzf_flush_try(BGZF *fp, ssize_t size)
 {
     if (fp->is_zstd)
-	return bgzf2_flush_try((bgzf2 *)fp, size);
+        return bgzf2_flush_try((bgzf2 *)fp, size);
 
     if (fp->block_offset + size > BGZF_BLOCK_SIZE) return lazy_flush(fp);
     return 0;

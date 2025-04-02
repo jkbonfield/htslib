@@ -43,6 +43,7 @@ shlib-exports-*.txt
 
 /annot-tsv
 /bgzip
+/bgzip2
 /htsfile
 /ref_cache/ref-cache
 /tabix
@@ -86,5 +87,6 @@ shlib-exports-*.txt
 /test/thrash_threads[1-7]
 /test/*.tmp
 /test/*.tmp.*
+/aclocal.m4
 
 /TAGS

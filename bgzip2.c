@@ -69,10 +69,10 @@ static int convert(char *in, char *out, int level, long block_size,
 
     ssize_t n;
     while ((n = hread(fp_in, buffer, BUFSZ)) > 0) {
-	if (bgzf2_write(fp_out, buffer, n, 1) < 0)
-	    goto err;
+        if (bgzf2_write(fp_out, buffer, n, 1) < 0)
+            goto err;
     }
-    
+
     ret = 0;
  err:
     if (fp_in)
@@ -177,7 +177,7 @@ int main(int argc, char **argv) {
     int compress = 1;
     char *infn = NULL;
     char *outfn = NULL;
-    uint64_t start = 0, end = 0;
+    int64_t start = 0, end = 0;
     int nthreads = 0;
 
     while ((c = getopt(argc, argv, "cdhb:0123456789r:@:")) >= 0) {
@@ -212,7 +212,7 @@ int main(int argc, char **argv) {
             break;
         }
         case '0': case '1': case '2': case '3': case '4':
-        case '5': case '6': case '7': case '8': case '9': 
+        case '5': case '6': case '7': case '8': case '9':
             // Also --long option?  Maybe with e.g. -7l ?
             level = level*10 + c-'0';
             break;
@@ -256,6 +256,7 @@ int main(int argc, char **argv) {
 
         case 'h':
             usage(stdout);
+            // fall through
         default:
             usage(stderr);
         }

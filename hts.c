@@ -2791,7 +2791,7 @@ void hts_idx_destroy(hts_idx_t *idx)
     if (idx->fmt == HTS_FMT_BGZF2) {
         // main index closed when the bgzf2 fp is closed
         free(idx);
-	return;
+        return;
     }
 
     for (i = 0; i < idx->m; ++i) {
