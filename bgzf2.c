@@ -174,7 +174,7 @@ typedef struct bgzf2_job {
     bgzf2 *fp;
     bgzf2_buffer *uncomp;
     bgzf2_buffer *comp;
-    int errcode;
+    int errcode; // +ve is errno, -ve is bgzf2 specific  (TODO)
     int hit_eof; // view from main or view from thread?
     int job_num;
     int known_size;
@@ -1109,11 +1109,11 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
 
     bgzf2_index_t *idx = index_query(fp, fp->seek_to);
     if (!idx) {
-        fp->errcode = 1; // FIXME
+        fp->errcode = ENXIO;
         fp->command = SEEK_FAIL;
     } else {
         if (hseek(fp->hfp, idx->cpos, SEEK_SET) < 0) {
-            fp->errcode = 99; // BGZF_ERR_IO FIXME
+            fp->errcode = errno;
             fp->command = SEEK_FAIL;
         } else {
             fp->errcode = 0;
