@@ -2695,7 +2695,7 @@ int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
         }
     } while (tid <= iter->tid && end <= iter->beg);
 
-    if (tid != iter->tid || beg > iter->end) {
+    if (tid != iter->tid || beg >= iter->end) {
         //fprintf(stderr, "finished\n");
         iter->finished = 1;
         return -1; // EOF
