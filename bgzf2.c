@@ -1649,6 +1649,9 @@ int bgzf2_drain(bgzf2 *fp) {
  *        -1 on failure
  */
 int bgzf2_set_block_size(bgzf2 *fp, size_t sz) {
+    if (!fp->is_write)
+        return 0;
+
     fp->block_size = sz;
 
     if (fp->uncomp)
@@ -1683,8 +1686,12 @@ static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) {
         }
 
         int level = BGZF2_DEFAULT_LEVEL;
-        if (mode[1] >= '0' && mode[1] <= '9')
-            level = atoi(mode+1);
+        for (const char *cp = mode; *cp; cp++) {
+            if (*cp >= '0' && *cp <= '9') {
+                level = atoi(cp);
+                break;
+            }
+        }
 
         // We could create a ZSTD_CStream here for reuse.
         // This would then also enable us to cache all the params, such
