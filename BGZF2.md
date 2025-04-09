@@ -144,6 +144,9 @@ An example header frame:
  4: "BGZ2" identifier
 19: "BAM\x01????@HD.VN:1.4.SO:coordinate\n"
 
+For VCF we need to get more header so we can decode
+"##fileformat=VCF".  The meta-data length is therefore not fixed.
+
 Tools should be capable of working with reduced meta-data here, for
 example having just "BAM\x01".
 
@@ -171,13 +174,26 @@ doesn't match a region filter.  (An index and random access is
 preferable, but not always feasible.)
 
 If not supported by pzstd, it may still be useful to do and just break
-from the pzstd standard.  Should use a generic key-value pair
-mechanism, with BGZF2 indicating specific keys in use.  That makes
-this format a generic one for any data type.
+from the pzstd standard.  Pzstd isn't buying us much here, and bgzip2
+is essentially replacing it anyway as a generic parallel decoder.
+
+Should use a generic key-value pair mechanism, with BGZF2 indicating
+specific keys in use.  That makes this format a generic one for any
+data type.
 
 Examples: count records (mapped and unmapped), skip data outside of a
 region, distributed processing to turn one BGZF2 to multi sub-BGZF2
 without any decompression and recompression.
+
+
+Zstd data frame
+---------------
+
+This is a standard data frame holding compressed data to be decoded
+and returned by the zstd library.  It starts with the magic number
+0xFD2FB528.
+
+See RFC8478 for further details.
 
 
 BGZF2 index frame
@@ -246,7 +262,8 @@ seeking is unavailable.
 Hence in this section, we can focus on a simplistic index capability.
 How to map a genomic range to the start of a zstd frame.
 
-[TODO]
+Genomic index frame
+-------------------
 
 This is a genomic coordinate index used for random access by
 chromosome and position sorted data, or by record number if unsorted.
@@ -255,8 +272,10 @@ around within it via precomputed offsets.  In practice however it is
 likely the most performant use is to load the entire index into
 memory, especially if compressed.
 
-This is another skippable frame with the same magic numebr as the
+This is another skippable frame with the same magic number as the
 bgzf2 header.
+
+TODO: use a different magic number here?
 
  4: 0x184D2A5B (bgzf2 magic number)
  4: N+1 (length of meta-data in header)
