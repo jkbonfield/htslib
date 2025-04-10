@@ -90,13 +90,13 @@ static int convert(char *in, char *out, int level, long block_size,
 }
 
 
-// TODO: specify a region
+// Decodes a file, from start to end (specify 0s for all) inclusively.
 static int decode(char *in, char *out, uint64_t start, uint64_t end,
                   int nthreads) {
     bgzf2 *fp_in = NULL;
     hFILE *fp_out = NULL;
     int ret = 1;
-    size_t remaining = end ? end - start : INT64_MAX;
+    size_t remaining = end ? end - start + 1 : INT64_MAX;
     hts_tpool *pool = NULL;
 
     if (!(fp_in = bgzf2_open(in, "r"))) {
@@ -375,7 +375,7 @@ static void usage(FILE *fp) {
     fprintf(fp, "    -h         show usage\n");
     fprintf(fp, "    -c         output to stdout\n");
     fprintf(fp, "    -d         decompress\n");
-    fprintf(fp, "    -N SIZE    Specify block size, with optional suffix K, M or G\n");
+    fprintf(fp, "    -b SIZE    Specify block size, with optional suffix K, M or G\n");
     fprintf(fp, "    -@ INT     Use INT threads\n");
     fprintf(fp, "    -0 to -19  Specify zstd compression level\n");
     fprintf(fp, "    -c         output to stdout\n");

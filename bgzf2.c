@@ -464,8 +464,8 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
  *         <0 on failure
  */
 static int bgzf2_write_header(bgzf2 *fp) {
-    uint8_t buf[16+8+4];
-    int len = MIN(16, fp->uncomp->sz);
+    uint8_t buf[21+8+4];
+    int len = MIN(21, fp->uncomp->sz);
     u32_to_le(0x184D2A5B, buf);
     u32_to_le(len+4, buf+4);
     memcpy(buf+8, "BGZ2", 4);
