@@ -108,6 +108,7 @@ other header meta-data.
 #include <sys/types.h>
 #include <inttypes.h>
 #include <zstd.h>
+#include <math.h>
 
 #include "htslib/hfile.h"
 #include "htslib/hts_endian.h"
@@ -409,14 +410,27 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
     ZSTD_CCtx_reset(zcs, ZSTD_reset_session_only);
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_checksumFlag, 1);
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_contentSizeFlag, 1);
+    // Use a maximum size window log even at low compression levels
+    int wlog = ceil(log(uncomp_sz)/log(2));
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_windowLog, MIN(24, wlog));
 
 // Helps on bigger buffer sizes (or higher compression levels?)
-// Maybe 4-5% smaller for VCF and BCF with similar times.
+// Maybe 4-5% smaller for VCF and BCF with similar times, but costs CPU.
+// It's essentially just moving the compression level up.
 //    ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, 6);
 //    ZSTD_CCtx_setParameter(zcs, ZSTD_c_minMatch, 6);
-//    ZSTD_CCtx_setParameter(zcs, ZSTD_c_enableLongDistanceMatching, 1);
-//    ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmBucketSizeLog, 4);
-//    ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashRateLog, 7); // 4 at -3
+
+    if (level > 6 && level <= 17) {
+        // LDM slows things down and we want to still support the fast
+        // modes being fast.  It's often also harmful at the highest
+        // compression levels, so we use it for mid-range only.
+        //
+        // TODO: test novaseq etc.
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_enableLongDistanceMatching, 1);
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashLog, 16); // winlog-7 def
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmBucketSizeLog, 3);
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashRateLog, 4);
+    }
 
     ZSTD_initCStream(zcs, level);
 
