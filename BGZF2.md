@@ -17,26 +17,29 @@ Newest todos
   2=genomic index
   3=per-file meta-data (a generic idxstats)
 
+  Per frame meta-data, use name space like SAM tags.
+  Official:
+  - Number of mapped sequences
+  - Number of unmapped sequences
+  - Total number of bases
+  - Local seq checksum?
+  - Local qual checksum?
+  
+  Unofficial:
+  - Whatever we like (lowercase key?)
+  
+  Per file meta-data.
+  Official:
+  - Everything in IDX stats
+  - Samtools checksum outputs if BAM
+  
+  Unofficial:
+  - Whatever we wish
 
-Per frame meta-data, use name space like SAM tags.
-Official:
-- Number of mapped sequences
-- Number of unmapped sequences
-- Total number of bases
-- Local seq checksum?
-- Local qual checksum?
-
-Unofficial:
-- Whatever we like (lowercase key?)
-
-Per file meta-data.
-Official:
-- Everything in IDX stats
-- Samtools checksum outputs if BAM
-
-Unofficial:
-- Whatever we wish
-
+- Fix block sizes smaller than an individual BAM record.
+  Eg test_view -bzz -o block_size=100 (bytes)
+  It works for SAM though and the BAM can be uncompressed with zstd -d,
+  so it's an indexing issue.
 
 
 =============================================================================

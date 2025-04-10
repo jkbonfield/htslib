@@ -695,7 +695,10 @@ SRC = $(srcprefix)
 #
 # If using MSYS, avoid poor shell expansion via:
 #    MSYS2_ARG_CONV_EXCL="*" make check
-check test: all $(HTSCODECS_TEST_TARGETS)
+test_bgzf2:
+	cd test/bgzf2 && ./test-bgzf2.sh
+
+check test: all $(HTSCODECS_TEST_TARGETS) test_bgzf2
 	test/hts_endian
 	test/test_alloc
 	test/test_expr
