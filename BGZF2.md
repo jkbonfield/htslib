@@ -1,11 +1,49 @@
+Newest todos
+
+- Replace pzstd with our own generic equivalent that contains
+  arbitrary key-value pair data.
+
+  Our own BGZF2 magic number frame breaks pzstd detection, and pzstd
+  frames are fixed size, so it's incompatible with other data types inline.
+  We don't need it anyway as bgzip2 is multi-threaded and replaces it.
+
+- Make the magic number block also have a predefined magic number for
+  SAM, BAM, VCF, BCF, BED, FASTQ, etc as well as the generic detection
+  via string.
+
+- Use a uniform BGZF2 frame type where the first byte is sub-type.
+  0=file format magic (first X number of bytes for detection)
+  1=per-frame meta-data (generic frame info, like cram's container)
+  2=genomic index
+  3=per-file meta-data (a generic idxstats)
+
+
+Per frame meta-data, use name space like SAM tags.
+Official:
+- Number of mapped sequences
+- Number of unmapped sequences
+- Total number of bases
+- Local seq checksum?
+- Local qual checksum?
+
+Unofficial:
+- Whatever we like (lowercase key?)
+
+Per file meta-data.
+Official:
+- Everything in IDX stats
+- Samtools checksum outputs if BAM
+
+Unofficial:
+- Whatever we wish
+
+
+
+=============================================================================
+
+
 TODO
 ----
-
-- Consider a small meta-data skippable frame at the start.
-  - This can explicitly label it as BGZF2 and not just arbitrary pzstd
-    output.
-  - It can help inform the decoder of the content type, by replicating
-    the first e.g. 64 bytes of the data stream verbatim.
 
 - Index.
   - This needs to go after the last zstd compressed block and before
