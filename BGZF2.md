@@ -41,6 +41,10 @@ Newest todos
   It works for SAM though and the BAM can be uncompressed with zstd -d,
   so it's an indexing issue.
 
+- If seekable index or genomic index don't fit within a single zstd
+  frame then we need to be able to concatenate them together to form a
+  single index.  How likely is this to happen?  Unknown, but we can
+  write it in the spec even if we don't support it in code yet.
 
 =============================================================================
 

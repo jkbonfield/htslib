@@ -179,6 +179,7 @@ int list_file(char *fn, int level) {
 
     unsigned char buf[8];
     while (hread(fp, (char *)buf, 4) == 4) {
+        uint64_t cpos = htell(fp)-4;
         uint32_t magic = le_to_u32(buf), len;
         switch (magic) {
         case 0x184D2A5B: // BGZF magic numer
@@ -197,10 +198,45 @@ int list_file(char *fn, int level) {
             } else {
                 ngindex++;
                 if (level>1)
-                    printf("BGZF genomic index, len %d, %s\n", len,
-                           dat[0]&1 ? "compressed" : "uncompressed");
+                    printf("BGZF genomic index, len %d, %s @ %"PRId64"\n",
+                           len, dat[0]&1 ? "compressed" : "uncompressed",
+                           cpos);
 
-                // TODO: decode index too?
+                if (level > 2) {
+                    // Decode index
+                    char *g = malloc(len);
+                    if (!g)
+                        goto err;
+                    memcpy(g, dat, len<100?len:100);
+                    if (len > 100)
+                        if (hread(fp, g+100, len-100) != len-100)
+                            goto err;
+
+                    char *gp = g, *g_end = g+len;
+                    gp++; // flag: unused
+                    if (gp+4 > g_end) goto err;
+                    int nchr = le_to_u32(gp); gp += 4;
+                    for (int i = 0; i < nchr; i++) {
+                        if (gp+5 > g_end) goto err;
+                        gp++; // flag
+                        int index_sz = le_to_u32(gp); gp += 4;
+                        // Should index_sz be uint64_t?
+                        printf("    chr-id %d/%d, size %d\n",
+                               i+1, nchr, index_sz);
+                        if (gp+index_sz * 20 > g_end) goto err;
+                        for (int j = 0; j < index_sz; j++) {
+                            int tid = le_to_u32(gp); gp += 4;
+                            int beg = le_to_u32(gp); gp += 4;
+                            int end = le_to_u32(gp); gp += 4;
+                            uint64_t upos = le_to_u64(gp); gp += 8;
+                            printf("        %4d: %d, %d..%d at %"PRId64"\n",
+                                   j, tid, beg, end, upos);
+                        }
+                    }
+
+                    free(g);
+                    len=100; // prevents seek below
+                }
             }
             if (len > 100)
                 if (hseek(fp, len-100, SEEK_CUR) < 0)
@@ -212,8 +248,8 @@ int list_file(char *fn, int level) {
             if (hread(fp, (char *)buf, 4) != 4)
                 goto err;
             len = le_to_u32(buf);
-            if (level>1)
-                printf("PZSTD skippable, len %d\n", len);
+            if (level > 1)
+                printf("PZSTD skippable, len %d @ %"PRId64"\n", len, cpos);
             if (hseek(fp, len, SEEK_CUR) < 0)
                 goto err;
             break;
@@ -223,8 +259,40 @@ int list_file(char *fn, int level) {
             if (hread(fp, (char *)buf, 4) != 4)
                 goto err;
             len = le_to_u32(buf);
-            if (level>1)
-                printf("Seekable Index, len %d\n", len);
+            if (level > 1)
+                printf("Seekable Index, len %d @ %"PRId64"\n", len, cpos);
+            if (level > 2) {
+                // Dump seekable index
+                char *g = malloc(len);
+                if (!g)
+                    goto err;
+                if (hread(fp, g, len) != len)
+                    goto err;
+
+                char *gp = g, *g_end = g+len;
+
+                unsigned int nframes = le_to_u32(g_end-9);
+                int has_chksum = *(g_end-5) & 0x80 ? 1 : 0;
+
+                uint64_t pos = 0, upos = 0;
+                if (gp + nframes*4*(2+has_chksum) > g_end)
+                    goto err;
+                for (unsigned int i = 0; i < nframes; i++) {
+                    unsigned int csz = le_to_u32(gp);
+                    unsigned int usz = le_to_u32(gp+4);
+                    gp += 8;
+                    if (has_chksum)
+                        gp += 4;
+                    printf("    cpos %"PRId64", upos %"PRId64
+                           ", csize %u, usize %u\n",
+                           pos, upos, csz, usz);
+                    pos += csz;
+                    upos += usz;
+                }
+
+                free(g);
+                len=100; // prevents seek below
+            }
             if (hseek(fp, len, SEEK_CUR) < 0)
                 goto err;
             break;
@@ -232,7 +300,7 @@ int list_file(char *fn, int level) {
         case ZSTD_MAGICNUMBER: // 0xFD2FB528, zstd data frame
             ndata++;
             if (level>1)
-                printf("ZStd data frame\n");
+                printf("ZStd data frame @ %"PRId64"\n", cpos);
 
             /*
               +--------------------+------------+
