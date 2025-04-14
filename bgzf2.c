@@ -126,6 +126,12 @@ other header meta-data.
 #  define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
+// Mutex debugging
+// #define pthread_mutex_lock(x) {fprintf(stderr, "%d: %s:%d lock %p\n", (int)gettid(), __FILE__, __LINE__, x); pthread_mutex_lock(x);}
+// #define pthread_mutex_unlock(x) {fprintf(stderr, "%d: %s:%d unlock %p\n", (int)gettid(), __FILE__, __LINE__, x); pthread_mutex_unlock(x);}
+// #define pthread_cond_wait(c,m) do {fprintf(stderr, "%d: %s:%d wait %p\n", (int)gettid(), __FILE__, __LINE__, m); pthread_cond_wait(c,m);} while(0)
+
+
 // INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
 // a blank one here)
 typedef struct {
@@ -549,8 +555,10 @@ static int write_genomic_index(bgzf2 *fp) {
     return ret;
 }
 
+// Submits a command to bgzf2_mt_reader.  fp->command_m must be unlocked.
 static void submit_reader_command(bgzf2 *fp, int command, int done) {
     pthread_mutex_lock(&fp->command_m);
+
     // Signal the reader thread to execute command
     if (fp->command != CLOSE) {
         fp->command = command;
@@ -565,6 +573,7 @@ static void submit_reader_command(bgzf2 *fp, int command, int done) {
             pthread_mutex_unlock(&fp->command_m);
             return;
         }
+        pthread_cond_signal(&fp->command_c);
         pthread_cond_wait(&fp->command_c, &fp->command_m);
         //fprintf(stderr, "submit_reader_command sees command = %d\n", fp->command);
         if (fp->command == command) {
@@ -588,9 +597,7 @@ static void submit_reader_command(bgzf2 *fp, int command, int done) {
 int load_seekable_index_common(bgzf2 *fp);
 
 static int load_seekable_index_mt(bgzf2 *fp) {
-    pthread_mutex_lock(&fp->job_pool_m);
     int err = load_seekable_index_common(fp);
-    pthread_mutex_unlock(&fp->job_pool_m);
     fp->command = LOAD_SINDEX_DONE;
     pthread_cond_signal(&fp->command_c);
     return err;
@@ -705,9 +712,7 @@ static int load_genomic_index_common(bgzf2 *fp) {
 }
 
 static int load_genomic_index_mt(bgzf2 *fp) {
-    pthread_mutex_lock(&fp->job_pool_m);
     int err = load_genomic_index_common(fp);
-    pthread_mutex_unlock(&fp->job_pool_m);
     fp->command = LOAD_GINDEX_DONE;
     pthread_cond_signal(&fp->command_c);
     return err;
@@ -1377,10 +1382,6 @@ restart:
         if (fp->command == NONE)
             pthread_cond_wait(&fp->command_c, &fp->command_m);
         switch(fp->command) {
-        default:
-            pthread_mutex_unlock(&fp->command_m);
-            break;
-
         case SEEK:
             bgzf2_mt_seek(fp);
             pthread_mutex_unlock(&fp->command_m);
@@ -1388,7 +1389,14 @@ restart:
 
         case HAS_EOF:
             bgzf2_mt_eof(fp);   // Sets fp->command to HAS_EOF_DONE
-            pthread_mutex_unlock(&fp->command_m);
+            break;
+
+        case LOAD_SINDEX:
+            fp->errcode = load_seekable_index_mt(fp);
+            break;
+
+        case LOAD_GINDEX:
+            fp->errcode = load_genomic_index_mt(fp);
             break;
 
         case SEEK_DONE:
@@ -1396,7 +1404,6 @@ restart:
         case LOAD_SINDEX_DONE:
         case LOAD_GINDEX_DONE:
             pthread_cond_signal(&fp->command_c);
-            pthread_mutex_unlock(&fp->command_m);
             break;
 
         case CLOSE:
@@ -1404,7 +1411,11 @@ restart:
             pthread_mutex_unlock(&fp->command_m);
             hts_tpool_process_destroy(fp->out_queue);
             return NULL;
+
+        default:
+            break;
         }
+        pthread_mutex_unlock(&fp->command_m);
     }
 
  err:
