@@ -669,7 +669,7 @@ static int load_genomic_index_common(bgzf2 *fp) {
     }
 
     // buf[4..7] = skippable frame size, could validate if we wanted to.
-    // buf[9] = flag. TODO
+    // buf[8] = flag. TODO
     uint8_t *cp = buf+9;
     fp->nchr = le_to_u32(cp);  cp += 4;
 //    fprintf(stderr, "Index: nchr %d\n", fp->nchr);
