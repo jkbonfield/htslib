@@ -1747,7 +1747,12 @@ int hts_close(htsFile *fp)
     case fastq_format:
     case sam:
     case vcf:
-        if (fp->format.format == sam)
+        if (fp->format.format == sam || fp->format.format == vcf)
+            // VCF because an hts_set_opt on a newly opened VCF file
+            // calls sam_state_create as format is text_format.
+            // This is perhaps an error and the code needs refactoring to
+            // delay state creation until the header has been written and we
+            // understand the file format, but for now we simply compensate.
             ret = sam_state_destroy(fp);
         else if (fp->format.format == fastq_format ||
                  fp->format.format == fasta_format)
