@@ -212,7 +212,7 @@ int list_file(char *fn, int level) {
                         if (hread(fp, g+100, len-100) != len-100)
                             goto err;
 
-                    char *gp = g, *g_end = g+len;
+                    uint8_t *gp = (uint8_t *)g, *g_end = gp+len;
                     gp++; // flag: unused
                     if (gp+4 > g_end) goto err;
                     int nchr = le_to_u32(gp); gp += 4;
@@ -263,13 +263,13 @@ int list_file(char *fn, int level) {
                 printf("Seekable Index, len %d @ %"PRId64"\n", len, cpos);
             if (level > 2) {
                 // Dump seekable index
-                char *g = malloc(len);
+                uint8_t *g = malloc(len);
                 if (!g)
                     goto err;
                 if (hread(fp, g, len) != len)
                     goto err;
 
-                char *gp = g, *g_end = g+len;
+                uint8_t *gp = g, *g_end = gp+len;
 
                 unsigned int nframes = le_to_u32(g_end-9);
                 int has_chksum = *(g_end-5) & 0x80 ? 1 : 0;
