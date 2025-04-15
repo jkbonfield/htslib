@@ -1123,6 +1123,9 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
         }
     }
     hts_tpool_process_reset(fp->out_queue, 0);
+    if (fp->uncomp)
+        // triggers a bgzf2_decode_block_mt call
+        fp->uncomp->pos = fp->uncomp->sz;
 
     pthread_mutex_lock(&fp->job_pool_m);
 
