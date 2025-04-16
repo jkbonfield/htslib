@@ -1635,6 +1635,12 @@ int bgzf2_flush_try(bgzf2 *fp, ssize_t size) {
     if (fp->uncomp && fp->uncomp->pos + size > fp->uncomp->sz) {
         int ret = bgzf2_flush(fp);
         fp->idx_pos = fp->frame_pos;
+
+        // We know we're trying to push size bytes, and we don't want to split
+        // write requests, so we'll grow the current buffer if needed.
+        if (fp->uncomp && size > fp->uncomp->sz)
+            ret |= bgzf2_buffer_grow(&fp->uncomp, size);
+
         return ret;
     }
 
