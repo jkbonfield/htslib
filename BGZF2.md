@@ -32,9 +32,31 @@ Newest todos
   Official:
   - Everything in IDX stats
   - Samtools checksum outputs if BAM
+
+  Unmapped data? Name sorted data?
+
+  Genomic index meta-data.
+  - Per frame (eg number of records, mapped, unmapped, bases, etc)
+  - Per chromosome (as above)
+  - Per file
+  Perhaps we have key=value here too, with fixed keys that always
+  occur in that order and non-fixed keys which are explicit.
+  Eg:
+  Fixed_per_frame=number_of_mapped, number_of_unmapped
+  A frame with 990 mapped, 10 unmapped can then have:
+      <990> <10> <read1=490> <read2=510>
+  So we see standard fixed items not needing the key duplicated, and
+  some that have an explicit key=value text.
+ 
   
   Unofficial:
   - Whatever we wish
+
+- Genomic index frequency.  We should stipulate at least one gindex
+  entry per data frame and at least one gindex per chromosome, but we
+  can have more if we need them.  Whatever frequency we wish
+  basically.  (Due to a bug this happens a lot around chromosome
+  transitions.)
 
 - Fix block sizes smaller than an individual BAM record.
   Eg test_view -bzz -o block_size=100 (bytes)
