@@ -1,14 +1,4 @@
-// TODO: sanitize naming so all funcs are sindex and gindex for seekable
-// and genomic.
-
 // TODO: have a way to set end coord so MT decode doesn't waste cycles.
-
-// TODO: Make first block fit within 4k so hpeek can work.
-
-// TODO: EOF block - can check via seekable index.
-
-// NB: previous commit was considerably more efficient when overcomitting on
-// threads vs CPU count.
 
 /* The MIT License
 
