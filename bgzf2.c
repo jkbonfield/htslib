@@ -229,6 +229,10 @@ struct bgzf2 {
     // Maybe nchr has holes?
     size_t *gindex_sz;       // size of gindex[chr]; consider used+alloc sz
     bgzf2_gindex_t **gindex; // genomic index per chr / tid
+    // For detection of unsorted data.
+    int last_used;  // 0 for first rec, 1 for used (sorted), -1 for unsorted
+    int last_tid;
+    hts_pos_t last_pos;
 
     // Multi-threading support
     pthread_mutex_t job_pool_m; // when updating this struct
@@ -2623,6 +2627,29 @@ int bgzf2_peek(bgzf2 *fp) {
  *        <0 on failure
  */
 int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
+    // Detect unsorted data
+    if (fp->last_used < 0)
+        return 0; // unsorted
+
+    // FIXME: if we want to add meta-data like nreads, nmapped, nunmapped,
+    // etc then we need a secondary table somewhere.
+
+    if (fp->last_used > 0) {
+        if (// unmapped not at end of file
+            (fp->last_tid == -1 && tid != -1) ||
+            // switching back to a tid we previously used
+            (tid != fp->last_tid && tid+1 < fp->nchr && fp->gindex[tid+1]) ||
+            // unsorted within a chromosome
+            (tid == fp->last_tid && beg < fp->last_pos)) {
+            //fprintf(stderr, "File is not sorted\n");
+            fp->last_used = -1;
+            return 0;
+        }
+    }
+    fp->last_used = 1;
+    fp->last_tid = tid;
+    fp->last_pos = beg;
+
     tid++; // so unmapped becomes 0
     if (tid < 0)
         return -1;
