@@ -2660,7 +2660,7 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     if (fp->gindex_sz[tid] > 0)
         idx = &fp->gindex[tid][fp->gindex_sz[tid]-1];
 
-    if (!idx || idx->frame_start != fp->frame_pos) {
+    if (!idx || fp->last_flush_try <= 0) {
         // A new frame, so add to the index
         bgzf2_gindex_t *t = realloc(fp->gindex[tid],
                                     (fp->gindex_sz[tid]+1) * sizeof(*t));
