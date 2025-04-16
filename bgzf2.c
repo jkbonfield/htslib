@@ -223,6 +223,7 @@ struct bgzf2 {
     int has_eof;          // Has an EOF block
 
     off_t frame_pos;      // uncompressed offset of current frame start
+    off_t idx_pos;        // as frame_pos, but on explicit flush_try calls only
     off_t tid_pos;        // uncompressed offset of tid within frame.
     off_t last_flush_try; // offset in buffer of last flush attempt
     bgzf2_buffer *uncomp; // uncompressed data
@@ -1537,6 +1538,11 @@ static int bgzf2_write_block(bgzf2 *fp, bgzf2_buffer *buf) {
         return -1;
 
     fp->uncomp->pos = 0; // reset buffered offset
+
+    // We may have temporarily grown it, but keep honouring the user
+    // requested block size so one large record doesn't permanently increase
+    // block size.
+    fp->uncomp->sz = fp->block_size;
     return ret;
 }
 
@@ -1564,6 +1570,8 @@ static int bgzf2_write_block_mt(bgzf2 *fp, bgzf2_buffer *buf) {
         return -1;
     memcpy(j->uncomp->buf, buf->buf, buf->pos);
     j->uncomp->pos = buf->pos;
+    // It may have grown, but shrink back again
+    buf->sz = fp->block_size;
 
     // Used by flush function to drain queue.
     // Can we get this via another route?
@@ -1624,10 +1632,14 @@ int bgzf2_flush(bgzf2 *fp) {
  *        <0 on failure
  */
 int bgzf2_flush_try(bgzf2 *fp, ssize_t size) {
-    if (fp->uncomp && fp->uncomp->pos + size > fp->uncomp->sz)
-        return bgzf2_flush(fp);
+    if (fp->uncomp && fp->uncomp->pos + size > fp->uncomp->sz) {
+        int ret = bgzf2_flush(fp);
+        fp->idx_pos = fp->frame_pos;
+        return ret;
+    }
 
     fp->last_flush_try = fp->uncomp->pos;
+    fp->idx_pos = fp->frame_pos;
 
     return 0;
 }
@@ -2661,7 +2673,7 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
         fp->gindex[tid] = t;
 
         idx = &fp->gindex[tid][fp->gindex_sz[tid]++];
-        idx->frame_start = fp->frame_pos + fp->last_flush_try;
+        idx->frame_start = fp->idx_pos + fp->last_flush_try;
         idx->tid = tid-1;
         idx->beg = beg;
         idx->end = end;
