@@ -248,8 +248,18 @@ int list_file(char *fn, int level) {
             if (hread(fp, (char *)buf, 4) != 4)
                 goto err;
             len = le_to_u32(buf);
-            if (level > 1)
+            if (level > 1) {
                 printf("PZSTD skippable, len %d @ %"PRId64"\n", len, cpos);
+                char *m = malloc(len);
+                if (!m)
+                    goto err;
+                if (hread(fp, m, len) != len)
+                    goto err;
+                if (len > 4)
+                    printf("    Meta data: %.*s\n", len-4, m+4);
+                free(m);
+                len = 0;
+            }
             if (hseek(fp, len, SEEK_CUR) < 0)
                 goto err;
             break;

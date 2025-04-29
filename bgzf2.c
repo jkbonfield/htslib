@@ -27,7 +27,7 @@
 BGZF2 is a Zstd compatible data file with random access support and
 designed for parallel encoding and decoding.
 
-It does this by combining zstd seekable format
+Broadly speaking, it does this by combining zstd seekable format
 (https://github.com/facebook/zstd/tree/dev/contrib/seekable_format)
 with pzstd (https://github.com/facebook/zstd/tree/dev/contrib/pzstd).
 
@@ -39,7 +39,10 @@ have their own skippable frames.
 Zstd format has no indication of the compressed size of a frame, so
 it's hard to get this when reading a file.  Pzstd uses a skippable
 frame to hold the compressed size of the next data frame, thus
-permitting quick read-and-dispatch style decoding.
+permitting quick read-and-dispatch style decoding.  We copy this idea
+and store the size in a BGZF2 meta-data frame.  This frame also contains
+arbitrary per-block key=value pairs.  We also have an additional meta-data
+frame at the end of the file.
 
 Seekable-zstd uses a skippable frame at the end of the file holding
 the compressed and uncompressed sizes of every frame.  This permits
@@ -54,7 +57,9 @@ Note the random access here is purely via uncompressed byte offsets.
 The data format is agnostic to any content.  If we wish to store
 genomic data sorted by chromosome and position, and to query by
 genomic region, then we need an additional index (eg CSI or CRAI).
-For now, this is an ancillary file as per existing .bam and vcf.gz.
+This genomic index maps chr/pos to uncompressed offsets, so combined with
+the seekable index can be used to perform region queries.  This is held
+in a BGZF2 index skippable frame.
 
 TODO: consider also bringing in https://github.com/facebook/zstd/pull/2349
 for in-stream dictionaries.  Ideally we'd want multiple dictionaries
@@ -66,7 +71,7 @@ to a newer dictionary.  It also means having a random access
 capability, so we need to know in the seekable format which entries
 are dictionaries.  Eg dsize == 0 and csize != 12
 
-TODO: Add XXH64 checksums
+TODO: Add XXH64 checksums, especially to our own skippable frame formats.
 */
 
 /*
@@ -78,11 +83,9 @@ Known skippable frame IDs:
 0x184D2A55   zpkglist - LZ4
 0x184D2A56   zpkglist - LZ4
 0x184D2A57   zpkglist - LZ4
+0x184D2A5B   BGZF2 (subdivided into BGZF2 frame types)
 0x184D2A5D   warc-zstd / dict-in-stream
 0x184D2A5E   seekable
-
-Suggests 0x184D2A5B for BGZF2 usage?  Maybe the genomic index, or some
-other header meta-data.
 */
 
 #define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
@@ -162,6 +165,7 @@ typedef struct bgzf2_buffer {
     ssize_t alloc, sz, pos; // allocated, desired size, and curr pos.
     char *buf;
     struct bgzf2_buffer *next;
+    kstring_t meta;
 } bgzf2_buffer;
 
 /*
@@ -254,6 +258,10 @@ struct bgzf2 {
 
     // Shared kstring for optimisation of algorithms
     kstring_t ks;
+
+    // Per frame meta-data callback
+    int (*flush_callback)(kstring_t *ks, void *flush_data);
+    void *flush_data;
 };
 
 static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp);
@@ -322,6 +330,7 @@ void bgzf2_buffer_free(bgzf2_buffer *b) {
     if (!b)
         return;
 
+    ks_free(&b->meta);
     free(b->buf);
     free(b);
 }
@@ -467,7 +476,7 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
 static int bgzf2_write_header(bgzf2 *fp) {
     uint8_t buf[21+8+4];
     int len = MIN(21, fp->uncomp->sz);
-    u32_to_le(0x184D2A5B, buf);
+    u32_to_le(BGZF2_SKIPPABLE_ID, buf);
     u32_to_le(len+4, buf+4);
     memcpy(buf+8, "BGZ2", 4);
     memcpy(buf+12, fp->uncomp->buf, len);
@@ -499,7 +508,7 @@ static int write_genomic_index(bgzf2 *fp) {
 
     // Header
     ks_resize(&ks, 13); // try 8192
-    u32_to_le(0x184D2A5B, (uint8_t *)ks.s); // BGZF2 skippable frame
+    u32_to_le(BGZF2_SKIPPABLE_ID, (uint8_t *)ks.s); // BGZF2 skippable frame
     ks.l += 8; // fill out [4..7] later
 
     // flag
@@ -658,7 +667,7 @@ static int load_genomic_index_common(bgzf2 *fp) {
     if (sz != hread(fp->hfp, buf, sz))
         goto err;
 
-    if (le_to_u32(buf) != 0x184D2A5B) {
+    if (le_to_u32(buf) != BGZF2_SKIPPABLE_ID) {
         free(buf);
         return -3; // index not found
     }
@@ -872,15 +881,18 @@ static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
  * Returns 0 on success,
  *        -1 on failure
  */
-static int write_pzstd_skippable(bgzf2 *fp, uint32_t comp_sz) {
+static int write_block_metadata(bgzf2 *fp, uint32_t comp_sz,
+                                kstring_t *meta) {
     uint8_t buf[12];
 
     u32_to_le(0x184D2A50, buf); // pzstd skippable magic no.
-    u32_to_le(4, buf+4);
+    u32_to_le(4 + (meta ? meta->l : 0), buf + 4);
     u32_to_le(comp_sz, buf+8);
 
-    int ret = bgzf2_add_index(fp, 0, 12);
+    int ret = bgzf2_add_index(fp, 0, 12 + (meta ? meta->l : 0));
     ret |= hwrite(fp->hfp, buf, 12) != 12;
+    if (meta && meta->l)
+        ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
 
     return ret ? -1 : 0;
 }
@@ -1022,7 +1034,7 @@ static void *bgzf2_mt_writer(void *vp) {
 //            goto err;
 
 
-        if (write_pzstd_skippable(fp, j->comp->sz) < 0)
+        if (write_block_metadata(fp, j->comp->sz, &j->uncomp->meta) < 0)
             goto err;
 
         pthread_mutex_lock(&fp->job_pool_m);
@@ -1523,7 +1535,7 @@ static int bgzf2_write_block(bgzf2 *fp, bgzf2_buffer *buf) {
                                        fp->level)) < 0)
         return -1;
 
-    if (write_pzstd_skippable(fp, fp->comp->sz) < 0)
+    if (write_block_metadata(fp, fp->comp->sz, &buf->meta) < 0)
         return -1;
 
     int ret = bgzf2_add_index(fp, buf->pos, fp->comp->sz);
@@ -1567,6 +1579,12 @@ static int bgzf2_write_block_mt(bgzf2 *fp, bgzf2_buffer *buf) {
     // It may have grown, but shrink back again
     buf->sz = fp->block_size;
 
+    // Swap buffers.
+    kstring_t tmp = j->uncomp->meta;
+    j->uncomp->meta = buf->meta;
+    buf->meta = tmp;
+    ks_clear(&buf->meta);
+
     // Used by flush function to drain queue.
     // Can we get this via another route?
     pthread_mutex_lock(&fp->job_pool_m);
@@ -1606,6 +1624,10 @@ int bgzf2_flush(bgzf2 *fp) {
 
     // uncompressed position of next frame
     fp->frame_pos += fp->uncomp->pos;
+
+    // Arbitrary callback to accumulate per-frame meta-data stats
+    if (fp->flush_callback)
+        ret |= fp->flush_callback(&fp->uncomp->meta, fp->flush_data) < 0;
 
     if (fp->pool) {
         ret |= bgzf2_write_block_mt(fp, fp->uncomp);
@@ -1847,11 +1869,28 @@ int bgzf2_close(bgzf2 *fp) {
     free(fp->gindex);
     free(fp->gindex_sz);
 
+    if (fp->flush_callback)
+        fp->flush_callback(NULL, fp->flush_data);
+
     free(fp->index);
     free(fp->ks.s);
     free(fp);
 
     return ret ? -1 : 0;
+}
+
+// Registers a callback function and a block of data with the bgzf2 fp.
+// We call this callback on each flush and use the results to generate
+// arbitrary per-frame meta-data.
+void bgzf2_add_flush_callback(bgzf2 *fp, void *flush_data,
+                              int (*flush_callback)(kstring_t *, void *)) {
+    fp->flush_data = flush_data;
+    fp->flush_callback = flush_callback;
+}
+
+// Returns the registered bgzf2 flush_data
+void *bgzf2_flush_data(bgzf2 *fp) {
+    return fp->flush_data;
 }
 
 /*
@@ -1926,7 +1965,10 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
     uint32_t fsize = le_to_u32(buf+4);
 
     // Check if it's a pzstd format frame.
-    if (le_to_u32(buf) != 0x184D2A50 || le_to_u32(buf+4) != 4) {
+        // FIXME
+    fprintf(stderr, "buf = %x %d\n", le_to_u32(buf), le_to_u32(buf+4));
+    if (le_to_u32(buf) != 0x184D2A50 /*|| le_to_u32(buf+4) != 4*/) {
+        fprintf(stderr, "not pzstd\n");
         if (le_to_u32(buf) >= 0x184D2A50 && le_to_u32(buf) <= 0x184D2A5F) {
             // Another skippable frame, so skip it
             char tmp[8192];
@@ -1941,9 +1983,26 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
         }
         return -3;
     } else {
-        // remainder of pzstd skippable frame, now we know it is one
-        if (4 != hread(fp->hfp, buf+8, 4))
+        uint32_t meta_sz = le_to_u32(buf+4);
+        if (meta_sz > 100000) {
+            fprintf(stderr, "Unexpectedly large meta-data size.  Aborting\n");
+            return -3;
+        }
+
+        uint8_t *meta = malloc(meta_sz);
+        if (!meta)
             return -1;
+
+        // remainder of pzstd skippable frame, now we know it is one
+        if (meta_sz != hread(fp->hfp, meta, meta_sz)) {
+            free(meta);
+            return -1;
+        }
+
+        memcpy(buf+8, meta, 4); // csize
+
+        // FIXME: put it into buffer kstring
+        free(meta);
     }
 
     // Load compressed data
