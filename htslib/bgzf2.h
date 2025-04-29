@@ -59,6 +59,16 @@ typedef struct bgzf2 bgzf2;
 
 #include "hts.h"
 
+#define BGZF2_SKIPPABLE_ID 0x184D2A5B
+
+// Subdivide the BGZF2 skippable frame
+typedef enum bgzf2_frame {
+	BGZF2_HEADER        = 0,
+	BGZF2_BLOCK_META    = 1,
+	BGZF2_FILE_META     = 2,
+	BGZF2_GENOMIC_INDEX = 3
+} bgzf2_frame_t;
+
 #define BGZF2_DEFAULT_BLOCK_SIZE (1024*1024)
 #define BGZF2_DEFAULT_LEVEL 7 // on VCF/BCF 5 10 15 all good settings
 #define BGZF2_MAX_BLOCK_SIZE (1<<30)
@@ -271,7 +281,15 @@ hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
  *        -1 at EOF,
  *      <=-2 for error.
  */
+HTSLIB_EXPORT
 int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data);
+
+HTSLIB_EXPORT
+void bgzf2_add_flush_callback(bgzf2 *fp, void *flush_data,
+                              int (*flush_callback)(kstring_t *ks, void *));
+
+HTSLIB_EXPORT
+void *bgzf2_flush_data(bgzf2 *fp);
 
 #ifdef __cplusplus
 }

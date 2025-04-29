@@ -862,6 +862,27 @@ int bam_read1(BGZF *fp, bam1_t *b)
     return 4 + block_len;
 }
 
+typedef struct frame_stats {
+    int nmapped;
+    int nunmapped;
+} frame_stats;
+
+
+// If ks is NULL then we're finishing up.
+int bam_flush_callback(kstring_t *ks, void *dat) {
+    int ret = 0;
+    frame_stats *fs = (frame_stats *)dat;
+    if (!ks) {
+        free(fs);
+        return 0;
+    }
+    ks_clear(ks);
+    ret |= ksprintf(ks, "NMAPPED=%d;NUNMAPPED=%d",
+                    fs->nmapped, fs->nunmapped) < 0;
+    memset(fs, 0, sizeof(*fs));
+    return ret;
+}
+
 int bam_write1(BGZF *fp, const bam1_t *b)
 {
     const bam1_core_t *c = &b->core;
@@ -888,6 +909,19 @@ int bam_write1(BGZF *fp, const bam1_t *b)
     x[5] = c->mtid;
     x[6] = c->mpos;
     x[7] = c->isize;
+
+    if (fp->is_zstd) {
+        frame_stats *fs = bgzf2_flush_data((bgzf2 *)fp);
+        if (!fs) {
+            if (!(fs = calloc(1, sizeof(*fs))))
+                return -1;
+            bgzf2_add_flush_callback((bgzf2 *)fp, fs, bam_flush_callback);
+        }
+
+        fs->nmapped   += (c->flag & BAM_FUNMAP) == 0;
+        fs->nunmapped += (c->flag & BAM_FUNMAP) != 0;
+    }
+
     ok = (bgzf_flush_try(fp, 4 + block_len) >= 0);
     if (fp->is_be) {
         for (i = 0; i < 8; ++i) ed_swap_4p(x + i);

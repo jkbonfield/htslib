@@ -55,18 +55,14 @@ Newest todos
 - Genomic index frequency.  We should stipulate at least one gindex
   entry per data frame and at least one gindex per chromosome, but we
   can have more if we need them.  Whatever frequency we wish
-  basically.  (Due to a bug this happens a lot around chromosome
-  transitions.)
-
-- Fix block sizes smaller than an individual BAM record.
-  Eg test_view -bzz -o block_size=100 (bytes)
-  It works for SAM though and the BAM can be uncompressed with zstd -d,
-  so it's an indexing issue.
+  basically.
 
 - If seekable index or genomic index don't fit within a single zstd
   frame then we need to be able to concatenate them together to form a
   single index.  How likely is this to happen?  Unknown, but we can
   write it in the spec even if we don't support it in code yet.
+
+- Add checksum to meta-data frames too.
 
 =============================================================================
 
@@ -152,7 +148,8 @@ File Layout
 [pzstd skippable frame]
 [zstd data frame]
 ...
-[bgzf2 index skippable frame]
+[bgzf2 genomic index skippable frame]
+[bgzf2 meta data frame index]
 [seekable_format skippable frame (index)]
 
 Extensive use of zstd skippable frames are used.  These are ZSTD
