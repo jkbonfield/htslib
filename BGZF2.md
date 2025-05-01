@@ -1,12 +1,5 @@
 Newest todos
 
-- Replace pzstd with our own generic equivalent that contains
-  arbitrary key-value pair data.
-
-  Our own BGZF2 magic number frame breaks pzstd detection, and pzstd
-  frames are fixed size, so it's incompatible with other data types inline.
-  We don't need it anyway as bgzip2 is multi-threaded and replaces it.
-
 - Make the magic number block also have a predefined magic number for
   SAM, BAM, VCF, BCF, BED, FASTQ, etc as well as the generic detection
   via string.
@@ -71,35 +64,8 @@ TODO
 ----
 
 - Index.
-  - This needs to go after the last zstd compressed block and before
-    the seekable index.
-  - Track genomic chr:start-end range (eg as in CRAM)
-    - Ref 1-N or 0 for unmapped?  Or 0-N and -ve?
-    - Also need to consider multi-ref frames, for when we get
-      many small contigs.  So multiple index entries per frame.
-  - Track number of sequences, maybe also bases.
-    - Permits crude index based depth analysis.
-    - Also permits easy data segmentation, even on unsorted or
-      unaligned data.
-  - R-tree?  Is it still helpful for a mix of wildly different seq lengths?
-    Probably. (CRAM misses this)
-    - Long reads indicate which frames have data spanning a query region
-    - Short reads may need skipping within a frame.
-
-                                           |---|
-      --------------------------------
-                       -----------------------------------------
-      ...   ...   ...   ...   ...   ...   ...   ...   ...   ...  
-        ...   ...   ...   ...   ...   ...   ...   ...   ...   ...  
-          ...   ...   ...   ...   ...   ...   ...   ...   ...   ...  
-
-                       ^                  ^
-
-      Optimally, two key points to seek to within this frame.
-    - Possibly multiple overlapping indices covering different length
-      data (via RG -> LB?).
-      - Tracks start locations for long reads
-      - May be "good enough".
+  - Also need to consider multi-ref frames, for when we get
+    many small contigs.  So multiple index entries per frame.
 
 - Break from pzstd and use a generic next frame meta-data block.
   This will allow us to encode arbitrary key-value pairs.
@@ -142,15 +108,15 @@ BGZF2 can be viewed as a union of the pzstd and seekable_format
 File Layout
 -----------
 
-[bgzf2 header skippable frame]
-[pzstd skippable frame]
+[bgzf2 header]
+[bgzf2 block meta data]
 [zstd data frame]
-[pzstd skippable frame]
+[bgzf2 block meta data]
 [zstd data frame]
 ...
-[bgzf2 genomic index skippable frame]
-[bgzf2 meta data frame index]
-[seekable_format skippable frame (index)]
+[bgzf2 file meta data]
+[bgzf2 genomic index]
+[seekable_format index]
 
 Extensive use of zstd skippable frames are used.  These are ZSTD
 compliant frames which carry no compressed payload, so can be skipped
@@ -158,22 +124,24 @@ over by any ZSTD decoder.  Instead they carry meta-data useful for
 file type detection, rapid parallel decoding, and internal indices.
 
 In order for standard zstd tools to be able to skip past these custom
-meta-data frames, the skippable frames have a specific data layout:
+meta-data frames, the skippable frames have a specific data layout of
+a 4 byte magic number (0x184D2A50 to 0x184D2A5F), a 4 byte frame
+length N, and then N bytes of frame specific payload.
 
-- 4 bytes of magic number: 0x184D2A50 to 0x184D2A5F
+We use the skippable magic number 0x184D2A5B as a BGZF2 frame.
+We further subdivide this into BGZF2 frame types as follows:
+
+- 4 bytes BGZF2 frame magic number: 0x184D2A5B
 - 4 bytes of remaining frame length "N"
-- N bytes of meta-data
-
+- 1 byte of BGZF2 sub-type
+- 1 byte of sub-type specific version number
+- N-2 bytes of meta-data
 
 This combination of skippable frames means the following tools can
 decompress a bgzf2 file:
-bgzf2 data:
 
 - "zstd".
   This provides single threaded streaming decode.
-
-- "pzstd", from Zstd's contrib/pzstd directory.
-  This provides a parallel decompression capability.
 
 - "seekable_decompression" from Zstd's contrib/seekable_format directory.
   This provides random access via byte ranges in the uncompressed data.
@@ -191,63 +159,63 @@ rich, and to add specific BGZF2 wrapper version numbering in there
 too, so we can extend it with additional key/value meta-data (one of
 which is file type).]
 
-[TODO: this breaks pzstd detection.  Maybe we should make the initial
-pzstd frame bigger and merge in with this?  Does that work?  It looks
-likely not as it only reads 12 bytes in contrib/pzstd/SkippableFrame.cpp]
-
-The header frame has magic number 0x184D2A5B.
 The data contents are an uncompressed copy of the first data bytes,
 used for file format detection.  There is no fixed limit on this
 length, but it is recommended to be not significantly more than is
 required to accurately determine file type and some basic versioning.
 
-An example header frame:
+A header frame is formatted as:
 
- 4: 0x184D2A5B (bgzf2 magic number)
- 4: 23 (length of meta-data in header)
- 4: "BGZ2" identifier
-19: "BAM\x01????@HD.VN:1.4.SO:coordinate\n"
+   4: 0x184D2A5B (bgzf2 magic number)
+   4: N (remaining size of skippable frame)
+   1: 0 (BGZF2 Header type)
+   1: 0 (BGZF2 header format version)
+   4: "BGZ2" identifier
+N-10: "BAM\x01????@HD.VN:1.4.SO:coordinate\n"
+   4: XXHash-64
 
 For VCF we need to get more header so we can decode
-"##fileformat=VCF".  The meta-data length is therefore not fixed.
+"##fileformat=VCF4.2".  The meta-data length is therefore not fixed.
 
 Tools should be capable of working with reduced meta-data here, for
 example having just "BAM\x01".
 
+The checksum at the end uses the Zstd XXHash-64 used elsewhere in zstd
+and is the hash of the entire frame.
 
-PZstd skippable frames
-----------------------
 
-The pzstd skippable frames hold the size of the next compressed zstd
-data frame (as this is not part of the zstd format).  They are 12
-bytes long, consisting of 3 little-endian values.
+BGZF2 block meta data
+---------------------
 
-- 0x184D2A50: the magic number for pzstd's skippable frame
-- 4: the length of the remaining skippable frame data
-- comp_sz: the compressed size of the next data frame
+This holds meta-data about the next zstd compressed frame.
 
-We have one pzstd skippable frame preceeding each zstd compressed data
-frame.
+The zstd data frames do not have length information, so this is an
+important part of the block meta-data (inspired by pzstd) and is
+necessary to permit parallel processing.
 
-TODO: can we augment this with additional data, such as the region
-being used (eg see the CRAM container struct).  This would provide a
-way to gather information about the upcoming frame as we're streaming,
-without needing the index.  This in turn can lead to efficient partial
-decode where we skip over data that's going to be filtered out as it
-doesn't match a region filter.  (An index and random access is
-preferable, but not always feasible.)
+Additionally we support arbitrary key/value pairs.  This could include
+coverage data for alignments, such as a chromosome range, checksums,
+or arbitrary user defined data.
 
-If not supported by pzstd, it may still be useful to do and just break
-from the pzstd standard.  Pzstd isn't buying us much here, and bgzip2
-is essentially replacing it anyway as a generic parallel decoder.
+The block meta-data is formatted as:
 
-Should use a generic key-value pair mechanism, with BGZF2 indicating
-specific keys in use.  That makes this format a generic one for any
-data type.
+   4: 0x184D2A5B (bgzf2 magic number)
+   4: N (remaining size of skippable frame)
+   1: 1 (BGZF2 block meta-data type)
+   1: 0 (BGZF2 header format version)
+   4: size of next zstd data frame
+N-10: meta-data matching ((key=value)(;key=value)*)?
+   4: XXHash-64
 
-Examples: count records (mapped and unmapped), skip data outside of a
-region, distributed processing to turn one BGZF2 to multi sub-BGZF2
-without any decompression and recompression.
+TODO: consider the alternatives on meta-data encoding.
+- Binary too, BAM style?
+  ID length of 2 is a bit restrictive perhaps.  Maybe 4 bytes instead?
+- Textual, VCF INFO style?
+- Nested, so maybe JSON?
+
+Also learn from SAM and have specific name spaces, so uppercase
+starting letter for key is reserved, lowercase is user controlled.
+
 
 
 Zstd data frame
@@ -260,20 +228,38 @@ and returned by the zstd library.  It starts with the magic number
 See RFC8478 for further details.
 
 
-BGZF2 index frame
------------------
+BGZF2 file meta data
+---------------------
 
-BGZF indices can be BAI, CSI and TBI.  They are also external files.
-This myriad of index formats leads to a variety of problems:
+This holds aggregated meta-data about the entire file.
+It has similar to the block meta-data but lacks the size of the next
+zstd data frame.
+
+The file meta-data is formatted as:
+
+   4: 0x184D2A5B (bgzf2 magic number)
+   4: N (remaining size of skippable frame)
+   1: 2 (BGZF2 file meta-data type)
+   1: 0 (BGZF2 header format version)
+N-10: meta-data matching ((key=value)(;key=value)*)?
+   4: XXHash-64
+
+
+Indexing
+--------
+
+BGZF version 1 indices can be BAI, CSI and TBI.  They are also
+external files.  This myriad of index formats leads to a variety of
+problems:
 
 - The naming differs between tools, sometimes it is foo.bam.bai and
   sometimes foo.bai.
 
-- If multiple indices exist (.bai and .csi) there are undocumented
-  precedence rules.
-
 - Multiple files causes problems when downloading from object stores
   where the filenames are content hashes.
+
+- If multiple indices exist (.bai and .csi) there are undocumented
+  precedence rules.
 
 - There is potential for catastrophy when the bam file is rewritten
   without the index being recreated.  Indices do not have time stamps
@@ -284,90 +270,60 @@ This myriad of index formats leads to a variety of problems:
   capability on unmapped records, name-sorted or unsorted data.  Some
   of these are covered by yet another index format: GZI.
 
-So in BGZF2 the index is embedded within the file. It is also
-partially distributed. [TODO]
+- There is insufficient flexibility in what is indexed, leading to
+  custom indices such as PBI.
 
-The main global index is at the end of the file.  The purpose of our
-index is two fold:
+So in BGZF2 the index is embedded within the file.
 
-- To map genomic coordinates to file offsets, for random access.
+[TODO: It is also partially distributed.  Useful? Probably not]
+[TODO: Consider and index on the index to speed up searches on tiny
+regions.]
 
-- For parallel processing by splitting data into discrete work units,
-  regardless of whether it has been aligned and sorted.
+The BGZF1 indices combined mapping of genomic index to compressed
+offsets together.  We split this in two, with a genomic index to map
+chromosome ranges to an uncompressed offsets, and an uncompressed to
+compressed offset which is covered by the seekable index format.
 
-  This latter use case is already covered by the seekable index. So is
-  ignored here.
-
-For genomic sorted data, we are given a region and turn it into one or
-more zstd frames that hold data covering that region.  Minimally, we
-must do a zstd decompression of either an entire frame, or from the
-start of a frame until we have finished the region query.  Hence the
-global index simply needs to map region to frame offset, or region to
-uncompressed offset (and use the seekable index to convert).
-
-(If we're using uncompressed offsets, our resolution of genomic region
-queries do not need to match the resolution of zstd data frames.)
-
-Prior to each compressed data frame we have an uncompressed meta-data
-frame, currently pzstd and holding only the next frame size.  This
-will be extended to also hold arbitrary meta-data such as chromosome
-and range.  This permits a streaming mode where we skip data.  We
-still have the I/O requirement, but we do not need to decompress data
-if it doesn't match our desired range.
-
-Furthermore, we can also provide additional genomic indexing within
-the uncompressed frame, so for example a multiple-reference frame may
-list the offset within the uncompressed frame for each new chromosome,
-or perhaps every 16kb into that chromosome.  This is like the BAI
-linear index, but instead it can be stream inline with the data.  This
-distributed nature makes the indexing capabilities more efficient when
-seeking is unavailable.
-
-Hence in this section, we can focus on a simplistic index capability.
-How to map a genomic range to the start of a zstd frame.
-
-Genomic index frame
--------------------
+BGZF2 Genomic index frame
+-------------------------
 
 This is a genomic coordinate index used for random access by
 chromosome and position sorted data, or by record number if unsorted.
-The index itself is self-indexing, meaning it is possible to hop
-around within it via precomputed offsets.  In practice however it is
+
+[TODO: The index itself is self-indexing, meaning it is possible to
+hop around within it via precomputed offsets.  In practice however it is
 likely the most performant use is to load the entire index into
-memory, especially if compressed.
+memory, especially if compressed.]
 
-This is another skippable frame with the same magic number as the
-bgzf2 header.
+The genomic index is formatted as:
 
-TODO: use a different magic number here?
+   4: 0x184D2A5B (bgzf2 magic number)
+   4: N (remaining size of skippable frame)
+   1: 3 (BGZF2 file meta-data type)
+   1: 0 (BGZF2 header format version)
+   1: encoding flags
+   ?: genomic index data
+   4: N-8 (to permit reverse reading)
+   4: "BG2I" magic number
+   4: XXHash-64
 
- 4: 0x184D2A5B (bgzf2 magic number)
- 4: N+1 (length of meta-data in header)
- 1: index flags
- N: An array of index entries
- 8: Footer (another magic number and size, to permit reverse reading)
+Encoding flags:
 
-Index flags use the following bit-field
-
-Bit 0:    1 if the remaining bytes are zstd compressed, 0 if uncompressed
+Bit 0:    1 if "genomic index data" is zstd compressed, 0 if uncompressed
 Bits 1-7: 0 (reserved)
 
-The remaining N bytes may be zstd compressed.  Once decompressed, the
-format of the index is as follows.
+[ FIXME: we should have encoding flag per reference, ie NR times), so
+we can do random access on our index permits its own compressed block.
+Or is it worth compressing the index at all given larger block sizes?
+Possibly not. ]
 
 [ Should we use variable sized integer encoding instead?  It's a bit
 more faffing, but not too much and it makes things totally data size
 agnostic. However it makes decoding also trickier, especially random
-access to within an index.]
+access to within an index.  An sparse index on the index solves that
+however. ]
 
-1: global flag
-   Bit 0: 1 if aligned, 0 otherwise
-   Bit 1: 1 if genomic sorted 
-   Bit 2-7: 0 (reserved)
-4: number of references NR
-4: number of index entries NI (matching number of compressed data frames)
-4: size of meta-data MDG
-MDG: meta-data
+The genomic index section is formatted as:
 
 [ Per NR references]
 1: reference flag
@@ -406,12 +362,14 @@ MD: meta-data
 meta-data columns. Eg number of QC failures, or number of secondary
 alignments. ]
 
+[ FIXME: do we want meta-data here too?  Is it just a copy of the
+per-frame meta-data, or a user-controlled subset of it?  It can be
+useful to aggregate it together in one place perhaps, permitting
+additional querying and index abilities.
+
 Global and per-ref meta-data is key\0value\0 pairs.  It replaces the
 magic bin numbers used in BAI and CSI.  We can view it aggregated
-together for the entire file, or on a per-reference basis.
-
-TODO: add a controlled dictionary here.  Eg nrec_mapped,
-nrec_unmapped, nbase_mapped, nbase_unmapped, etc.
+together for the entire file, or on a per-reference basis. ]
 
 Tips on usage:
 
@@ -426,6 +384,82 @@ Tips on usage:
   right until we get to the first item beyond the range.
 
   - For items containing sub-lists (containments), recurse.
+
+Question: is this still inefficient in a meaningful manner when
+compared to an R-tree binning system.  Imagine a mix of very
+long-reads and short-reads.  Querying a region may return multiple
+frames.
+
+For example a file of 8 frames numbered 0 to 7 with long and short
+reads shown mapped against a chromosome (left to right), with their
+frame numbers listed, along with a region to query:
+
+                1         2         3         4         5         6
+Pos:   123456789012345678901234567890123456789012345678901234567890123456
+                                  |-----| query
+long:              11111111111111111111  44444444444444444444
+        000000000000000000000   3333333333333333333  55555555555555555555
+                                  |-----|
+short: 000 000 111 111 222 222 333 333 444 444 555 555 666 666 777 777
+        000 000 111 111 222 222 333 333 444 444 555 555 666 666 777 777
+          000 000 111 111 222 222 333 333 444 444 555 555 666 666 777 777
+                                  |-----|
+
+Our index would be
+frame 0: chr:1-22  
+frame 1: chr:9-32
+frame 2: chr:17-26 (region contained within frame 1 region)
+frame 3: chr:25-44
+frame 4: chr:33-54
+frame 5: chr:41-66
+frame 6: chr:49-58 (region contained within frame 5 region)
+frame 7: chr:57-66 (region contained within frame 5 region)
+
+As a nested containment list we would have frames 0, 1, 3, 4, 5 with
+frames 1 and 5 containing sub-lists.  The benefit of enforced nesting
+of chr:start-end is as start increases so does end, which in turn
+makes binary searching trivial and yields the same complexity as a
+binary R-tree.
+
+Our query for chr:28-34 hits long reads in frame 1 and 3 and short
+reads in frame 3 and 4.
+
+We could either explicitly seek to frame 1, 3, and 4, or we could
+simply seek to frame 1 and read/skip as apprpriate (skipping frame 2,
+based on frame meta-data) until we are beyond the end of our query
+region.
+
+TODO: We may wish to add per-frame linear indices, like the BAI linear
+index.  Consider data within a single frame:
+
+                                           |---| query
+      --------------------------------
+                       -----------------------------------------
+      ...   ...   ...   ...   ...   ...   ...   ...   ...   ...  
+        ...   ...   ...   ...   ...   ...   ...   ...   ...   ...  
+          ...   ...   ...   ...   ...   ...   ...   ...   ...   ...  
+
+                       ^                  ^
+                       data offsets
+
+This returns 1 long read and several short reads.  As we've stored
+data sorted by the left end, this means our region has two offsets
+within the frame that need to be decoded which are separated by data
+we will discard.
+
+If we implement this, it should be in the per-frame meta-data block,
+so it's distributed and we only pay the cost of loading the per-frame
+index for frames that we decode.  A sparse map of poosition to offset
+within the uncompressed frame would suffice.
+
+TODO: Similar to above, we can also have an index per frame that
+records chromosomes listed as a way of handling multiple small
+references or the junction from migrating from the end of one
+chromosome to the start of the next.
+
+[Both of these above issues requires our iterator to cache a copy of
+the region(s), as an index query alone won't have sufficient data to
+perform this decode optimisartion]
 
 
 Seekable index frame
@@ -444,4 +478,4 @@ remaining size of the skippable frame), a series of index entries
 with the number of index entries, a flag byte, and ending with a
 magic number (0x8F92EAB1).
 
-The seekable index trailing magic number is used as an EOF detector.
+The seekable index trailing magic number is also used as an EOF detector.
