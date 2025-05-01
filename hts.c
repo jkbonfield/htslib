@@ -645,12 +645,12 @@ int hts_detect_format2(hFILE *hfile, const char *fname, htsFormat *fmt)
         return 0;
 #endif
     }
-    else if (len >= 12 &&
+    else if (len >= 14 &&
              memcmp(s, "\x5b\x2a\x4d\x18", 4) == 0 &&
-             memcmp(s+8, "BGZ2", 4) == 0) {
+             memcmp(s+10, "BGZ2", 4) == 0) {
         len = le_to_u32(s+4);
-        if (len > 1024-12) len = 1024-12;
-        memmove(s, s+12, len);
+        if (len > 1024-14) len = 1024-14;
+        memmove(s, s+14, len);
         fmt->compression = bgzf2_compression;
     } else if (len >= 4 &&
              (memcmp(s, "\x28\xb5\x2f\xfd", 4) == 0 ||

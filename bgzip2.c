@@ -38,7 +38,6 @@
 #  define MIN(a,b) ((a)<(b)?(a):(b))
 #endif
 
-//#define BUFSZ 65536
 #define BUFSZ 5000000
 
 static int convert(char *in, char *out, int level, long block_size,
@@ -170,48 +169,114 @@ int list_file(char *fn, int level) {
     hFILE *fp = hopen(fn, "r");
     if (!fp)
         return -1;
-    int64_t nmagic = 0;
-    int64_t npzstd = 0;
+    int64_t nheader = 0;
+    int64_t nblockmeta = 0;
+    int64_t nfilemeta = 0;
     int64_t ndata = 0;
     int64_t nsindex = 0;
     int64_t ngindex = 0;
     int64_t nblock = 0;
 
-    unsigned char buf[8];
+    unsigned char buf[8], version;
+    bgzf2_frame_t type;
     while (hread(fp, (char *)buf, 4) == 4) {
         uint64_t cpos = htell(fp)-4;
         uint32_t magic = le_to_u32(buf), len;
         switch (magic) {
-        case 0x184D2A5B: // BGZF magic numer
-            if (hread(fp, (char *)buf, 4) != 4)
+        case BGZF2_SKIPPABLE_ID: // BGZF2 skippable magic; len+type+fmt[+dat]
+            if (hread(fp, (char *)buf, 6) != 6)
                 goto err;
             len = le_to_u32(buf);
-            char dat[100];
-            int l = hread(fp, dat, len<100?len:100);
-            if (l<0)
-                goto err;
+            type = buf[4];
+            version = buf[5];
 
-            if (nmagic == 0) {
-                nmagic++;
+            // FIXME: refactor this function
+            switch (type) {
+            case BGZF2_HEADER: {
+                char dat[100];
+                len -= 2;
+                int l = hread(fp, dat, len<100?len:100);
+                if (l<0)
+                    goto err;
+
+                nheader++;
                 if (level>1)
-                    printf("BGZF magic, len %d: %.*s\n", len, l, dat);
-            } else {
+                    printf("BGZF2 magic, len %d: %.*s\n", len, l, dat);
+
+                if (len > 100)
+                    if (hseek(fp, len-100, SEEK_CUR) < 0)
+                        goto err;
+
+                break;
+            }
+
+            case BGZF2_BLOCK_META: {
+                nblockmeta++;
+                if (level > 1) {
+                    if (len < 6)
+                        goto err;
+                    if (hread(fp, buf, 4) != 4)
+                        goto err;
+                    uint32_t csize = le_to_u32(buf);
+                    printf("BGZF2 block meta skippable, len %d @ %"PRId64
+                           ", next block csize %u\n", len, cpos, csize);
+
+                    len -= 6;
+                    if (len > 0) {
+                        char *m = malloc(len);
+                        if (!m)
+                            goto err;
+                        if (hread(fp, m, len) != len)
+                            goto err;
+                        printf("    Meta data: %.*s\n", len, m);
+                        free(m);
+                    }
+                    len = 0;
+                }
+                if (len > 2 && hseek(fp, len-2, SEEK_CUR) < 0)
+                    goto err;
+                break;
+            }
+
+            case BGZF2_FILE_META: {
+                nfilemeta++;
+                if (level > 1) {
+                    printf("File meta skippable, len %d @ %"PRId64"\n",
+                           len, cpos);
+                    if (len > 2) {
+                        len -= 2;
+                        char *m = malloc(len);
+                        if (!m)
+                            goto err;
+                        if (hread(fp, m, len) != len)
+                            goto err;
+                        printf("    Meta data: %.*s\n", len, m);
+                        free(m);
+                    }
+                    len = 0;
+                }
+                if (len > 2 && hseek(fp, len-2, SEEK_CUR) < 0)
+                    goto err;
+                break;
+            }
+
+            case BGZF2_GENOMIC_INDEX: {
                 ngindex++;
+
+                // Decode index
+                len -= 2;
+                char *g = malloc(len);
+                if (!g)
+                    goto err;
+                if (hread(fp, g, len) != len)
+                    goto err;
+
                 if (level>1)
-                    printf("BGZF genomic index, len %d, %s @ %"PRId64"\n",
-                           len, dat[0]&1 ? "compressed" : "uncompressed",
+                    printf("BGZF2 genomic index, len %d, %s @ %"PRId64"\n",
+                           len, g[0]&1 ? "compressed" : "uncompressed",
                            cpos);
 
                 if (level > 2) {
-                    // Decode index
-                    char *g = malloc(len);
-                    if (!g)
-                        goto err;
-                    memcpy(g, dat, len<100?len:100);
-                    if (len > 100)
-                        if (hread(fp, g+100, len-100) != len-100)
-                            goto err;
-
                     uint8_t *gp = (uint8_t *)g, *g_end = gp+len;
                     gp++; // flag: unused
                     if (gp+4 > g_end) goto err;
@@ -237,31 +302,16 @@ int list_file(char *fn, int level) {
                     free(g);
                     len=100; // prevents seek below
                 }
+                break;
             }
+
+            default:
+                abort();
+            }
+
             if (len > 100)
                 if (hseek(fp, len-100, SEEK_CUR) < 0)
                     goto err;
-            break;
-
-        case 0x184D2A50: // pzstd skippable
-            npzstd++;
-            if (hread(fp, (char *)buf, 4) != 4)
-                goto err;
-            len = le_to_u32(buf);
-            if (level > 1) {
-                printf("PZSTD skippable, len %d @ %"PRId64"\n", len, cpos);
-                char *m = malloc(len);
-                if (!m)
-                    goto err;
-                if (hread(fp, m, len) != len)
-                    goto err;
-                if (len > 4)
-                    printf("    Meta data: %.*s\n", len-4, m+4);
-                free(m);
-                len = 0;
-            }
-            if (hseek(fp, len, SEEK_CUR) < 0)
-                goto err;
             break;
 
         case 0x184D2A5E: // Seekable index
@@ -433,9 +483,10 @@ int list_file(char *fn, int level) {
         }
     }
 
-    printf("Frames: %10"PRId64"\tBGZF2 magic number\n", nmagic);
+    printf("Frames: %10"PRId64"\tBGZF2 magic number\n", nheader);
     printf("Frames: %10"PRId64"\tdata\n", ndata);
-    printf("Frames: %10"PRId64"\tpzstd header\n", npzstd); 
+    printf("Frames: %10"PRId64"\tframe metadata\n", nblockmeta);  
+    printf("Frames: %10"PRId64"\tfile metadata\n", nfilemeta); 
     printf("Frames: %10"PRId64"\tgenomic index\n", ngindex);
     printf("Frames: %10"PRId64"\tseekable index\n", nsindex);
     printf("Blocks: %10"PRId64"\tdata blocks\n", nblock);

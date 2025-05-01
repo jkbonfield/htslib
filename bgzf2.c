@@ -474,18 +474,20 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
  *         <0 on failure
  */
 static int bgzf2_write_header(bgzf2 *fp) {
-    uint8_t buf[21+8+4];
+    uint8_t buf[21+8+4+2];
     int len = MIN(21, fp->uncomp->sz);
     u32_to_le(BGZF2_SKIPPABLE_ID, buf);
-    u32_to_le(len+4, buf+4);
-    memcpy(buf+8, "BGZ2", 4);
-    memcpy(buf+12, fp->uncomp->buf, len);
+    u32_to_le(len+6, buf+4);
+    buf[8] = BGZF2_HEADER;
+    buf[9] = 0; // header format
+    memcpy(buf+10, "BGZ2", 4);
+    memcpy(buf+14, fp->uncomp->buf, len);
 
     // Add index entry so offsets work
-    if (bgzf2_add_index(fp, 0, 12+len) < 0)
+    if (bgzf2_add_index(fp, 0, 14+len) < 0)
         return -1;
 
-    return hwrite(fp->hfp, buf, 12+len);
+    return hwrite(fp->hfp, buf, 14+len);
 }
 
 /*
@@ -507,9 +509,11 @@ static int write_genomic_index(bgzf2 *fp) {
     kstring_t ks = {0,0};
 
     // Header
-    ks_resize(&ks, 13); // try 8192
+    ks_resize(&ks, 16); // try 8192
     u32_to_le(BGZF2_SKIPPABLE_ID, (uint8_t *)ks.s); // BGZF2 skippable frame
-    ks.l += 8; // fill out [4..7] later
+    ks.s[8] = BGZF2_GENOMIC_INDEX;
+    ks.s[9] = 0; // index format
+    ks.l += 10; // fill out [4..7] later
 
     // flag
     kputc_(0, &ks); // uncompressed
@@ -667,14 +671,16 @@ static int load_genomic_index_common(bgzf2 *fp) {
     if (sz != hread(fp->hfp, buf, sz))
         goto err;
 
-    if (le_to_u32(buf) != BGZF2_SKIPPABLE_ID) {
+    if (le_to_u32(buf) != BGZF2_SKIPPABLE_ID ||
+        buf[8] != BGZF2_GENOMIC_INDEX ||
+        buf[9] != 0) {
         free(buf);
         return -3; // index not found
     }
 
     // buf[4..7] = skippable frame size, could validate if we wanted to.
-    // buf[8] = flag. TODO
-    uint8_t *cp = buf+9;
+    // buf[10] = flag. TODO
+    uint8_t *cp = buf+11;
     fp->nchr = le_to_u32(cp);  cp += 4;
 //    fprintf(stderr, "Index: nchr %d\n", fp->nchr);
 
@@ -874,7 +880,7 @@ static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
 }
 
 /*
- * Writes a pzstd compatible skippable frame indicating the size of
+ * Writes a meta-data skippable frame indicating the size of
  * the next compressed data frame.  We also add it to the index we're
  * building up for zstd seekable.
  *
@@ -883,14 +889,16 @@ static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
  */
 static int write_block_metadata(bgzf2 *fp, uint32_t comp_sz,
                                 kstring_t *meta) {
-    uint8_t buf[12];
+    uint8_t buf[18];
 
-    u32_to_le(0x184D2A50, buf); // pzstd skippable magic no.
-    u32_to_le(4 + (meta ? meta->l : 0), buf + 4);
-    u32_to_le(comp_sz, buf+8);
+    u32_to_le(BGZF2_SKIPPABLE_ID, buf); // pzstd skippable magic no.
+    u32_to_le(6 + (meta ? meta->l : 0), buf + 4);
+    buf[8] = BGZF2_BLOCK_META;
+    buf[9] = 0; // meta-data format version
+    u32_to_le(comp_sz, buf+10);
 
-    int ret = bgzf2_add_index(fp, 0, 12 + (meta ? meta->l : 0));
-    ret |= hwrite(fp->hfp, buf, 12) != 12;
+    int ret = bgzf2_add_index(fp, 0, 14 + (meta ? meta->l : 0));
+    ret |= hwrite(fp->hfp, buf, 14) != 14;
     if (meta && meta->l)
         ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
 
@@ -1153,6 +1161,7 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
         // pos part way through it.  We do this by modifying seek_to, which
         // is used in bgzf2_decode_block_mt.
         fp->seek_to -= idx->pos;
+        fprintf(stderr, "bgzf seek pos %ld, seek_to %ld\n", idx->cpos, fp->seek_to);
     }
     fp->hit_eof = 0;
 
@@ -1219,6 +1228,7 @@ static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
     size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp);
 
     ssize_t usize = bgzf2_read_block(fp, &j->comp);
+    fprintf(stderr, "bgzf2_read_block read %d\n", (int)usize);
     if (usize == -2)
         return INT_MAX;
     if (usize <= 0)
@@ -1957,6 +1967,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
 /*static*/ size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp) {
     uint8_t buf[12];
     size_t n;
+    uint32_t meta_sz;
 
  next_block:
     if (8 != (n = hread(fp->hfp, buf, 8)))
@@ -1964,12 +1975,8 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
 
     uint32_t fsize = le_to_u32(buf+4);
 
-    // Check if it's a pzstd format frame.
-        // FIXME
-    fprintf(stderr, "buf = %x %d\n", le_to_u32(buf), le_to_u32(buf+4));
-    if (le_to_u32(buf) != 0x184D2A50 /*|| le_to_u32(buf+4) != 4*/) {
-        fprintf(stderr, "not pzstd\n");
-        if (le_to_u32(buf) >= 0x184D2A50 && le_to_u32(buf) <= 0x184D2A5F) {
+    if (le_to_u32(buf) != BGZF2_SKIPPABLE_ID) {
+        if ((le_to_u32(buf) & 0x184D2A50) == 0x184D2A50) {
             // Another skippable frame, so skip it
             char tmp[8192];
             size_t n, c = fsize;
@@ -1983,12 +1990,11 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
         }
         return -3;
     } else {
-        uint32_t meta_sz = le_to_u32(buf+4);
+        meta_sz = le_to_u32(buf+4);
         if (meta_sz > 100000) {
             fprintf(stderr, "Unexpectedly large meta-data size.  Aborting\n");
             return -3;
         }
-
         uint8_t *meta = malloc(meta_sz);
         if (!meta)
             return -1;
@@ -1999,14 +2005,25 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
             return -1;
         }
 
-        memcpy(buf+8, meta, 4); // csize
+        bgzf2_frame_t type = meta[0];
+        if (meta_sz < 6) {
+            free(meta);
+            return -1;
+        }
+
+        memcpy(buf+8, meta, 6); // csize
 
         // FIXME: put it into buffer kstring
         free(meta);
+
+        if (type != BGZF2_BLOCK_META)
+            goto next_block;
     }
 
     // Load compressed data
-    size_t csize = le_to_u32(buf+8);
+    if (meta_sz < 6)
+        return -1;
+    size_t csize = le_to_u32(buf+10);
     if (bgzf2_buffer_grow(comp, csize) < 0)
         return -1;
     if (csize != hread(fp->hfp, (*comp)->buf, csize))
@@ -2574,6 +2591,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
 
         if (idx->cpos != hseek(fp->hfp, idx->cpos, SEEK_SET))
             return -1;
+        fprintf(stderr, "Seek to %ld\n", idx->cpos);
 
         // Load the relevant block
         if (bgzf2_decode_block(fp) < 0)
@@ -2645,7 +2663,7 @@ int bgzf2_getline(bgzf2 *fp, int delim, kstring_t *str) {
             break;
         }
         memcpy(str->s + str->l, fp->uncomp->buf + fp->uncomp->pos, n);
-        fp->uncomp->pos += n+1;
+        fp->uncomp->pos += n+(state==1);
         str->l += n;
     } while (state == 0);
 
