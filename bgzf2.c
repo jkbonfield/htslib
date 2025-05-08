@@ -1228,7 +1228,6 @@ static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
     size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp);
 
     ssize_t usize = bgzf2_read_block(fp, &j->comp);
-    fprintf(stderr, "bgzf2_read_block read %d\n", (int)usize);
     if (usize == -2)
         return INT_MAX;
     if (usize <= 0)
@@ -1965,7 +1964,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
  *         -3 on switch to stream mode
  */
 /*static*/ size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp) {
-    uint8_t buf[12];
+    uint8_t buf[14];
     size_t n;
     uint32_t meta_sz;
 
