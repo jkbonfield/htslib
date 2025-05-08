@@ -40,8 +40,11 @@
 
 #define BUFSZ 5000000
 
-static int convert(char *in, char *out, int level, long block_size,
-                   int nthreads) {
+/* ------------------------------------------------------------------------
+ * Compression and decompression.
+ */
+static int encode(char *in, char *out, int level, long block_size,
+                  int nthreads) {
     hFILE *fp_in = NULL;
     bgzf2 *fp_out = NULL;
     char buffer[BUFSZ];
@@ -165,7 +168,282 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
     return ret ? -1 : 0;
 }
 
-int list_file(char *fn, int level) {
+/* ------------------------------------------------------------------------
+ * ZSTD file structure listing
+ */
+static int list_bgzf2_block_metadata(hFILE *fp, uint64_t cpos,
+                                     uint32_t *len_p, int level) {
+    uint32_t len = *len_p;
+    unsigned char buf[4];
+
+    if (level > 1) {
+        if (len < 4)
+            return -1;
+        if (hread(fp, buf, 4) != 4)
+            return -1;
+        uint32_t csize = le_to_u32(buf);
+        printf("BGZF2 block meta skippable, len %d @ %"PRId64
+               ", next block csize %u\n", len, cpos, csize);
+
+        len -= 4;
+        if (len > 0) {
+            char *m = malloc(len);
+            if (!m)
+                return -1;
+            if (hread(fp, m, len) != len)
+                return -1;
+            printf("    Meta data: %.*s\n", len, m);
+            free(m);
+        }
+        *len_p = 0;
+    }
+
+    return 0;
+}
+
+static int list_bgzf2_file_metadata(hFILE *fp, uint64_t cpos,
+                                    uint32_t *len_p, int level) {
+    uint32_t len = *len_p;
+
+    if (level > 1) {
+        printf("File meta skippable, len %d @ %"PRId64"\n",
+               len, cpos);
+        if (len > 0) {
+            char *m = malloc(len);
+            if (!m)
+                return -1;
+            if (hread(fp, m, len) != len)
+                return -1;
+            printf("    Meta data: %.*s\n", len, m);
+            *len_p = 0;
+            free(m);
+        }
+    }
+
+    return 0;
+}
+
+static int list_bgzf2_genomic_index(hFILE *fp, uint64_t cpos,
+                                    uint32_t *len_p, int level) {
+    uint32_t len = *len_p;
+
+    char *g = malloc(len);
+    if (!g)
+        return -1;
+    if (hread(fp, g, len) != len)
+        goto err;
+
+    if (level>1)
+        printf("BGZF2 genomic index, len %d, %s @ %"PRId64"\n",
+               len, g[0]&1 ? "compressed" : "uncompressed",
+               cpos);
+
+    if (level > 2) {
+        uint8_t *gp = (uint8_t *)g, *g_end = gp+len;
+        gp++; // flag: unused
+        if (gp+4 > g_end)
+            goto err;
+        int nchr = le_to_u32(gp); gp += 4;
+        for (int i = 0; i < nchr; i++) {
+            if (gp+5 > g_end)
+                goto err;
+            gp++; // flag
+            int index_sz = le_to_u32(gp); gp += 4;
+            // Should index_sz be uint64_t?
+            printf("    chr-id %d/%d, size %d\n",
+                   i+1, nchr, index_sz);
+            if (gp+index_sz * 20 > g_end)
+                goto err;
+            for (int j = 0; j < index_sz; j++) {
+                int tid = le_to_u32(gp); gp += 4;
+                int beg = le_to_u32(gp); gp += 4;
+                int end = le_to_u32(gp); gp += 4;
+                uint64_t upos = le_to_u64(gp); gp += 8;
+                printf("        %4d: %d, %d..%d at %"PRId64"\n",
+                       j, tid, beg, end, upos);
+            }
+        }
+    }
+
+    free(g);
+    *len_p = 0;
+    return 0;
+
+ err:
+    free(g);
+    return -1;
+}
+
+static int list_seekable_index(hFILE *fp, uint64_t cpos, int level) {
+    uint8_t *g = NULL, buf[4];
+
+    if (hread(fp, (char *)buf, 4) != 4)
+        return -1;
+    uint32_t len = le_to_u32(buf);
+
+    if (level > 1)
+        printf("Seekable Index, len %d @ %"PRId64"\n", len, cpos);
+
+    if (level > 2) {
+        // Dump seekable index
+        uint8_t *g = malloc(len);
+        if (!g)
+            goto err;
+        if (hread(fp, g, len) != len)
+            goto err;
+
+        uint8_t *gp = g, *g_end = gp+len;
+
+        unsigned int nframes = le_to_u32(g_end-9);
+        int has_chksum = *(g_end-5) & 0x80 ? 1 : 0;
+
+        uint64_t pos = 0, upos = 0;
+        if (gp + nframes*4*(2+has_chksum) > g_end)
+            goto err;
+        for (unsigned int i = 0; i < nframes; i++) {
+            unsigned int csz = le_to_u32(gp);
+            unsigned int usz = le_to_u32(gp+4);
+            gp += 8;
+            if (has_chksum)
+                gp += 4;
+            printf("    cpos %"PRId64", upos %"PRId64
+                   ", csize %u, usize %u\n",
+                   pos, upos, csz, usz);
+            pos += csz;
+            upos += usz;
+        }
+
+        free(g);
+    } else {
+        if (hseek(fp, len, SEEK_CUR) < 0)
+            return -1;
+    }
+
+    return 0;
+
+ err:
+    free(g);
+    return -1;
+}
+
+
+/*
+  +--------------------+------------+
+  |    Magic_Number    | 4 bytes    |
+  +--------------------+------------+
+  |    Frame_Header    | 2-14 bytes |
+  +--------------------+------------+
+  |     Data_Block     | n bytes    |
+  +--------------------+------------+
+  | [More Data_Blocks] |            |
+  +--------------------+------------+
+  | [Content_Checksum] | 0-4 bytes  |
+  +--------------------+------------+
+*/
+static int list_zstd_data_frame(hFILE *fp, uint64_t cpos, int level,
+                                int64_t *nblock) {
+    uint8_t buf[8];
+
+    if (level>1)
+        printf("ZStd data frame @ %"PRId64"\n", cpos);
+
+    //-------------------- Frame Header Descriptor
+    /*
+      +-------------------------+-----------+
+      | Frame_Header_Descriptor | 1 byte    |
+      +-------------------------+-----------+
+      |   [Window_Descriptor]   | 0-1 byte  |
+      +-------------------------+-----------+
+      |     [Dictionary_ID]     | 0-4 bytes |
+      +-------------------------+-----------+
+      |  [Frame_Content_Size]   | 0-8 bytes |
+      +-------------------------+-----------+
+    */
+    uint8_t flag;
+    if (hread(fp, &flag, 1) < 0)
+        goto err;
+    int dict_flag = flag&3;
+    int checksum_flag = (flag>>2) & 1;
+    int single_flag = (flag>>5) & 1;
+    int fcs_flag = flag>>6;
+    if (level>1)
+        printf("    Hdr descriptor: dict=%d, checksum=%d, single=%d, "
+               "frame_content_sz_flag=%d\n",
+               dict_flag, checksum_flag, single_flag, fcs_flag);
+    int fcs_field_size = 1<<fcs_flag;
+    if (fcs_field_size == 1 && !single_flag)
+        fcs_field_size = 0;
+
+    // Window Descriptor
+    if (!single_flag) {
+        uint8_t w;
+        if (hread(fp, &w, 1) != 1)
+            goto err;
+        if (level>1) {
+            int exponent = w>>3;
+            int mantissa = w&7;
+            int windowLog = 10 + exponent;
+            int windowBase = 1 << windowLog;
+            int windowAdd = (windowBase / 8) * mantissa;
+            int Window_Size = windowBase + windowAdd;
+            printf("    Window size=%d\n", Window_Size);
+        }
+    }
+
+    // Dictionary ID
+    if (dict_flag) {
+        int did_field_size = 1<<(dict_flag-1);
+        if (hread(fp, buf, did_field_size) != did_field_size)
+            goto err;
+        if (level>2)
+            printf("    DictID field size %d\n", did_field_size);
+    }
+
+    // Frame Content Size
+    if (fcs_field_size) {
+        uint64_t frame_size;
+        memset(buf, 0, 8);
+        if (hread(fp, buf, fcs_field_size) != fcs_field_size)
+            goto err;
+        frame_size = le_to_u64(buf);
+        if (level>2)
+            printf("    Frame size %"PRIu64"\n", frame_size);
+    }
+
+    //-------------------- Data blocks
+    int last_block = 0;
+    do {
+        (*nblock)++;
+        if (hread(fp, buf, 3) != 3)
+            goto err;
+        buf[3] = 0;
+        uint32_t blk_size = le_to_u32(buf);
+        last_block = blk_size & 1;
+        int block_type = (blk_size>>1) & 3;
+        blk_size >>= 3;
+        char *type[] = {"Raw", "RLE", "Compressed", "Reserved"};
+        if (level>2)
+            printf("    Block last=%d type=%s size=%d\n",
+                   last_block, type[block_type], blk_size);
+        if (hseek(fp, blk_size, SEEK_CUR) < 0) {
+            goto err;
+        }
+    } while (!last_block);
+
+    //-------------------- Content Checksums
+    if (checksum_flag)
+        if (hread(fp, buf, 4) != 4)
+            goto err;
+
+    return 0;
+
+ err:
+    return -1;
+}
+
+#define IS_SKIPPABLE(m) ((m & ZSTD_MAGIC_SKIPPABLE_MASK) == ZSTD_MAGIC_SKIPPABLE_START)
+
+static int list_file(char *fn, int level) {
     hFILE *fp = hopen(fn, "r");
     if (!fp)
         return -1;
@@ -177,7 +455,7 @@ int list_file(char *fn, int level) {
     int64_t ngindex = 0;
     int64_t nblock = 0;
 
-    unsigned char buf[8], version;
+    unsigned char buf[8];
     bgzf2_frame_t type;
     while (hread(fp, (char *)buf, 4) == 4) {
         uint64_t cpos = htell(fp)-4;
@@ -188,120 +466,43 @@ int list_file(char *fn, int level) {
                 goto err;
             len = le_to_u32(buf);
             type = buf[4];
-            version = buf[5];
+            //version = buf[5];
+            len -= 2;
 
-            // FIXME: refactor this function
             switch (type) {
             case BGZF2_HEADER: {
                 char dat[100];
-                len -= 2;
-                int l = hread(fp, dat, len<100?len:100);
+                int l = hread(fp, dat, MIN(100, len));
                 if (l<0)
                     goto err;
 
                 nheader++;
                 if (level>1)
-                    printf("BGZF2 magic, len %d: %.*s\n", len, l, dat);
+                    printf("BGZF2 magic, len %d: %.*s\n", len+2, l, dat);
 
-                if (len > 100)
-                    if (hseek(fp, len-100, SEEK_CUR) < 0)
-                        goto err;
-
+                len -= l;
                 break;
             }
 
             case BGZF2_BLOCK_META: {
                 nblockmeta++;
-                if (level > 1) {
-                    if (len < 6)
-                        goto err;
-                    if (hread(fp, buf, 4) != 4)
-                        goto err;
-                    uint32_t csize = le_to_u32(buf);
-                    printf("BGZF2 block meta skippable, len %d @ %"PRId64
-                           ", next block csize %u\n", len, cpos, csize);
-
-                    len -= 6;
-                    if (len > 0) {
-                        char *m = malloc(len);
-                        if (!m)
-                            goto err;
-                        if (hread(fp, m, len) != len)
-                            goto err;
-                        printf("    Meta data: %.*s\n", len, m);
-                        free(m);
-                    }
-                    len = 0;
-                }
-                if (len > 2 && hseek(fp, len-2, SEEK_CUR) < 0)
+                if (list_bgzf2_block_metadata(fp, cpos, &len, level) < 0)
                     goto err;
                 break;
             }
 
             case BGZF2_FILE_META: {
                 nfilemeta++;
-                if (level > 1) {
-                    printf("File meta skippable, len %d @ %"PRId64"\n",
-                           len, cpos);
-                    if (len > 2) {
-                        len -= 2;
-                        char *m = malloc(len);
-                        if (!m)
-                            goto err;
-                        if (hread(fp, m, len) != len)
-                            goto err;
-                        printf("    Meta data: %.*s\n", len, m);
-                        free(m);
-                    }
-                    len = 0;
-                }
-                if (len > 2 && hseek(fp, len-2, SEEK_CUR) < 0)
+                if (list_bgzf2_file_metadata(fp, cpos, &len, level) < 0)
                     goto err;
                 break;
             }
 
             case BGZF2_GENOMIC_INDEX: {
                 ngindex++;
-
-                // Decode index
-                len -= 2;
-                char *g = malloc(len);
-                if (!g)
-                    goto err;
-                if (hread(fp, g, len) != len)
+                if (list_bgzf2_genomic_index(fp, cpos, &len, level) < 0)
                     goto err;
 
-                if (level>1)
-                    printf("BGZF2 genomic index, len %d, %s @ %"PRId64"\n",
-                           len, g[0]&1 ? "compressed" : "uncompressed",
-                           cpos);
-
-                if (level > 2) {
-                    uint8_t *gp = (uint8_t *)g, *g_end = gp+len;
-                    gp++; // flag: unused
-                    if (gp+4 > g_end) goto err;
-                    int nchr = le_to_u32(gp); gp += 4;
-                    for (int i = 0; i < nchr; i++) {
-                        if (gp+5 > g_end) goto err;
-                        gp++; // flag
-                        int index_sz = le_to_u32(gp); gp += 4;
-                        // Should index_sz be uint64_t?
-                        printf("    chr-id %d/%d, size %d\n",
-                               i+1, nchr, index_sz);
-                        if (gp+index_sz * 20 > g_end) goto err;
-                        for (int j = 0; j < index_sz; j++) {
-                            int tid = le_to_u32(gp); gp += 4;
-                            int beg = le_to_u32(gp); gp += 4;
-                            int end = le_to_u32(gp); gp += 4;
-                            uint64_t upos = le_to_u64(gp); gp += 8;
-                            printf("        %4d: %d, %d..%d at %"PRId64"\n",
-                                   j, tid, beg, end, upos);
-                        }
-                    }
-
-                    free(g);
-                    len=100; // prevents seek below
-                }
                 break;
             }
 
@@ -309,166 +510,26 @@ int list_file(char *fn, int level) {
                 abort();
             }
 
-            if (len > 100)
-                if (hseek(fp, len-100, SEEK_CUR) < 0)
+            // Consume any remainder of the skippable frame
+            if (len > 0)
+                if (hseek(fp, len, SEEK_CUR) < 0)
                     goto err;
             break;
 
         case 0x184D2A5E: // Seekable index
             nsindex++;
-            if (hread(fp, (char *)buf, 4) != 4)
-                goto err;
-            len = le_to_u32(buf);
-            if (level > 1)
-                printf("Seekable Index, len %d @ %"PRId64"\n", len, cpos);
-            if (level > 2) {
-                // Dump seekable index
-                uint8_t *g = malloc(len);
-                if (!g)
-                    goto err;
-                if (hread(fp, g, len) != len)
-                    goto err;
-
-                uint8_t *gp = g, *g_end = gp+len;
-
-                unsigned int nframes = le_to_u32(g_end-9);
-                int has_chksum = *(g_end-5) & 0x80 ? 1 : 0;
-
-                uint64_t pos = 0, upos = 0;
-                if (gp + nframes*4*(2+has_chksum) > g_end)
-                    goto err;
-                for (unsigned int i = 0; i < nframes; i++) {
-                    unsigned int csz = le_to_u32(gp);
-                    unsigned int usz = le_to_u32(gp+4);
-                    gp += 8;
-                    if (has_chksum)
-                        gp += 4;
-                    printf("    cpos %"PRId64", upos %"PRId64
-                           ", csize %u, usize %u\n",
-                           pos, upos, csz, usz);
-                    pos += csz;
-                    upos += usz;
-                }
-
-                free(g);
-                len=100; // prevents seek below
-            }
-            if (hseek(fp, len, SEEK_CUR) < 0)
+            if (list_seekable_index(fp, cpos, level) < 0)
                 goto err;
             break;
 
         case ZSTD_MAGICNUMBER: // 0xFD2FB528, zstd data frame
             ndata++;
-            if (level>1)
-                printf("ZStd data frame @ %"PRId64"\n", cpos);
-
-            /*
-              +--------------------+------------+
-              |    Magic_Number    | 4 bytes    |
-              +--------------------+------------+
-              |    Frame_Header    | 2-14 bytes |
-              +--------------------+------------+
-              |     Data_Block     | n bytes    |
-              +--------------------+------------+
-              | [More Data_Blocks] |            |
-              +--------------------+------------+
-              | [Content_Checksum] | 0-4 bytes  |
-              +--------------------+------------+
-            */
-
-            //-------------------- Frame Header Descriptor
-            /*
-              +-------------------------+-----------+
-              | Frame_Header_Descriptor | 1 byte    |
-              +-------------------------+-----------+
-              |   [Window_Descriptor]   | 0-1 byte  |
-              +-------------------------+-----------+
-              |     [Dictionary_ID]     | 0-4 bytes |
-              +-------------------------+-----------+
-              |  [Frame_Content_Size]   | 0-8 bytes |
-              +-------------------------+-----------+
-            */
-            uint8_t flag;
-            if (hread(fp, &flag, 1) < 0)
+            if (list_zstd_data_frame(fp, cpos, level, &nblock) < 0)
                 goto err;
-            int dict_flag = flag&3;
-            int checksum_flag = (flag>>2) & 1;
-            int single_flag = (flag>>5) & 1;
-            int fcs_flag = flag>>6;
-            if (level>1)
-                printf("    Hdr descriptor: dict=%d, checksum=%d, single=%d, "
-                       "frame_content_sz_flag=%d\n",
-                       dict_flag, checksum_flag, single_flag, fcs_flag);
-            int fcs_field_size = 1<<fcs_flag;
-            if (fcs_field_size == 1 && !single_flag)
-                fcs_field_size = 0;
-
-            // Window Descriptor
-            if (!single_flag) {
-                uint8_t w;
-                if (hread(fp, &w, 1) != 1)
-                    goto err;
-                if (level>1) {
-                    int exponent = w>>3;
-                    int mantissa = w&7;
-                    int windowLog = 10 + exponent;
-                    int windowBase = 1 << windowLog;
-                    int windowAdd = (windowBase / 8) * mantissa;
-                    int Window_Size = windowBase + windowAdd;
-                    printf("    Window size=%d\n", Window_Size);
-                }
-            }
-
-            // Dictionary ID
-            if (dict_flag) {
-                int did_field_size = 1<<(dict_flag-1);
-                if (hread(fp, buf, did_field_size) != did_field_size)
-                    goto err;
-                if (level>2)
-                    printf("    DictID field size %d\n", did_field_size);
-            }
-
-            // Frame Content Size
-            if (fcs_field_size) {
-                uint64_t frame_size;
-                memset(buf, 0, 8);
-                if (hread(fp, buf, fcs_field_size) != fcs_field_size)
-                    goto err;
-                frame_size = le_to_u64(buf);
-                if (level>2)
-                    printf("    Frame size %"PRIu64"\n", frame_size);
-            }
-
-            //-------------------- Data blocks
-            int last_block = 0;
-            do {
-                nblock++;
-                if (hread(fp, buf, 3) != 3)
-                    goto err;
-                buf[3] = 0;
-                uint32_t blk_size = le_to_u32(buf);
-                last_block = blk_size & 1;
-                int block_type = (blk_size>>1) & 3;
-                blk_size >>= 3;
-                char *type[] = {"Raw", "RLE", "Compressed", "Reserved"};
-                if (level>2)
-                    printf("    Block last=%d type=%s size=%d\n",
-                           last_block, type[block_type], blk_size);
-                if (hseek(fp, blk_size, SEEK_CUR) < 0) {
-                    goto err;
-                }
-            } while (!last_block);
-
-            //-------------------- Content Checksums
-            if (checksum_flag)
-                if (hread(fp, buf, 4) != 4)
-                    goto err;
-
             break;
 
         default:
-            if ((magic & ZSTD_MAGIC_SKIPPABLE_MASK)
-                == ZSTD_MAGIC_SKIPPABLE_START) {
+            if (IS_SKIPPABLE(magic)) {
                 if (hread(fp, (char *)buf, 4) != 4)
                     goto err;
                 len = le_to_u32(buf);
@@ -484,12 +545,12 @@ int list_file(char *fn, int level) {
     }
 
     printf("Frames: %10"PRId64"\tBGZF2 magic number\n", nheader);
-    printf("Frames: %10"PRId64"\tdata\n", ndata);
+    printf("Frames: %10"PRId64"\tdata frames\n", ndata);
+    printf("Blocks: %10"PRId64"\tdata blocks\n", nblock);
     printf("Frames: %10"PRId64"\tframe metadata\n", nblockmeta);  
     printf("Frames: %10"PRId64"\tfile metadata\n", nfilemeta); 
     printf("Frames: %10"PRId64"\tgenomic index\n", ngindex);
     printf("Frames: %10"PRId64"\tseekable index\n", nsindex);
-    printf("Blocks: %10"PRId64"\tdata blocks\n", nblock);
 
     return hclose(fp);
 
@@ -499,6 +560,8 @@ int list_file(char *fn, int level) {
     return -1;
 }
 
+/* ------------------------------------------------------------------------
+ */
 static void usage(FILE *fp) {
     fprintf(fp, "Usage: bzip2 [opts] [file]\n");
     fprintf(fp, "    -h         show usage\n");
@@ -622,7 +685,7 @@ int main(int argc, char **argv) {
 
     int ret;
     if (compress) {
-        ret = convert(infn, outfn, level, blk_size, nthreads) ? 1 : 0;
+        ret = encode(infn, outfn, level, blk_size, nthreads) ? 1 : 0;
     } else {
         ret = decode(infn, outfn, start, end, nthreads) ? 1 : 0;
     }
