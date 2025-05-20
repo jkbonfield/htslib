@@ -276,6 +276,15 @@ hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
 			   hts_readrec_func *readrec);
 
 /*
+ * Fetch the global file metadata from an indexed BGZF2 file.
+ *
+ * Returns 0 on success and fills out ks,
+ *        <0 on failure
+ */
+HTSLIB_EXPORT
+int bgzf2_idx_metadata(const hts_idx_t *idx, kstring_t *ks);
+
+/*
  * Returns the next item from a bgzf2 iterator.
  * Returns 0 if found,
  *        -1 at EOF,
@@ -286,7 +295,9 @@ int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data);
 
 HTSLIB_EXPORT
 void bgzf2_add_flush_callback(bgzf2 *fp, void *flush_data,
-                              int (*flush_callback)(kstring_t *ks, void *));
+                              int (*flush_callback)(kstring_t *ks,
+													void *data,
+													int final));
 
 HTSLIB_EXPORT
 void *bgzf2_flush_data(bgzf2 *fp);

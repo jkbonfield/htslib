@@ -863,23 +863,46 @@ int bam_read1(BGZF *fp, bam1_t *b)
 }
 
 typedef struct frame_stats {
-    int nmapped;
-    int nunmapped;
+    uint64_t nmapped;
+    uint64_t nunmapped;
+    uint64_t total_nmapped;
+    uint64_t total_nunmapped;
+    uint64_t ntid; // +1, as 0 is -1 for "*".
+    uint64_t *nmapped_tid;
+    uint64_t *nunmapped_tid;
 } frame_stats;
 
 
-// If ks is NULL then we're finishing up.
-int bam_flush_callback(kstring_t *ks, void *dat) {
+// "Final" indicates if this is the final whole-file meta-data block.
+// We will also get a subsequent callback with ks as NULL which is an
+// indication to free any internal data structures.
+int bam_flush_callback(kstring_t *ks, void *dat, int final) {
     int ret = 0;
     frame_stats *fs = (frame_stats *)dat;
     if (!ks) {
+        free(fs->nmapped_tid);
+        free(fs->nunmapped_tid);
         free(fs);
         return 0;
     }
     ks_clear(ks);
-    ret |= ksprintf(ks, "NMAPPED=%d;NUNMAPPED=%d",
-                    fs->nmapped, fs->nunmapped) < 0;
-    memset(fs, 0, sizeof(*fs));
+    if (final) {
+//        ret |= ksprintf(ks, "NMAPPED=%"PRIu64";NUNMAPPED=%"PRIu64,
+//                        fs->total_nmapped, fs->total_nunmapped) < 0;
+        int n;
+        for (n = 0; n < fs->ntid; n++) {
+            ret |= ksprintf(ks, "NMAPPED=%"PRIu64";NUNMAPPED=%"PRIu64,
+                            fs->nmapped_tid[n], fs->nunmapped_tid[n]) < 0;
+            kputc('\n', ks);
+        }
+    } else {
+        ret |= ksprintf(ks, "NMAPPED=%"PRIu64";NUNMAPPED=%"PRIu64,
+                        fs->nmapped, fs->nunmapped) < 0;
+    }
+    fprintf(stderr, "ks=%p final=%d => %s\n", ks, final, ks->s);
+    fs->total_nmapped   += fs->nmapped;
+    fs->total_nunmapped += fs->nunmapped;
+    fs->nmapped = fs->nunmapped = 0;
     return ret;
 }
 
@@ -920,6 +943,27 @@ int bam_write1(BGZF *fp, const bam1_t *b)
 
         fs->nmapped   += (c->flag & BAM_FUNMAP) == 0;
         fs->nunmapped += (c->flag & BAM_FUNMAP) != 0;
+
+        if (c->tid >= -1 && c->tid+2 >= fs->ntid) {
+            uint64_t *tmp;
+            if (!(tmp = realloc(fs->nmapped_tid, (c->tid+3)*sizeof(*tmp))))
+                return -1;
+            fs->nmapped_tid = tmp;
+            if (!(tmp = realloc(fs->nunmapped_tid, (c->tid+3)*sizeof(*tmp))))
+                return -1;
+            fs->nunmapped_tid = tmp;
+            memset(&fs->nmapped_tid[fs->ntid], 0,
+                   (c->tid+3 - fs->ntid)*sizeof(*tmp));
+            memset(&fs->nunmapped_tid[fs->ntid], 0,
+                   (c->tid+3 - fs->ntid)*sizeof(*tmp));
+            fs->ntid = c->tid+3;
+        }
+        if (c->tid >= -1 && c->tid+2 < fs->ntid) {
+            fs->nmapped_tid[c->tid+2]   += (c->flag & BAM_FUNMAP) == 0;
+            fs->nunmapped_tid[c->tid+2] += (c->flag & BAM_FUNMAP) != 0;
+        }
+        fs->nmapped_tid[0]   += (c->flag & BAM_FUNMAP) == 0;
+        fs->nunmapped_tid[0] += (c->flag & BAM_FUNMAP) != 0;
     }
 
     ok = (bgzf_flush_try(fp, 4 + block_len) >= 0);
@@ -1686,7 +1730,7 @@ static int64_t bam_ptell(void *fp)
 }
 
 hts_idx_t *hts_bgzf2_idx_init(void *fp) {
-    hts_bgzf2_idx_t *idx = malloc(sizeof(*idx));
+    hts_bgzf2_idx_t *idx = calloc(1, sizeof(*idx));
     if (idx == NULL) return NULL;
     idx->fmt = HTS_FMT_BGZF2;
     idx->fp = fp;

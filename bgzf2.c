@@ -209,7 +209,7 @@ struct bgzf2 {
     int level;            // compression level
     int is_write;         // open for write
     int block_size;       // ideal block size
-    size_t index_sz;      // size of seekable index frame
+    size_t index_frame_sz;// size of seekable index frame
     bgzf2_index_t *index; // index entries
     int nindex;           // used size of index array
     int aindex;           // allocated size of index array
@@ -231,6 +231,7 @@ struct bgzf2 {
     int nchr;                // number of chromosomes; size of gindex_sz
     // FIXME: need nchr for 'tid' index, but also number used.
     // Maybe nchr has holes?
+    size_t gindex_frame_sz;  // size of zstd frame holding the gindex
     size_t *gindex_sz;       // size of gindex[chr]; consider used+alloc sz
     bgzf2_gindex_t **gindex; // genomic index per chr / tid
     // For detection of unsorted data.
@@ -260,7 +261,7 @@ struct bgzf2 {
     kstring_t ks;
 
     // Per frame meta-data callback
-    int (*flush_callback)(kstring_t *ks, void *flush_data);
+    int (*flush_callback)(kstring_t *ks, void *flush_data, int final);
     void *flush_data;
 };
 
@@ -648,7 +649,7 @@ static int load_genomic_index_common(bgzf2 *fp) {
 
     // Look for and validate genomic index footer.  This is appear immediately
     // before the seekable index.
-    if (hseek(fp->hfp, -(fp->index_sz+8), SEEK_END) < 0)
+    if (hseek(fp->hfp, -(fp->index_frame_sz+8), SEEK_END) < 0)
         return -1 - (errno == ESPIPE);
 
     uint8_t footer[8];
@@ -663,7 +664,8 @@ static int load_genomic_index_common(bgzf2 *fp) {
     if (!sz)
         goto err;
     //if (hseek(fp->hfp, -sz, SEEK_CUR) < 0) // why doesn't SEEK_CUR work?
-    if (hseek(fp->hfp, -(fp->index_sz + sz), SEEK_END) < 0)
+    // FIXME: because it's uint32.  Cast to off_t first.
+    if (hseek(fp->hfp, -(fp->index_frame_sz + sz), SEEK_END) < 0)
         goto err;
 
     if (!(buf = malloc(sz)))
@@ -684,6 +686,7 @@ static int load_genomic_index_common(bgzf2 *fp) {
     fp->nchr = le_to_u32(cp);  cp += 4;
 //    fprintf(stderr, "Index: nchr %d\n", fp->nchr);
 
+    fp->gindex_frame_sz = sz;
     fp->gindex_sz = calloc(fp->nchr, sizeof(*fp->gindex_sz));
     fp->gindex    = calloc(fp->nchr, sizeof(*fp->gindex));
     if (!fp->gindex_sz || !fp->gindex)
@@ -903,6 +906,81 @@ static int write_block_metadata(bgzf2 *fp, uint32_t comp_sz,
         ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
 
     return ret ? -1 : 0;
+}
+
+static int write_file_metadata(bgzf2 *fp, kstring_t *meta) {
+    uint8_t buf[12];
+
+    u32_to_le(BGZF2_SKIPPABLE_ID, buf); // pzstd skippable magic no.
+    u32_to_le(10 + (meta ? meta->l : 0), buf + 4);
+    buf[8] = BGZF2_FILE_META;
+    buf[9] = 0; // meta-data format version
+
+    int ret = bgzf2_add_index(fp, 0, 18 + (meta ? meta->l : 0));
+    ret |= hwrite(fp->hfp, buf, 10) != 10;
+    if (meta && meta->l)
+        ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
+
+    // pointer back to start for reverse reading
+    u32_to_le(10 + meta ? meta->l : 0, buf);
+    u32_to_le(0x8F92EA4D, buf+4); // file meta-data magic number
+    ret |= hwrite(fp->hfp, buf, 8) != 8;
+    // TODO XXhash-64
+
+    return ret ? -1 : 0;
+}
+
+// NB: If needed, call this before threading is enabled
+kstring_t *load_file_metadata(bgzf2 *fp, kstring_t *ks) {
+    // For ease we load the seekable index and genomic index so we can
+    // use the variables there indicating the sizes.
+    if (load_genomic_index_common(fp) < 0)
+        return NULL;
+
+    off_t off = hseek(fp->hfp, -(fp->index_frame_sz+8 + fp->gindex_frame_sz),
+                      SEEK_END);
+    if (off < 0)
+        return NULL;
+    uint8_t footer[8];
+    if (8 != hread(fp->hfp, footer, 8))
+        return NULL;
+
+    if (le_to_u32(footer+4) != 0x8F92EA4D)
+        return NULL; // no meta-data present
+
+    // load the meta-data into memory
+    uint32_t sz = le_to_u32(footer);
+    if (hseek(fp->hfp, -((off_t)sz+18), SEEK_CUR) < 0)
+    if (off < 0)
+        return NULL;
+
+    uint8_t header[10];
+    if (10 != hread(fp->hfp, header, 10))
+        return NULL;
+    if (le_to_u32(header) != BGZF2_SKIPPABLE_ID)
+        return NULL;
+    if (header[8] != BGZF2_FILE_META || header[9] != 0)
+        return NULL;
+
+    uint32_t mlen = le_to_u32(header+4);
+    if (sz+10 != mlen) // not +8? CHECK
+        return NULL;
+
+    ks_clear(ks);
+    if (ks_resize(ks, mlen+1) < 0)
+        return NULL;
+
+    if (mlen != hread(fp->hfp, ks->s, mlen))
+        return NULL;
+    ks->s[mlen] = 0;
+    ks->l = mlen;
+
+    return ks;
+}
+
+int bgzf2_idx_metadata(const hts_idx_t *idx, kstring_t *ks) {
+    const hts_bgzf2_idx_t *bidx = (const hts_bgzf2_idx_t *)idx;
+    return load_file_metadata(bidx->fp, ks) ? 0 : -1;
 }
 
 /*----------------------------------------------------------------------
@@ -1636,7 +1714,7 @@ int bgzf2_flush(bgzf2 *fp) {
 
     // Arbitrary callback to accumulate per-frame meta-data stats
     if (fp->flush_callback)
-        ret |= fp->flush_callback(&fp->uncomp->meta, fp->flush_data) < 0;
+        ret |= fp->flush_callback(&fp->uncomp->meta, fp->flush_data, 0) < 0;
 
     if (fp->pool) {
         ret |= bgzf2_write_block_mt(fp, fp->uncomp);
@@ -1827,6 +1905,15 @@ int bgzf2_close(bgzf2 *fp) {
 
     if (fp->is_write) {
         ret |= (bgzf2_drain(fp) < 0);
+
+        if (fp->flush_callback) {
+            kstring_t final_meta = KS_INITIALIZE;
+            fp->flush_callback(&final_meta, fp->flush_data, 1);
+            ret |= write_file_metadata(fp, &final_meta);
+            //ret |= write_block_metadata(fp, 0, &final_meta);
+            free(final_meta.s);
+        }
+
         ret |= write_genomic_index(fp);
         ret |= write_seekable_index(fp);
     }
@@ -1879,7 +1966,7 @@ int bgzf2_close(bgzf2 *fp) {
     free(fp->gindex_sz);
 
     if (fp->flush_callback)
-        fp->flush_callback(NULL, fp->flush_data);
+        fp->flush_callback(NULL, fp->flush_data, 0);
 
     free(fp->index);
     free(fp->ks.s);
@@ -1892,7 +1979,9 @@ int bgzf2_close(bgzf2 *fp) {
 // We call this callback on each flush and use the results to generate
 // arbitrary per-frame meta-data.
 void bgzf2_add_flush_callback(bgzf2 *fp, void *flush_data,
-                              int (*flush_callback)(kstring_t *, void *)) {
+                              int (*flush_callback)(kstring_t *,
+                                                    void *,
+                                                    int final)) {
     fp->flush_data = flush_data;
     fp->flush_callback = flush_callback;
 }
@@ -2445,7 +2534,7 @@ int load_seekable_index_common(bgzf2 *fp) {
         return -3;
 
     // Decode index
-    fp->index_sz = sz;
+    fp->index_frame_sz = sz;
     fp->index = idx = malloc(nframes * sizeof(*idx));
     fp->nindex = fp->aindex = nframes;
     if (!idx)
