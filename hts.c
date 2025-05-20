@@ -3222,6 +3222,56 @@ int hts_idx_get_stat(const hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* 
         return -1;
     }
 
+    if (idx->fmt == HTS_FMT_BGZF2) {
+        hts_bgzf2_idx_t *b2idx = (hts_bgzf2_idx_t *)idx;
+        if (!b2idx->nmapped) {
+            // Parse the whole file meta-data
+            kstring_t ks = KS_INITIALIZE;
+            if (bgzf2_idx_metadata(idx, &ks) < 0)
+                return -1;
+
+            int ntid = 0;
+            char *cp, *cp_end = ks.s + ks.l, *nl;
+            for (cp = ks.s; *cp; *cp++)
+                if (*cp == '\n')
+                    ntid++;
+            b2idx->ntid = ++ntid;
+            b2idx->nmapped = calloc(ntid, sizeof(*b2idx->nmapped));
+            b2idx->nunmapped = calloc(ntid, sizeof(*b2idx->nunmapped));
+            if (!b2idx->nmapped || !b2idx->nunmapped)
+                return -1;
+
+            ntid = 0;
+            nl = strchr(cp = ks.s, '\n');
+            while (cp < cp_end) {
+                if (nl)
+                    *nl = 0;
+                char *val;
+                if ((val = strstr(cp, "NMAPPED=")))
+                    b2idx->nmapped[ntid] = strtoul(val + 8, NULL, 0);
+                else
+                    b2idx->nmapped[ntid] = 0;
+                if ((val = strstr(cp, "NUNMAPPED=")))
+                    b2idx->nunmapped[ntid] = strtoul(val + 10, NULL, 0);
+                else
+                    b2idx->nunmapped[ntid];
+
+                ntid++;
+                cp = nl ? nl+1 : cp_end;
+                nl = strchr(cp, '\n');
+            }
+            ks_free(&ks);
+        }
+
+        if (tid+2 >= 0 && tid+2 < b2idx->ntid) {
+            *mapped = b2idx->nmapped[tid+2];
+            *unmapped = b2idx->nunmapped[tid+2];
+        } else {
+            *mapped = *unmapped = 0;
+        }
+        return 0;
+    }
+
     bidx_t *h = idx->bidx[tid];
     if (!h) return -1;
     khint_t k = kh_get(bin, h, META_BIN(idx));
@@ -3239,6 +3289,19 @@ uint64_t hts_idx_get_n_no_coor(const hts_idx_t* idx)
 {
     // TODO: BGZF2
     if (idx->fmt == HTS_FMT_CRAI) return 0;
+    if (idx->fmt == HTS_FMT_BGZF2) {
+        kstring_t ks = KS_INITIALIZE;
+        if (bgzf2_idx_metadata(idx, &ks) < 0)
+            return -1;
+        uint64_t u;
+        char *cp;
+        if ((cp = strstr(ks.s, "NUNMAPPED=")))
+            u = strtoul(ks.s + 10, NULL, 0);
+        else
+            u = 0;
+        ks_free(&ks);
+        return u;
+    }
     return idx->n_no_coor;
 }
 

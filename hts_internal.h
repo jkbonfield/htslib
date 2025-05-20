@@ -108,6 +108,9 @@ typedef struct hts_cram_idx_t {
 typedef struct hts_bgzf2_idx_t {
     int fmt;
     struct bgzf2 *fp;
+    int ntid; // 0=total, 1=unmapped (ref "*"), >=2 = per chromosome
+    uint64_t *nmapped;
+    uint64_t *nunmapped;
 } hts_bgzf2_idx_t;
 
 // Determine whether the string's contents appear to be UTF-16-encoded text.

@@ -241,9 +241,32 @@ The file meta-data is formatted as:
    4: N (remaining size of skippable frame)
    1: 2 (BGZF2 file meta-data type)
    1: 0 (BGZF2 header format version)
-N-10: meta-data matching ((key=value)(;key=value)*)?
+N-18: meta-data matching ((key=value)([;\n]key=value)*)?
+   4: N-8 (to permit reverse reading)
+   4: 0x8F92EA4D magic number
    4: XXHash-64
 
+Meta-data consists of multiple concatenated key=value tuples strings,
+separated by semicolons and/or newlines.  The meaning of the
+separators may be file format specific, but for genomic data we
+envisage semicolon to group key=value tuples for a single chromosome
+and newlines to separate between chromosomes, with the first two lines
+having special meaning:
+
+- The first line is for whole-file meta data, such as checksums and
+  aggregated statistics.
+
+- The next line is for data not aligned to any specific chromosome.
+  This is optional, but if not present it cannot then be followed by
+  other meta-data. 
+
+- This is then followed by per-chromosome data.  This is also optional,
+  but if present each meta-data string is for chromosome 1 onwards
+  with no gaps.  (Use a blank string to pad out if required to skip
+  chromosomes.)
+
+FIXME: or alternatively we have a nested format, such as JSON, which
+makes it trivial to hold arrays of meta-data.
 
 Indexing
 --------
