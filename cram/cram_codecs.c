@@ -1543,11 +1543,15 @@ int cram_xpack_encode_flush(cram_codec *c) {
     uint8_t out_meta[1024];
     uint8_t *out = hts_pack(BLOCK_DATA(c->out), BLOCK_SIZE(c->out),
                             out_meta, &meta_len, &out_len);
+    if (!out && BLOCK_SIZE(c->out) == 0) {
+        out = "";
+        out_len = 0;
+    }
 
     // We now need to pass this through the next layer of transform
     if (c->u.e_xpack.sub_codec->encode(NULL, // also indicates flush incoming
-                                     c->u.e_xpack.sub_codec,
-                                     (char *)out, out_len))
+                                       c->u.e_xpack.sub_codec,
+                                       (char *)out, out_len))
         return -1;
 
     int r = 0;
@@ -3975,6 +3979,34 @@ cram_codec *cram_encoder_init(enum cram_encoding codec,
     if (st && !st->nvals)
         return NULL;
 
+    // Switch to XPACK when suitable
+    if (CRAM_MAJOR_VERS(version) >= 4 && st &&
+        st->nvals > 1 && st->nvals <= 16 && option == E_BYTE &&
+        st->max_val < MAX_STAT_VAL && st->min_val >= 0 &&
+        codec != E_XPACK) {
+        cram_xpack_encoder xb;
+        xb.sub_encoding = codec;
+        xb.sub_codec_dat = dat;
+
+        if (st->nvals <= 2)
+            xb.nbits = 1;
+        else if (st->nvals <= 4)
+            xb.nbits = 2;
+        else if (st->nvals <= 16)
+            xb.nbits = 4;
+
+        // Map e.g. F,I,S,H to integers 0-3.
+        int i, n;
+        for (i = n = 0; i < 256; i++)
+            xb.map[i] = st->freqs[i] > 0 ? n++ : -1;
+        if (n != st->nvals)
+            return NULL;
+        xb.nval = st->nvals;
+
+        return cram_encoder_init(E_XPACK, st, option, (void *)&xb,
+                                 version, vv);
+    }
+
     // cram_stats_encoding assumes integer data, but if option
     // is E_BYTE then tweak the requested encoding.  This ought
     // to be fixed in cram_stats_encoding instead.
@@ -4046,6 +4078,10 @@ int cram_codec_to_id(cram_codec *c, int *id2) {
 
     case E_NULL:
         bnum1 = -2;
+        break;
+
+    case E_XPACK:
+        bnum1 = cram_codec_to_id(c->u.xpack.sub_codec, NULL);
         break;
 
     default:

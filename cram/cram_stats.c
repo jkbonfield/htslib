@@ -49,6 +49,8 @@ cram_stats *cram_stats_create(void) {
     return calloc(1, sizeof(cram_stats));
 }
 
+// TODO: stats_add should track runs so we can determine when to enable the
+// XRLE encoding.
 int cram_stats_add(cram_stats *st, int64_t val) {
     st->nsamp++;
 
@@ -131,7 +133,8 @@ void cram_stats_dump(cram_stats *st) {
  *
  * Returns the best codec to use.
  */
-enum cram_encoding cram_stats_encoding(cram_fd *fd, cram_stats *st) {
+enum cram_encoding cram_stats_encoding(cram_fd *fd, cram_stats *st,
+				       enum cram_external_type opt) {
     int nvals, i, max_val = 0, min_val = INT_MAX;
     int *vals = NULL, *freqs = NULL, vals_alloc = 0;
     int ntot HTS_UNUSED = 0;

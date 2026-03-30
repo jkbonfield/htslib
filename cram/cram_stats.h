@@ -50,7 +50,8 @@ void cram_stats_free(cram_stats *st);
  *
  * Returns the best codec to use.
  */
-enum cram_encoding cram_stats_encoding(cram_fd *fd, cram_stats *st);
+enum cram_encoding cram_stats_encoding(cram_fd *fd, cram_stats *st,
+				       enum cram_external_type opt);
 
 #ifdef __cplusplus
 }
