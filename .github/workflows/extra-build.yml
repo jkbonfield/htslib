@@ -1,0 +1,50 @@
+name: Additional CI builds
+
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ['x86_64', 'aarch64', 'riscv64', 'powerpc64']
+
+    name: FreeBSD (${{ matrix.arch }})
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: true
+        fetch-depth: 1
+
+    - name: Build and test
+      uses: vmactions/freebsd-vm@v1
+      with:
+        debug-on-error: true
+        vnc-password: test
+        arch: ${{ matrix.arch }}
+        persist-credentials: false
+        usesh: true
+        prepare: |
+          
+        run: |
+          pkg update
+          pkg install -y autoconf automake bash curl bzip2 gmake libdeflate perl5
+          # Useful diagnostics
+          pwd
+          env
+          freebsd-version
+          uname -a
+          sysctl hw.ncpu
+          sysctl hw.physmem
+          sysctl hw.usermem
+          uname -a
+
+          # Configure
+          autoreconf -i
+          ./configure --with-libdeflate --enable-werror --enable-plugins CFLAGS="-g -O3 -fsanitize=address,undefined -DHTS_ALLOW_UNALIGNED=0 -Wno-format-truncation -Wno-format-overflow" CPPFLAGS="-I/usr/local/include" LDFLAGS="-fsanitize=address,undefined -L/usr/local/lib -Wl,-R/usr/local/lib"
+          #./configure
+
+          # Build and test
+          gmake -j5
+          gmake check
