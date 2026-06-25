@@ -280,7 +280,7 @@ Note: some older Alpine versions use libressl-dev rather than openssl-dev.
 OpenSUSE
 --------
 
-sudo zypper install autoconf automake make gcc perl zlib-devel libbz2-devel xz-devel libcurl-devel libopenssl-devel
+sudo zypper install autoconf automake make gcc perl zlib-devel libbz2-devel xz-devel libcurl-devel libopenssl-devel diffutils
 
 Also install libdeflate-devel, available on OpenSUSE Leap 15.4 onwards
 or directly via git releases above.
@@ -326,6 +326,16 @@ the packages installed above are found.  It is also necessary to use "gmake":
 
 ./configure CPPFLAGS='-I/usr/local/include' LDFLAGS='-L/usr/local/lib -Wl,-R/usr/local/lib'
 gmake && gmake check
+
+Arch Linux
+----------
+
+As root install dependencies:
+
+pacman -Syyu --noconfirm
+pacman -Sy --noconfirm base-devel libdeflate
+
+Build as a normal user using ./configure
 
 Windows MSYS2/MINGW64
 ---------------------
