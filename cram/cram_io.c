@@ -3114,10 +3114,12 @@ ref_entry *cram_ref_load(refs_t *r, int id, int is_md5) {
         return NULL;
 
     /* Open file if it's not already the current open reference */
-    if (strcmp(r->fn, e->fn) || r->fp == NULL) {
+    if (!e->fn || strcmp(r->fn, e->fn) || r->fp == NULL) {
         if (r->fp)
             if (bgzf_close(r->fp) != 0)
                 return NULL;
+        if (!e->fn)
+            return NULL;
         r->fn = e->fn;
         if (!(r->fp = bgzf_open_ref(r->fn, "r", is_md5)))
             return NULL;
@@ -3319,7 +3321,7 @@ char *cram_get_ref(cram_fd *fd, int id, hts_pos_t start, hts_pos_t end) {
     }
 
     /* Open file if it's not already the current open reference */
-    if (strcmp(fd->refs->fn, r->fn) || fd->refs->fp == NULL) {
+    if (r->fn && (strcmp(fd->refs->fn, r->fn) || fd->refs->fp == NULL)) {
         if (fd->refs->fp)
             if (bgzf_close(fd->refs->fp) != 0)
                 return NULL;
@@ -3331,7 +3333,8 @@ char *cram_get_ref(cram_fd *fd, int id, hts_pos_t start, hts_pos_t end) {
         }
     }
 
-    if (!(fd->ref = load_ref_portion(fd->refs->fp, r, start, end))) {
+    if (!fd->refs->fp
+        || !(fd->ref = load_ref_portion(fd->refs->fp, r, start, end))) {
         pthread_mutex_unlock(&fd->refs->lock);
         pthread_mutex_unlock(&fd->ref_lock);
         return NULL;
