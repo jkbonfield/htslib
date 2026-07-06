@@ -64,7 +64,7 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
         return;
     }
 
-    samFile *out = sam_open("/dev/null", mode);
+    samFile *out = sam_open("/tmp/_fuzzing.xam", mode);
     if (!out)
         abort();
 
@@ -109,6 +109,16 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
     }
     bam_destroy1(b);
 
+    // Index
+    sam_index_build("/tmp/_fuzzing.xam", 0);
+    htsFile *in2 = sam_open("/tmp/_fuzzing.xam", "rb");
+    if (in2) {
+        hts_idx_t *idx = sam_index_load(in2, "/tmp/_fuzzing.xam");
+        if (idx)
+            hts_idx_destroy(idx);
+        hts_close(in2);
+    }
+
  err:
     sam_hdr_destroy(hdr);
     if (close_abort)
@@ -138,7 +148,7 @@ static void view_vcf(const uint8_t *data, size_t size, char *mode) {
         return;
     }
 
-    vcfFile *out = vcf_open("/dev/null", mode);
+    vcfFile *out = vcf_open("/tmp/_fuzzing.xcf", mode);
     if (!out)
         abort();
 
@@ -161,6 +171,9 @@ static void view_vcf(const uint8_t *data, size_t size, char *mode) {
             break;
     }
     bcf_destroy(rec);
+
+    // Index
+    bcf_index_build("/tmp/_fuzzing.xcf", 0);
 
  err:
     bcf_hdr_destroy(hdr);
