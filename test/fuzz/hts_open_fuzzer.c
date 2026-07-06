@@ -36,6 +36,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include "../../htslib/hts.h"
 #include "../../htslib/sam.h"
 #include "../../htslib/vcf.h"
+#include "../../htslib/tbx.h"
 
 static void hts_close_or_abort(htsFile* file) {
     if (hts_close(file) != 0) {
@@ -83,6 +84,17 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
     }
 #endif
 
+    // Speculative CRAM options
+    hts_set_opt(out, CRAM_OPT_SEQS_PER_SLICE, 10);
+    if (rand()&1)
+        hts_set_opt(out, CRAM_OPT_EMBED_REF, 2);
+    if (rand()&1)
+        hts_set_opt(out, CRAM_OPT_NO_REF, 1);
+    if (rand()&1)
+        hts_set_opt(out, CRAM_OPT_MULTI_SEQ_PER_SLICE, 1);
+    if (rand()&1)
+        hts_set_opt(out, CRAM_OPT_LOSSY_NAMES, 1);
+
     sam_hdr_t *hdr = sam_hdr_read(in);
     if (hdr == NULL) {
         if (close_abort)
@@ -110,21 +122,31 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
     bam_destroy1(b);
 
     // Index
-    sam_index_build("/tmp/_fuzzing.xam", 0);
-    htsFile *in2 = sam_open("/tmp/_fuzzing.xam", "rb");
-    if (in2) {
-        hts_idx_t *idx = sam_index_load(in2, "/tmp/_fuzzing.xam");
-        if (idx)
-            hts_idx_destroy(idx);
-        hts_close(in2);
-    }
-
- err:
-    sam_hdr_destroy(hdr);
     if (close_abort)
         hts_close_or_abort(out);
     else
         hts_close(out);
+    out = NULL;
+
+    printf("Mode %s\n", mode);
+    if (sam_index_build("/tmp/_fuzzing.xam", 0)) {
+//        htsFile *in2 = sam_open("/tmp/_fuzzing.xam", "rb");
+//        if (in2) {
+//            hts_idx_t *idx = sam_index_load(in2, "/tmp/_fuzzing.xam");
+//            if (idx)
+//                hts_idx_destroy(idx);
+//            hts_close(in2);
+//        }
+    }
+
+ err:
+    sam_hdr_destroy(hdr);
+    if (out) {
+        if (close_abort)
+            hts_close_or_abort(out);
+        else
+            hts_close(out);
+    }
     hts_close(in);
 }
 
@@ -173,11 +195,25 @@ static void view_vcf(const uint8_t *data, size_t size, char *mode) {
     bcf_destroy(rec);
 
     // Index
-    bcf_index_build("/tmp/_fuzzing.xcf", 0);
+    hts_close_or_abort(out);
+    out = NULL;
+    bcf_index_build("/tmp/_fuzzing.xcf", 14);
+
+    // Speculatively load
+    printf("Mode %s, csi\n", mode);
+    hts_idx_t *hidx = bcf_index_load("/tmp/_fuzzing.xcf");
+    if (hidx)
+        hts_idx_destroy(hidx);
+
+    printf("Mode %s, tdx\n", mode);
+    tbx_t *tidx = tbx_index_load("/tmp/_fuzzing.xcf");
+    if (tidx)
+        tbx_destroy(tidx);
 
  err:
     bcf_hdr_destroy(hdr);
-    hts_close_or_abort(out);
+    if (out)
+        hts_close_or_abort(out);
     hts_close(in);
 }
 
@@ -211,12 +247,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     // (Although we could just ignore ftype and do all 5 for all inputs)
     switch (ftype) {
         case sequence_data:
-            view_sam(data, size, "w",  1); // SAM
+            view_sam(data, size, "wz", 1); // SAM.gz
             view_sam(data, size, "wb", 1); // BAM
             view_sam(data, size, "wc", 0); // CRAM
             break;
         case variant_data:
-            view_vcf(data, size, "w");     // VCF
+            view_vcf(data, size, "wz");    // VCF.gz
             view_vcf(data, size, "wb");    // BCF
             break;
         default:
