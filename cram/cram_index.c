@@ -302,6 +302,10 @@ int cram_index_load(cram_fd *fd, const char *fn, const char *fn_idx) {
                        fd->index_sz * sizeof(*fd->index) - index_end);
             }
             idx = &fd->index[e.refid+1];
+            if (idx->e) {
+                hts_log_error("Index is not sorted");
+                goto fail;
+            }
             idx->refid = e.refid;
             idx->start = INT_MIN;
             idx->end   = INT_MAX;
