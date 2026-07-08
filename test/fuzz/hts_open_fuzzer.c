@@ -31,6 +31,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "../../htslib/hfile.h"
 #include "../../htslib/hts.h"
@@ -45,7 +46,7 @@ static void hts_close_or_abort(htsFile* file) {
 }
 
 static void view_sam(const uint8_t *data, size_t size, char *mode,
-                     int close_abort) {
+                     int close_abort, int param) {
     uint8_t *copy = malloc(size);
     if (copy == NULL) {
         abort();
@@ -65,7 +66,10 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
         return;
     }
 
-    samFile *out = sam_open("/tmp/_fuzzing.xam", mode);
+    char fn[1024];
+    sprintf(fn, "_fuzzing_%lu.xam", (unsigned long)pthread_self());
+
+    samFile *out = sam_open(fn, mode);
     if (!out)
         abort();
 
@@ -84,15 +88,21 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
     }
 #endif
 
-    // Speculative CRAM options
-    hts_set_opt(out, CRAM_OPT_SEQS_PER_SLICE, 10);
-    if (rand()&1)
+    // Speculative CRAM options in param
+    //
+    // Bits 0-2  seq_per_slice+1
+    // Bit  3    embed_ref=2
+    // Bit  4    no_ref
+    // Bit  5    multi_seq
+    // Bit  6    lossy_names
+    hts_set_opt(out, CRAM_OPT_SEQS_PER_SLICE, 1+(param&7));
+    if (param&(1<<3))
         hts_set_opt(out, CRAM_OPT_EMBED_REF, 2);
-    if (rand()&1)
+    if (param&(1<<4))
         hts_set_opt(out, CRAM_OPT_NO_REF, 1);
-    if (rand()&1)
+    if (param&(1<<5))
         hts_set_opt(out, CRAM_OPT_MULTI_SEQ_PER_SLICE, 1);
-    if (rand()&1)
+    if (param&(1<<6))
         hts_set_opt(out, CRAM_OPT_LOSSY_NAMES, 1);
 
     sam_hdr_t *hdr = sam_hdr_read(in);
@@ -128,15 +138,14 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
         hts_close(out);
     out = NULL;
 
-    printf("Mode %s\n", mode);
-    if (sam_index_build("/tmp/_fuzzing.xam", 0)) {
-//        htsFile *in2 = sam_open("/tmp/_fuzzing.xam", "rb");
-//        if (in2) {
-//            hts_idx_t *idx = sam_index_load(in2, "/tmp/_fuzzing.xam");
-//            if (idx)
-//                hts_idx_destroy(idx);
-//            hts_close(in2);
-//        }
+    if (sam_index_build(fn, 0)) {
+        htsFile *in2 = sam_open(fn, "rb");
+        if (in2) {
+            hts_idx_t *idx = sam_index_load(in2, fn);
+            if (idx)
+                hts_idx_destroy(idx);
+            hts_close(in2);
+        }
     }
 
  err:
@@ -150,7 +159,7 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
     hts_close(in);
 }
 
-static void view_vcf(const uint8_t *data, size_t size, char *mode) {
+static void view_vcf(const uint8_t *data, size_t size, char *mode, int param) {
     uint8_t *copy = malloc(size);
     if (copy == NULL) {
         abort();
@@ -170,7 +179,9 @@ static void view_vcf(const uint8_t *data, size_t size, char *mode) {
         return;
     }
 
-    vcfFile *out = vcf_open("/tmp/_fuzzing.xcf", mode);
+    char fn[1024];
+    sprintf(fn, "_fuzzing_%lu.xcf", (unsigned long)pthread_self());
+    vcfFile *out = vcf_open(fn, mode);
     if (!out)
         abort();
 
@@ -197,16 +208,16 @@ static void view_vcf(const uint8_t *data, size_t size, char *mode) {
     // Index
     hts_close_or_abort(out);
     out = NULL;
-    bcf_index_build("/tmp/_fuzzing.xcf", 14);
+    bcf_index_build(fn, 14);
 
     // Speculatively load
     printf("Mode %s, csi\n", mode);
-    hts_idx_t *hidx = bcf_index_load("/tmp/_fuzzing.xcf");
+    hts_idx_t *hidx = bcf_index_load(fn);
     if (hidx)
         hts_idx_destroy(hidx);
 
     printf("Mode %s, tdx\n", mode);
-    tbx_t *tidx = tbx_index_load("/tmp/_fuzzing.xcf");
+    tbx_t *tidx = tbx_index_load(fn);
     if (tidx)
         tbx_destroy(tidx);
 
@@ -223,6 +234,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     uint8_t *copy = malloc(size);
     if (copy == NULL) {
         abort();
+    }
+    uint8_t param = 0;
+    if (size) {
+        param = *data++;
+        size--;
     }
     memcpy(copy, data, size);
     // hopen does not take ownership of `copy`, but hts_hopen does.
@@ -247,13 +263,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     // (Although we could just ignore ftype and do all 5 for all inputs)
     switch (ftype) {
         case sequence_data:
-            view_sam(data, size, "wz", 1); // SAM.gz
-            view_sam(data, size, "wb", 1); // BAM
-            view_sam(data, size, "wc", 0); // CRAM
+            view_sam(data, size, "wz", 1, param); // SAM.gz
+            view_sam(data, size, "wb", 1, param); // BAM
+            view_sam(data, size, "wc", 0, param); // CRAM
             break;
         case variant_data:
-            view_vcf(data, size, "wz");    // VCF.gz
-            view_vcf(data, size, "wb");    // BCF
+            view_vcf(data, size, "wz", param);    // VCF.gz
+            view_vcf(data, size, "wb", param);    // BCF
             break;
         default:
             break;
