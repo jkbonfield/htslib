@@ -742,7 +742,7 @@ static hts_reglist_t *build_reglist(bcf_sr_regions_t *regions, int nreaders)
     int32_t i;
     for (i = reg->creg; i < reg->nregs; i++) {
         if (reg->regs[i].start > reg->regs[i].end)
-            continue;  // Marked to skip by merge_regions
+            continue;  // Marked to skip by regions_merge
         if (reglist->count > 0 &&
             reglist->intervals[reglist->count - 1].beg > reg->regs[i].start)
             break; // Backwards jump - hopefully shouldn't happen
@@ -912,6 +912,8 @@ static void _set_variant_boundaries(bcf1_t *rec, hts_pos_t *beg, hts_pos_t *end)
 static int forward_check_overlap(region_t *reg, int idx,
                                  hts_pos_t beg, hts_pos_t end)
 {
+    // Check ahead for regions that may overlap beg...end,
+    // also avoiding those marked for skipping by regions_merge()
     do {
         ++idx;
     } while ( idx < reg->nregs
@@ -931,7 +933,7 @@ static int multi_check_overlap(region_t *reg, int reader_idx,
     {
         if ( pos <= reg->regs[midx].end )
             break;
-        do { // Advance, also avoiding regions marked to skip by merge_regions()
+        do { // Advance, also avoiding regions marked to skip by regions_merge()
             ++midx;
         } while (midx < reg->nregs && reg->regs[midx].start > reg->regs[midx].end);
     }
@@ -1473,7 +1475,7 @@ static bcf_sr_regions_t *bcf_sr_regions_alloc(void)
 }
 
 // Add a new region into a list. On input the coordinates are 1-based, inclusive, then stored 0-based,
-// inclusive. Sorting and merging step needed afterwards: qsort(..,cmp_regions) and merge_regions().
+// inclusive. Sorting and merging step needed afterwards: qsort(..,cmp_regions) and regions_merge().
 // Returns 0 on success, -1 on failure
 static int _regions_add(bcf_sr_regions_t *reg, const char *chr, hts_pos_t start, hts_pos_t end)
 {
@@ -1899,7 +1901,7 @@ int bcf_sr_regions_seek(bcf_sr_regions_t *reg, const char *seq)
 static int advance_creg(region_t *reg)
 {
     int i = reg->creg + 1;
-    while ( i<reg->nregs && reg->regs[i].start > reg->regs[i].end ) i++;    // regions with start>end are marked to skip by merge_regions()
+    while ( i<reg->nregs && reg->regs[i].start > reg->regs[i].end ) i++;    // regions with start>end are marked to skip by regions_merge()
     reg->creg = i;
     if ( i>=reg->nregs ) return -1;
     return 0;
