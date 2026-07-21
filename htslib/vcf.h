@@ -1353,7 +1353,7 @@ overlaps more than one region, it will only be returned once.
     hts_itr_t *bcf_itr_regarray(const hts_idx_t *idx, bcf_hdr_t *hdr,
                                 char **regarray, unsigned int regcount);
 
-/// Crate a multi-region iterator from a hts_reglist_t regions list
+/// Create a multi-region iterator from a hts_reglist_t regions list
 /** @param idx       Index
     @param hdr       Header
     @param reglist   Array of regions to iterate over
