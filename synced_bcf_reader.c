@@ -955,10 +955,10 @@ static int multi_check_overlap(region_t *reg, int reader_idx,
 }
 
 /*
- *  _reader_fill_buffer() - buffers all records with the same coordinate
+ *  reader_fill_buffer() - buffers all records with the same coordinate
  *  returns 0 on success, -1 on failure (also sets files->errnum)
  */
-static int _reader_fill_buffer(bcf_srs_t *files, int reader_idx)
+static int reader_fill_buffer(bcf_srs_t *files, int reader_idx)
 {
     // Return if the buffer is full: the coordinate of the last buffered record differs
     bcf_sr_t *reader = &files->readers[reader_idx];
@@ -1156,7 +1156,7 @@ static int next_line(bcf_srs_t *files)
         int i, min_rid = INT32_MAX;
         for (i=0; i<files->nreaders; i++)
         {
-            if (_reader_fill_buffer(files, i) < 0)
+            if (reader_fill_buffer(files, i) < 0)
                 return 0; // Will have set files->errnum
             if ( files->require_index==ALLOW_NO_IDX_ )
             {
