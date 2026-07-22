@@ -941,9 +941,12 @@ static int multi_check_overlap(region_t *reg, int reader_idx,
     if ( midx >= reg->nregs )
         return 0;  // pos is after all regions
 
-    // Skip records starting inside previous region or
-    // ending before the current one starts
-    hts_pos_t prev_end = midx > 0 ? reg->regs[midx - 1].end : -1;
+    // Reject records starting inside previous (non-skipped) region or
+    // ending before the current one starts.
+    int pidx = midx-1;
+    while (pidx >= 0 && reg->regs[pidx].start > reg->regs[pidx].end)
+        pidx--;
+    hts_pos_t prev_end = pidx >= 0 ? reg->regs[pidx].end : -1;
     if ( beg <= prev_end || end < reg->regs[midx].start )
         return 0;
 
