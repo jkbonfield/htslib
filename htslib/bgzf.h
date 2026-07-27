@@ -36,6 +36,7 @@
 
 #include "hts_defs.h"
 #include "bgzf2.h"
+#include "bzst.h"
 
 // Ensure ssize_t exists within this header. All #includes must precede this,
 // and ssize_t must be undefined again at the end of this header.
@@ -69,8 +70,8 @@ struct z_stream_s;
 struct BGZF {
     // Reserved bits should be written as 0; read as "don't care"
     unsigned errcode:16, is_zstd:1, is_write:1, no_eof_block:1, is_be:1;
-    signed compress_level:9;
-    unsigned last_block_eof:1, is_compressed:1, is_gzip:1;
+    signed compress_level:8;
+    unsigned last_block_eof:1, is_compressed:1, is_gzip:1, is_bzst:1;
     int cache_size;
     int block_length, block_clength, block_offset;
     int64_t block_address, uncompressed_address;

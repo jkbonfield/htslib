@@ -191,6 +191,9 @@ int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, hts_pos_t beg, hts_pos_t e
     if (fp->is_zstd)
         return bgzf2_idx_add((bgzf2 *)fp, tid, beg, end);
 
+    if (fp->is_bzst)
+        return bzst_idx_add((bzst *)fp, tid, beg, end);
+
     hts_idx_cache_entry *e;
     mtaux_t *mt = fp->mt;
 
@@ -231,7 +234,7 @@ int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, hts_pos_t beg, hts_pos_t e
 
 static int bgzf_idx_flush(BGZF *fp,
                           size_t block_uncomp_len, size_t block_comp_len) {
-    if (fp->is_zstd)
+    if (fp->is_zstd || fp->is_bzst)
         return 0;
 
     mtaux_t *mt = fp->mt;
@@ -1273,6 +1276,9 @@ ssize_t bgzf_read(BGZF *fp, void *data, size_t length)
     if (fp->is_zstd)
         return bgzf2_read((bgzf2 *)fp, data, length);
 
+    if (fp->is_bzst)
+        return bzst_read((bzst *)fp, data, length);
+
     ssize_t bytes_read = 0;
     uint8_t *output = (uint8_t*)data;
     if (length <= 0) return 0;
@@ -1326,6 +1332,7 @@ ssize_t bgzf_read(BGZF *fp, void *data, size_t length)
 // -1 for EOF, -2 for error, 0-255 for byte.
 int bgzf_peek(BGZF *fp) {
     if (fp->is_zstd) return bgzf2_peek((bgzf2 *)fp);
+    if (fp->is_bzst) return bzst_peek((bzst *)fp);
 
     int available = fp->block_length - fp->block_offset;
     if (available <= 0) {
@@ -1573,6 +1580,7 @@ int bgzf_mt_read_block(BGZF *fp, bgzf_job *j)
 static int bgzf_check_EOF_common(BGZF *fp)
 {
     if (fp->is_zstd) return bgzf2_check_EOF((bgzf2 *)fp);
+    if (fp->is_bzst) return bzst_check_EOF((bzst *)fp);
 
     uint8_t buf[28];
     off_t offset = htell(fp->fp);
@@ -1983,6 +1991,8 @@ int bgzf_flush(BGZF *fp)
 {
     if (fp->is_zstd)
         return bgzf2_flush((bgzf2 *)fp);
+    if (fp->is_bzst)
+        return bzst_flush((bzst *)fp);
 
     if (!fp->is_write) return 0;
 #ifdef BGZF_MT
@@ -2034,6 +2044,8 @@ int bgzf_flush_try(BGZF *fp, ssize_t size)
 {
     if (fp->is_zstd)
         return bgzf2_flush_try((bgzf2 *)fp, size);
+    if (fp->is_bzst)
+        return bzst_flush_try((bzst *)fp, size);
 
     if (fp->block_offset + size > BGZF_BLOCK_SIZE) return lazy_flush(fp);
     return 0;
@@ -2043,6 +2055,8 @@ ssize_t bgzf_write(BGZF *fp, const void *data, size_t length)
 {
     if (fp->is_zstd)
         return bgzf2_write((bgzf2 *)fp, data, length, 0);
+    if (fp->is_bzst)
+        return bzst_write((bzst *)fp, data, length, 0);
 
     if ( !fp->is_compressed ) {
         size_t push = length + (size_t) fp->block_offset;
@@ -2124,6 +2138,8 @@ int bgzf_close(BGZF* fp)
 {
     if (fp->is_zstd)
         return bgzf2_close((bgzf2 *)fp);
+    if (fp->is_bzst)
+        return bzst_close((bzst *)fp);
 
     int ret, block_length;
     if (fp == 0) return -1;
@@ -2178,6 +2194,8 @@ void bgzf_set_cache_size(BGZF *fp, int cache_size)
 int bgzf_check_EOF(BGZF *fp) {
     if (fp->is_zstd)
         return bgzf2_check_EOF((bgzf2 *)fp);
+    if (fp->is_bzst)
+        return bzst_check_EOF((bzst *)fp);
 
     int has_eof;
 
@@ -2368,6 +2386,8 @@ int bgzf_getline(BGZF *fp, int delim, kstring_t *str)
 {
     if (fp->is_zstd)
         return bgzf2_getline((bgzf2 *)fp, delim, str);
+    if (fp->is_bzst)
+        return bzst_getline((bzst *)fp, delim, str);
 
     int l, state = 0;
     str->l = 0;

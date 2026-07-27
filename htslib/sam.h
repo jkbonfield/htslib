@@ -1365,7 +1365,7 @@ hts_itr_t *sam_itr_regarray(const hts_idx_t *idx, sam_hdr_t *hdr, char **regarra
     @return >= 0 on success; -1 when there is no more data; < -1 on error
  */
 static inline int sam_itr_next(htsFile *htsfp, hts_itr_t *itr, bam1_t *r) {
-    if (!htsfp->is_bgzf && !htsfp->is_cram && !htsfp->is_bgzf2) {
+    if (!htsfp->is_bgzf && !htsfp->is_cram && !htsfp->is_bgzf2 && !htsfp->is_bzst) {
         hts_log_error("%s not BGZF compressed", htsfp->fn ? htsfp->fn : "File");
         return -2;
     }
@@ -1377,7 +1377,7 @@ static inline int sam_itr_next(htsFile *htsfp, hts_itr_t *itr, bam1_t *r) {
     if (itr->multi)
         return hts_itr_multi_next(htsfp, itr, r);
     else
-        return hts_itr_next(htsfp->is_bgzf || htsfp->is_bgzf2
+        return hts_itr_next(htsfp->is_bgzf || htsfp->is_bgzf2 || htsfp->is_bzst
                                 ? htsfp->fp.bgzf
                                 : NULL,
                             itr, r, htsfp);
@@ -1398,6 +1398,10 @@ const char *sam_parse_region(sam_hdr_t *h, const char *s, int *tid,
 /// Fake up an hts_idx_t from a bgzf2 index
 HTSLIB_EXPORT
 hts_idx_t *hts_bgzf2_idx_init(void *fp);
+
+/// Fake up an hts_idx_t from a bzst index
+HTSLIB_EXPORT
+hts_idx_t *hts_bzst_idx_init(void *fp);
 
 /// Fake up an hts_idx_t from a cram index
 HTSLIB_EXPORT

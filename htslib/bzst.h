@@ -1,0 +1,324 @@
+/// @file htslib/bzst.h
+/// Low-level routines for direct BZST operations.
+/*
+   Copyright (C) 2023, 2026 Genome Research Ltd
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+   THE SOFTWARE.
+*/
+
+/* BZST is a derivative of BGZF that has a variable block size and uses
+ * more modern compression codecs.
+ */
+
+/*
+ * For now we only support Seekable-Zstd format.  This is compatible with the
+ * same format in the zstd source contrib directory, but with some additional
+ * headers (TODO) in a skippable frame.
+ */
+
+#ifndef HTSLIB_BZST_H
+#define HTSLIB_BZST_H
+
+#include <stdint.h>
+#include <sys/types.h>
+
+#include "hts_defs.h"
+#include "thread_pool.h"
+#include "kstring.h"
+#include "hfile.h"
+#include "hts.h"
+
+// Ensure ssize_t exists within this header. All #includes must precede this,
+// and ssize_t must be undefined again at the end of this header.
+#if defined _MSC_VER && defined _INTPTR_T_DEFINED && !defined _SSIZE_T_DEFINED && !defined ssize_t
+#define HTSLIB_SSIZE_T
+#define ssize_t intptr_t
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct bzst bzst;
+
+#include "hts.h"
+
+#define BZST_SKIPPABLE_ID 0x184D2A5B
+
+// Subdivide the BZST skippable frame sub-types
+typedef enum bzst_frame {
+    // BZST
+	BZST_HEADER        = 0,
+	BZST_BLOCK_HEADER  = 1,  // Preceeds every Zstd data frame
+	BZST_INDEX         = 2,  // uncompressed to compressed offset
+	BZST_DICT          = 3,  // Localised dictionary
+
+    // Genomic coordinate sub-types
+    GZST_HEADER        = 64, // eg SAM header text
+	GZST_BLOCK_META    = 65, // eg CRAM container struct with chr:start-end
+	GZST_FILE_META     = 66, // idxstats equivalent
+	GZST_GENOMIC_INDEX = 67, // mapping chr:pos to uncompressed offset
+
+	// User specific sub-types
+    BZST_USER_START    = 128
+} bzst_frame_t;
+
+#define BZST_DEFAULT_BLOCK_SIZE (1024*1024)
+#define BZST_DEFAULT_LEVEL 7 // on VCF/BCF 5 10 15 all good settings
+#define BZST_MAX_BLOCK_SIZE (1<<30)
+
+/*
+ * Opens a bzst file from an existing hfile for read ("r") or write
+ * ("w", or "w1" to "w19").
+ *
+ * Returns bzst file handle on success,
+ *         or NULL on failure.
+ */
+HTSLIB_EXPORT
+bzst *bzst_hopen(hFILE *hfp, const char *mode);
+
+/*
+ * Opens a bzst file 'fn' for read ("r") or write ("w", or "w1" to "w19").
+ *
+ * Returns bzst file handle on success,
+ *         or NULL on failure.
+ */
+HTSLIB_EXPORT
+bzst *bzst_open(const char *fn, const char *mode);
+
+/*
+ * Closes a bzst file.
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+HTSLIB_EXPORT
+int bzst_close(bzst *fp);
+
+/*
+ * Set the bzst block size.  This can be performed at any point,
+ * but it is usually done immediately after opening for write.
+ *
+ * Returns 0 on success,
+ *        -1 on failure
+ */
+HTSLIB_EXPORT
+int bzst_set_block_size(bzst *fp, size_t sz);
+
+HTSLIB_EXPORT
+void bzst_set_level(bzst *fp, int level);
+
+/*
+ * Writes a block of data to a bzst file handle.
+ *
+ * If "can_split" is set then buf may be split into two indexable chunks.
+ * Otherwise buf will never span two blocks.
+ *
+ * Returns number of bytes written on success
+ *        -1 on failure
+ */
+HTSLIB_EXPORT
+int bzst_write(bzst *fp, const char *buf, size_t buf_sz, int can_split);
+
+/*
+ * Reads a block of data from a bzst file handle.
+ *
+ * Returns number of bytes read on success
+ *        -1 on failure
+ */
+HTSLIB_EXPORT
+int bzst_read(bzst *fp, char *buf, size_t buf_sz);
+
+/*
+ * Reads a data from a bzst file handle.  This modifies *buf to
+ * point to a block of internal data and returns the size of this data.
+ * In will be between 1 and buf_sz bytes long.  This data should not be
+ * modified.
+ *
+ * Returns number of bytes read on success
+ *        -1 on failure
+ */
+HTSLIB_EXPORT
+int bzst_read_zero_copy(bzst *fp, const char **buf, size_t buf_sz);
+
+/*
+ * Flush the bzst stream and ensure we start a new block.
+ *
+ * Returns 0 on success,
+ *        -1 on failure
+ */
+HTSLIB_EXPORT
+int bzst_flush(bzst *fp);
+
+/*
+ * Tests whether a write of 'size' would spill over to the next block. If so
+ * flush this current one, so we always end blocks on a whole record.
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+HTSLIB_EXPORT
+int bzst_flush_try(bzst *fp, ssize_t size);
+
+/*
+ * Finds the uncompressed file offset associated with a specific range.
+ * This offset is only suitable for passing into bzst_seek.
+ *
+ * Note will not likely be the exact location the first record covers this
+ * region, but it will be prior to it.  The caller is expected to them
+ * discard data out of range.
+ *
+ * TODO: or should we cache beg/end here and do the discard ourselves?
+ * That's how CRAM's API works, and it may be more amenable to a
+ * "bzst_query_many" func that can operate on multiple regions in a
+ * threaded read-away way.
+ *
+ * If tid is outside of the bounds of the index, this is an error.
+ * If tid is in the index but has no coverage, or we are beyond the end of
+ * this reference, then we return the fp offset for the next tid.  This
+ * then makes the calling loop immediately hit EOF on range checking.
+ *
+ * Returns seekable offset on success,
+ *        -1 on error,
+ *        -2 on non-seekable stream,
+ *        -3 if no index found.
+ */
+HTSLIB_EXPORT
+int64_t bzst_query(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end);
+
+/*
+ * Seeks to uncompressed position upos in a bgzf file opened for read.
+ *
+ * Returns 0 on success,
+ *        -1 on failure
+ *
+ * TODO: consider "whence" and returning off_t, like lseek?
+ */
+HTSLIB_EXPORT
+int bzst_seek(bzst *fp, uint64_t upos);
+
+/*
+ * Check for known EOF by detection of seekable index footer.
+ *
+ * Returns 0 if marker is absent,
+ *         1 if present,
+ *         2 if unable to check (eg cannot seek),
+ *        -1 for I/O error, with errno set.
+ */
+HTSLIB_EXPORT
+int bzst_check_EOF(bzst *fp);
+
+/**
+ * Enable multi-threading via a shared thread pool.  This means
+ * both encoder and decoder can balance usage across a single pool
+ * of worker jobs.
+ *
+ * @param fp          BGZF file handler
+ * @param pool        The thread pool (see hts_create_threads)
+ * @param qsize       Size of job queue, 0 for auto
+ */
+HTSLIB_EXPORT
+int bzst_thread_pool(bzst *fp, hts_tpool *pool, int qsize);
+
+/**
+ * Read one line from a BGZF file. It is faster than bgzf_getc()
+ *
+ * @param fp     BGZF file handler
+ * @param delim  delimiter
+ * @param str    string to write to; must be initialized
+ * @return       length of the string (capped at INT_MAX);
+ *               -1 on end-of-file; <= -2 on error
+ */
+HTSLIB_EXPORT
+int bzst_getline(bzst *fp, int delim, kstring_t *str);
+
+/**
+ * Returns the next byte in the file without consuming it.
+ * @param fp     BGZF file handler
+ * @return       -1 on EOF,
+ *               -2 on error,
+ *               otherwise the unsigned byte value.
+ */
+HTSLIB_EXPORT
+int bzst_peek(bzst *fp);
+
+/*
+ * Adds a record to the index.
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+HTSLIB_EXPORT
+int bzst_idx_add(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end);
+
+/*
+ * Returns the internal temporary kstring associated with this bzst fd.
+ */
+HTSLIB_EXPORT
+kstring_t *bzst_ks(bzst *fp);
+
+/*
+ * Query a BZST genomic index on region
+ *
+ * Returns hts_itr_t struct ptr on success,
+ *         NULL on failure
+ */
+HTSLIB_EXPORT
+hts_itr_t *bzst_itr_query(const hts_idx_t *idx,
+			   int tid,
+			   hts_pos_t beg,
+			   hts_pos_t end,
+			   hts_readrec_func *readrec);
+
+/*
+ * Fetch the global file metadata from an indexed BZST file.
+ *
+ * Returns 0 on success and fills out ks,
+ *        <0 on failure
+ */
+HTSLIB_EXPORT
+int bzst_idx_metadata(const hts_idx_t *idx, kstring_t *ks);
+
+/*
+ * Returns the next item from a bzst iterator.
+ * Returns 0 if found,
+ *        -1 at EOF,
+ *      <=-2 for error.
+ */
+HTSLIB_EXPORT
+int bzst_itr_next(bzst *fp, hts_itr_t *iter, void *r, void *data);
+
+HTSLIB_EXPORT
+void bzst_add_flush_callback(bzst *fp, void *flush_data,
+                              int (*flush_callback)(kstring_t *ks,
+													void *data,
+													int final));
+
+HTSLIB_EXPORT
+void *bzst_flush_data(bzst *fp);
+
+#ifdef __cplusplus
+}
+#endif
+
+#ifdef HTSLIB_SSIZE_T
+#undef HTSLIB_SSIZE_T
+#undef ssize_t
+#endif
+
+#endif /* HTSLIB_BZST_H */
