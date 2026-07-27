@@ -226,7 +226,7 @@ enum htsExactFormat {
 
 enum htsCompression {
     no_compression, gzip, bgzf, custom, bzip2_compression, razf_compression,
-    xz_compression, zstd_compression, bgzf2_compression,
+    xz_compression, zstd_compression, bgzf2_compression, bzst_compression,
     compression_maximum = 32767
 };
 
@@ -243,6 +243,7 @@ struct hts_idx_t;
 typedef struct hts_idx_t hts_idx_t;
 struct hts_filter_t;
 typedef struct bgzf2 bgzf2;
+typedef struct bzst bzst;
 
 /**
  * @brief File handle returned by hts_open() etc.
@@ -262,7 +263,7 @@ typedef struct bgzf2 bgzf2;
 //    nor even whether it is compressed at all (eg on naked BAMs).
 typedef struct htsFile {
     uint32_t is_bin:1, is_write:1, is_be:1, is_cram:1, is_bgzf:1, is_bgzf2:1,
-        dummy:26;
+        is_bzst, dummy:25;
     int64_t lineno;
     kstring_t line;
     char *fn, *fn_aux;
@@ -271,6 +272,7 @@ typedef struct htsFile {
         struct cram_fd *cram;
         struct hFILE *hfile;
         bgzf2 *bgzf2;
+        bzst  *bzst;
     } fp;
     void *state;  // format specific state information
     htsFormat format;
@@ -812,6 +814,7 @@ When REST or NONE is used, idx is also ignored and may be NULL.
 #define HTS_FMT_CRAI  3
 #define HTS_FMT_FAI   4
 #define HTS_FMT_BGZF2 5
+#define HTS_FMT_BZST  6
 
 typedef struct hts_pair_pos_t {
    hts_pos_t beg, end;
@@ -881,7 +884,7 @@ typedef int64_t hts_tell_func(void *fp);
 
 typedef struct hts_itr_t {
     uint32_t read_rest:1, finished:1, is_cram:1, nocoor:1, multi:1,
-             is_bgzf2, dummy:26;
+             is_bgzf2, is_bzst, dummy:25;
     int tid, n_off, i, n_reg;
     hts_pos_t beg, end;
     hts_reglist_t *reg_list;

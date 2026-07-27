@@ -652,6 +652,13 @@ int hts_detect_format2(hFILE *hfile, const char *fname, htsFormat *fmt)
         if (len > 1024-14) len = 1024-14;
         memmove(s, s+14, len);
         fmt->compression = bgzf2_compression;
+    } else if (len >= 14 &&
+             memcmp(s, "\x5b\x2a\x4d\x18", 4) == 0 &&
+             memcmp(s+10, "BZST", 4) == 0) {
+        len = le_to_u32(s+4);
+        if (len > 1024-14) len = 1024-14;
+        memmove(s, s+14, len);
+        fmt->compression = bzst_compression;
     } else if (len >= 4 &&
              (memcmp(s, "\x28\xb5\x2f\xfd", 4) == 0 ||
               (memcmp(s+1, "\x2a\x4d\x18", 3) == 0 &&
@@ -873,6 +880,7 @@ char *hts_format_description(const htsFormat *format)
     case xz_compression:     kputs(" XZ-compressed", &str); break;
     case zstd_compression:   kputs(" Zstandard-compressed", &str); break;
     case bgzf2_compression:  kputs(" BGZF2-compressed", &str); break;
+    case bzst_compression:   kputs(" BZST-compressed", &str); break;
     case custom: kputs(" compressed", &str); break;
     case gzip:   kputs(" gzip-compressed", &str); break;
 
@@ -1609,6 +1617,7 @@ htsFile *hts_hopen(hFILE *hfile, const char *fn, const char *mode)
 
         if (strchr(simple_mode, 'z')) fmt->compression = bgzf;
         else if (strchr(simple_mode, 'Z')) fmt->compression = bgzf2_compression;
+        else if (strchr(simple_mode, 'B')) fmt->compression = bzst_compression;
         else if (strchr(simple_mode, 'g')) fmt->compression = gzip;
         else if (strchr(simple_mode, 'u')) fmt->compression = no_compression;
         else {
@@ -1639,6 +1648,9 @@ htsFile *hts_hopen(hFILE *hfile, const char *fn, const char *mode)
         if (fp->format.compression == bgzf2_compression) {
             fp->fp.bgzf2 = bgzf2_hopen(hfile, simple_mode);
             fp->is_bin = fp->is_bgzf2 = 1;
+        } else if (fp->format.compression == bzst_compression) {
+            fp->fp.bzst = bzst_hopen(hfile, simple_mode);
+            fp->is_bin = fp->is_bzst = 1;
         } else {
             fp->fp.bgzf = bgzf_hopen(hfile, simple_mode);
             fp->is_bin = fp->is_bgzf = 1;
@@ -1666,6 +1678,8 @@ htsFile *hts_hopen(hFILE *hfile, const char *fn, const char *mode)
         if (fp->format.compression != no_compression) {
             if (fp->format.compression == bgzf2_compression) {
                 fp->fp.bgzf2 = bgzf2_hopen(hfile, simple_mode);
+            } else if (fp->format.compression == bzst_compression) {
+                fp->fp.bzst = bzst_hopen(hfile, simple_mode);
             } else {
                 fp->fp.bgzf = bgzf_hopen(hfile, simple_mode);
             }
@@ -1893,6 +1907,11 @@ int hts_set_opt(htsFile *fp, enum hts_fmt_option opt, ...) {
             int blk_size = va_arg(args, int);
             va_end(args);
             return bgzf2_set_block_size(fp->fp.bgzf2, blk_size);
+        } else if (fp->format.compression == bzst_compression) {
+            va_start(args, opt);
+            int blk_size = va_arg(args, int);
+            va_end(args);
+            return bzst_set_block_size(fp->fp.bzst, blk_size);
         } else {
             // To do - implement for vcf/bcf.
             hts_log_warning("Cannot change block size for this format");
@@ -1951,9 +1970,11 @@ int hts_set_opt(htsFile *fp, enum hts_fmt_option opt, ...) {
         va_start(args, opt);
         int level = va_arg(args, int);
         va_end(args);
-        if (fp->is_bgzf || fp->is_bgzf2) {
+        if (fp->is_bgzf || fp->is_bgzf2 || fp->is_bzst) {
             if (fp->format.compression == bgzf2_compression)
                 bgzf2_set_level(fp->fp.bgzf2, level);
+            else if (fp->format.compression == bzst_compression)
+                bzst_set_level(fp->fp.bzst, level);
             else
                 fp->fp.bgzf->compress_level = level;
         } else if (fp->format.format == cram)
@@ -2027,6 +2048,8 @@ int hts_set_thread_pool(htsFile *fp, htsThreadPool *p) {
         return hts_set_opt(fp, CRAM_OPT_THREAD_POOL, p);
     } else if (fp->format.compression == bgzf2_compression) {
         return bgzf2_thread_pool(fp->fp.bgzf2, p->pool, p->qsize);
+    } else if (fp->format.compression == bzst_compression) {
+        return bzst_thread_pool(fp->fp.bzst, p->pool, p->qsize);
     }
     else return 0;
 }
@@ -2145,6 +2168,10 @@ int hts_getline(htsFile *fp, int delimiter, kstring_t *str)
 
     case bgzf2_compression:
         ret = bgzf2_getline(fp->fp.bgzf2, '\n', str);
+        break;
+
+    case bzst_compression:
+        ret = bzst_getline(fp->fp.bzst, '\n', str);
         break;
 
     default:
@@ -2362,11 +2389,12 @@ struct hts_idx_t {
 
 static char * idx_format_name(int fmt) {
     switch (fmt) {
-        case HTS_FMT_CSI: return "csi";
-        case HTS_FMT_BAI: return "bai";
-        case HTS_FMT_TBI: return "tbi";
-        case HTS_FMT_CRAI: return "crai";
+        case HTS_FMT_CSI:   return "csi";
+        case HTS_FMT_BAI:   return "bai";
+        case HTS_FMT_TBI:   return "tbi";
+        case HTS_FMT_CRAI:  return "crai";
         case HTS_FMT_BGZF2: return "bgzf2";
+        case HTS_FMT_BZST:  return "bzst";
         default: return "unknown";
     }
 }
@@ -2799,6 +2827,12 @@ void hts_idx_destroy(hts_idx_t *idx)
         return;
     }
 
+    if (idx->fmt == HTS_FMT_BZST) {
+        // main index closed when the bzst fp is closed
+        free(idx);
+        return;
+    }
+
     for (i = 0; i < idx->m; ++i) {
         bidx_t *bidx = idx->bidx[i];
         free(idx->lidx[i].offset);
@@ -3216,7 +3250,6 @@ int hts_idx_nseq(const hts_idx_t *idx) {
 int hts_idx_get_stat(const hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* unmapped)
 {
     if (!idx) return -1;
-    // TODO: BGZF2
     if ( idx->fmt == HTS_FMT_CRAI ) {
         *mapped = 0; *unmapped = 0;
         return -1;
@@ -3232,7 +3265,7 @@ int hts_idx_get_stat(const hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* 
 
             int ntid = 0;
             char *cp, *cp_end = ks.s + ks.l, *nl;
-            for (cp = ks.s; *cp; *cp++)
+            for (cp = ks.s; *cp; cp++)
                 if (*cp == '\n')
                     ntid++;
             b2idx->ntid = ++ntid;
@@ -3254,7 +3287,57 @@ int hts_idx_get_stat(const hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* 
                 if ((val = strstr(cp, "NUNMAPPED=")))
                     b2idx->nunmapped[ntid] = strtoul(val + 10, NULL, 0);
                 else
-                    b2idx->nunmapped[ntid];
+                    b2idx->nunmapped[ntid] = 0;
+
+                ntid++;
+                cp = nl ? nl+1 : cp_end;
+                nl = strchr(cp, '\n');
+            }
+            ks_free(&ks);
+        }
+
+        if (tid+2 >= 0 && tid+2 < b2idx->ntid) {
+            *mapped = b2idx->nmapped[tid+2];
+            *unmapped = b2idx->nunmapped[tid+2];
+        } else {
+            *mapped = *unmapped = 0;
+        }
+        return 0;
+    }
+
+    if (idx->fmt == HTS_FMT_BZST) {
+        hts_bzst_idx_t *b2idx = (hts_bzst_idx_t *)idx;
+        if (!b2idx->nmapped) {
+            // Parse the whole file meta-data
+            kstring_t ks = KS_INITIALIZE;
+            if (bzst_idx_metadata(idx, &ks) < 0)
+                return -1;
+
+            int ntid = 0;
+            char *cp, *cp_end = ks.s + ks.l, *nl;
+            for (cp = ks.s; *cp; cp++)
+                if (*cp == '\n')
+                    ntid++;
+            b2idx->ntid = ++ntid;
+            b2idx->nmapped = calloc(ntid, sizeof(*b2idx->nmapped));
+            b2idx->nunmapped = calloc(ntid, sizeof(*b2idx->nunmapped));
+            if (!b2idx->nmapped || !b2idx->nunmapped)
+                return -1;
+
+            ntid = 0;
+            nl = strchr(cp = ks.s, '\n');
+            while (cp < cp_end) {
+                if (nl)
+                    *nl = 0;
+                char *val;
+                if ((val = strstr(cp, "NMAPPED=")))
+                    b2idx->nmapped[ntid] = strtoul(val + 8, NULL, 0);
+                else
+                    b2idx->nmapped[ntid] = 0;
+                if ((val = strstr(cp, "NUNMAPPED=")))
+                    b2idx->nunmapped[ntid] = strtoul(val + 10, NULL, 0);
+                else
+                    b2idx->nunmapped[ntid] = 0;
 
                 ntid++;
                 cp = nl ? nl+1 : cp_end;
@@ -3287,11 +3370,23 @@ int hts_idx_get_stat(const hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* 
 
 uint64_t hts_idx_get_n_no_coor(const hts_idx_t* idx)
 {
-    // TODO: BGZF2
     if (idx->fmt == HTS_FMT_CRAI) return 0;
     if (idx->fmt == HTS_FMT_BGZF2) {
         kstring_t ks = KS_INITIALIZE;
         if (bgzf2_idx_metadata(idx, &ks) < 0)
+            return -1;
+        uint64_t u;
+        char *cp;
+        if ((cp = strstr(ks.s, "NUNMAPPED=")))
+            u = strtoul(ks.s + 10, NULL, 0);
+        else
+            u = 0;
+        ks_free(&ks);
+        return u;
+    }
+    if (idx->fmt == HTS_FMT_BZST) {
+        kstring_t ks = KS_INITIALIZE;
+        if (bzst_idx_metadata(idx, &ks) < 0)
             return -1;
         uint64_t u;
         char *cp;
@@ -4434,12 +4529,12 @@ hts_itr_t *hts_itr_regions(const hts_idx_t *idx, hts_reglist_t *reglist, int cou
     return itr;
 }
 
-// sam.c
-int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data);
 int hts_itr_next(BGZF *fp, hts_itr_t *iter, void *r, void *data)
 {
     if (fp && fp->is_zstd)
         return bgzf2_itr_next((bgzf2 *)fp, iter, r, data);
+    if (fp && fp->is_bzst)
+        return bzst_itr_next((bzst *)fp, iter, r, data);
 
     int ret, tid;
     hts_pos_t beg, end;

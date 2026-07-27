@@ -48,6 +48,7 @@ struct hts_json_token {
 
 struct cram_fd;
 struct bgzf2;
+struct bzst;
 
 /*
  * Adjust CSI index parameters to support max_len_in bases
@@ -112,6 +113,17 @@ typedef struct hts_bgzf2_idx_t {
     uint64_t *nmapped;
     uint64_t *nunmapped;
 } hts_bgzf2_idx_t;
+
+// Similarly for BZST.
+// Consider making these a generic redirect of fmt, itr_query func pointer
+// and void *fp.
+typedef struct hts_bzst_idx_t {
+    int fmt;
+    struct bzst *fp;
+    int ntid; // 0=total, 1=unmapped (ref "*"), >=2 = per chromosome
+    uint64_t *nmapped;
+    uint64_t *nunmapped;
+} hts_bzst_idx_t;
 
 // Determine whether the string's contents appear to be UTF-16-encoded text.
 // Returns 1 if they are, 2 if there is also a BOM, or 0 otherwise.

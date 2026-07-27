@@ -2,7 +2,7 @@
 
 /* The MIT License
 
-   Copyright (C) 2023 Genome Research Ltd
+   Copyright (C) 2023, 2026 Genome Research Ltd
 
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
@@ -24,42 +24,37 @@
 */
 
 /*
-BGZF2 is a Zstd compatible data file with random access support and
+BZST is a Zstd compatible data file with random access support and
 designed for parallel encoding and decoding.
 
-Broadly speaking, it does this by combining zstd seekable format
+It is a derivation of the earlier BGZF2 draft format.
+
+It is inspired from a union of the zstd seekable format
 (https://github.com/facebook/zstd/tree/dev/contrib/seekable_format)
-with pzstd (https://github.com/facebook/zstd/tree/dev/contrib/pzstd).
+and pzstd (https://github.com/facebook/zstd/tree/dev/contrib/pzstd),
+although is not directly compatible with either.
+
+See https://github.com/tfenne/bzst/tree/main/spec for the draft specification.
+
 
 A Zstd file is a series of frames. Zstd has the notion of data frames
 holding compressed data, and skippable frames holding meta-data that
-isn't part of the uncompressed output stream.  Both seekable and pzstd
-have their own skippable frames.
+isn't part of the uncompressed output stream.
 
-Zstd format has no indication of the compressed size of a frame, so
-it's hard to get this when reading a file.  Pzstd uses a skippable
-frame to hold the compressed size of the next data frame, thus
-permitting quick read-and-dispatch style decoding.  We copy this idea
-and store the size in a BGZF2 meta-data frame.  This frame also contains
-arbitrary per-block key=value pairs.  We also have an additional meta-data
-frame at the end of the file.
-
-Seekable-zstd uses a skippable frame at the end of the file holding
-the compressed and uncompressed sizes of every frame.  This permits
-random access via a trivial binary search.  If we aren't streaming,
-this would also be enough to permit parallel decoding, but we cannot
-guarantee it.  Our seekable zstd index also includes our pzstd
-skippable frames, but these are all listed with an uncompressed size
-of zero.  They are required however to get the cumulative compressed
-offsets correct.
-
-Note the random access here is purely via uncompressed byte offsets.
-The data format is agnostic to any content.  If we wish to store
-genomic data sorted by chromosome and position, and to query by
-genomic region, then we need an additional index (eg CSI or CRAI).
-This genomic index maps chr/pos to uncompressed offsets, so combined with
-the seekable index can be used to perform region queries.  This is held
-in a BGZF2 index skippable frame.
+In BZST
+- Each zstd data frame has no back-rerefences to earlier frames and
+  can be decoded in isolation.
+- Each zstd data frame is immediately preceeded by a block header
+  frame (skippable) which holds the size of the adjacent data frame.
+  (This is equivalent to pzstd.)
+- The file starts with a BZST header frame.
+- The file ends with a BZST index frame, which also serves as an EOF
+  marker. (This is equivalent to seekable format.)
+- Additional format specific skippable frames can occur, either
+  prior to the block header frames (eg localised meta-data), or just
+  prior to the index frame (meta-data or a second level genomic index
+  frame).  This additional layer is built on top of BZST as is its own
+  layered format.
 
 TODO: consider also bringing in https://github.com/facebook/zstd/pull/2349
 for in-stream dictionaries.  Ideally we'd want multiple dictionaries
@@ -69,9 +64,9 @@ Combining with parallel decoding this means holding multiple
 dictionaries in memory and purging once we know all new blocks relate
 to a newer dictionary.  It also means having a random access
 capability, so we need to know in the seekable format which entries
-are dictionaries.  Eg dsize == 0 and csize != 12
-
-TODO: Add XXH64 checksums, especially to our own skippable frame formats.
+are dictionaries.  Eg dsize == 0 and csize != 12, or a separate index
+holding the location of dictionary frames so we can use the most
+recent one during decode.
 */
 
 /*
@@ -83,7 +78,7 @@ Known skippable frame IDs:
 0x184D2A55   zpkglist - LZ4
 0x184D2A56   zpkglist - LZ4
 0x184D2A57   zpkglist - LZ4
-0x184D2A5B   BGZF2 (subdivided into BGZF2 frame types)
+0x184D2A5B   BZTD (subdivided into BZST frame types)    <----- us
 0x184D2A5D   warc-zstd / dict-in-stream
 0x184D2A5E   seekable
 */
@@ -106,10 +101,10 @@ Known skippable frame IDs:
 #include "htslib/hfile.h"
 #include "htslib/hts_endian.h"
 #include "htslib/thread_pool.h"
-#include "htslib/bgzf2.h"
+#include "htslib/bzst.h"
 #include "htslib/kstring.h"
 #include "cram/pooled_alloc.h"
-#include "hts_internal.h" // for hts_bgzf2_idx_t
+#include "hts_internal.h" // for hts_bzst_idx_t
 
 #ifndef MIN
 #  define MIN(a,b) ((a)<(b)?(a):(b))
@@ -124,15 +119,12 @@ Known skippable frame IDs:
 // #define pthread_mutex_unlock(x) {fprintf(stderr, "%d: %s:%d unlock %p\n", (int)gettid(), __FILE__, __LINE__, x); pthread_mutex_unlock(x);}
 // #define pthread_cond_wait(c,m) do {fprintf(stderr, "%d: %s:%d wait %p\n", (int)gettid(), __FILE__, __LINE__, m); pthread_cond_wait(c,m);} while(0)
 
-
-// INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
-// a blank one here)
 typedef struct {
     off_t pos;      // cumulative uncompressed position prior to this
+    off_t cpos;     // cumulative compression poisition in file
     ssize_t uncomp; // uncompressed size of this block
     ssize_t comp;   // compressed size of this block
-    off_t cpos;     // cumulative compression poisition in file
-} bgzf2_index_t;
+} bzst_index_t;
 
 // Genomic index.  We maintain one of these per chromosome, indexed by
 // the internal "tid" number.
@@ -156,33 +148,33 @@ typedef struct {
 //    // chromosome, not per frame, for idxstats meta-data.
 //    size_t nmapped;      // number of mapped items in this frame/chr
 //    size_t nunmapped;    // number of unmapped items in this frame/chr
-} bgzf2_gindex_t;
+} bzst_gindex_t;
 
 // Note this is just a kstring with a linked list.
 // We could perhaps embed the link into the ks->s pointer, so empty ones
 // are linked together via their data itself.
-typedef struct bgzf2_buffer {
+typedef struct bzst_buffer {
     ssize_t alloc, sz, pos; // allocated, desired size, and curr pos.
     char *buf;
-    struct bgzf2_buffer *next;
+    struct bzst_buffer *next;
     kstring_t meta;
-} bgzf2_buffer;
+} bzst_buffer;
 
 /*
  * Work-load for single compression or decompression job.
  */
-typedef struct bgzf2_job {
-    bgzf2 *fp;
-    bgzf2_buffer *uncomp;
-    bgzf2_buffer *comp;
-    int errcode; // +ve is errno, -ve is bgzf2 specific  (TODO)
+typedef struct bzst_job {
+    bzst *fp;
+    bzst_buffer *uncomp;
+    bzst_buffer *comp;
+    int errcode; // +ve is errno, -ve is bzst specific  (TODO)
     int hit_eof; // view from main or view from thread?
     int job_num;
     int known_size;
-    struct bgzf2_job *next;
-} bgzf2_job;
+    struct bzst_job *next;
+} bzst_job;
 
-// Message command types for communicating with bgzf2_mt_reader
+// Message command types for communicating with bzst_mt_reader
 enum mtaux_cmd {
     NONE = 0,
     SEEK,
@@ -197,12 +189,12 @@ enum mtaux_cmd {
     CLOSE,
 };
 
-// INTERNAL structure.  Do not use (consider moving to bgzf2.c and putting
+// INTERNAL structure.  Do not use (consider moving to bzst.c and putting
 // a blank one here)
-struct bgzf2 {
+struct bzst {
     // Shared with BGZF to provide an easy redirect for code that
     // doesn't want to have lots of conditionals.
-    unsigned dummy1:16, is_zstd:1, first_block:1, dummy2:14;
+    unsigned dummy1:16, is_zstd:1, first_block:1, dummy2:13, is_bzst:1;
 
     struct hFILE *hfp;    // actual file handle
     int format;           // encoding format (unused, but zlib, zstd, bsc, ...)
@@ -210,7 +202,7 @@ struct bgzf2 {
     int is_write;         // open for write
     int block_size;       // ideal block size
     size_t index_frame_sz;// size of seekable index frame
-    bgzf2_index_t *index; // index entries
+    bzst_index_t *index; // index entries
     int nindex;           // used size of index array
     int aindex;           // allocated size of index array
     int errcode;          // FIXME
@@ -220,8 +212,8 @@ struct bgzf2 {
     off_t idx_pos;        // as frame_pos, but on explicit flush_try calls only
     off_t tid_pos;        // uncompressed offset of tid within frame.
     off_t last_flush_try; // offset in buffer of last flush attempt
-    bgzf2_buffer *uncomp; // uncompressed data
-    bgzf2_buffer *comp;   // compressed data
+    bzst_buffer *uncomp; // uncompressed data
+    bzst_buffer *comp;   // compressed data
 
     // Genomic indices.
     // We map chr:start-end to uncompressed offsets (use with frame index).
@@ -233,7 +225,7 @@ struct bgzf2 {
     // Maybe nchr has holes?
     size_t gindex_frame_sz;  // size of zstd frame holding the gindex
     size_t *gindex_sz;       // size of gindex[chr]; consider used+alloc sz
-    bgzf2_gindex_t **gindex; // genomic index per chr / tid
+    bzst_gindex_t **gindex; // genomic index per chr / tid
     // For detection of unsorted data.
     int last_used;  // 0 for first rec, 1 for used (sorted), -1 for unsorted
     int last_tid;
@@ -241,7 +233,7 @@ struct bgzf2 {
 
     // Multi-threading support
     pthread_mutex_t job_pool_m; // when updating this struct
-    struct bgzf2_job *job_free_list;
+    struct bzst_job *job_free_list;
     int jobs_pending;
     int flush_pending;
     int own_pool;
@@ -265,20 +257,20 @@ struct bgzf2 {
     void *flush_data;
 };
 
-static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp);
+static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp);
 
 /*----------------------------------------------------------------------
  * Utility functions shared by both single and multi-threaded implementations
  */
 
 /*
- * Allocates a new bgzf2 buffer capable of holding n bytes.
+ * Allocates a new bzst buffer capable of holding n bytes.
  *
  * Returns buffer pointer on success,
  *         NULL on failure
  */
-bgzf2_buffer *bgzf2_buffer_alloc(size_t n) {
-    bgzf2_buffer *b = malloc(sizeof(*b));
+bzst_buffer *bzst_buffer_alloc(size_t n) {
+    bzst_buffer *b = malloc(sizeof(*b));
     if (!b)
         return NULL;
 
@@ -300,8 +292,8 @@ bgzf2_buffer *bgzf2_buffer_alloc(size_t n) {
  * Returns 0 on success,
  *        -1 on failure.
  */
-int bgzf2_buffer_grow(bgzf2_buffer **bp, size_t n) {
-    bgzf2_buffer *b = *bp;
+int bzst_buffer_grow(bzst_buffer **bp, size_t n) {
+    bzst_buffer *b = *bp;
 
     if (!*bp) {
         b = *bp = calloc(1, sizeof(*b));
@@ -326,8 +318,8 @@ int bgzf2_buffer_grow(bgzf2_buffer **bp, size_t n) {
     return 0;
 }
 
-/* Frees memory used by a bgzf2_buffer */
-void bgzf2_buffer_free(bgzf2_buffer *b) {
+/* Frees memory used by a bzst_buffer */
+void bzst_buffer_free(bzst_buffer *b) {
     if (!b)
         return;
 
@@ -336,17 +328,17 @@ void bgzf2_buffer_free(bgzf2_buffer *b) {
     free(b);
 }
 
-static pthread_once_t bgzf2_comp_once = PTHREAD_ONCE_INIT;
-static pthread_key_t bgzf2_comp_key;
+static pthread_once_t bzst_comp_once = PTHREAD_ONCE_INIT;
+static pthread_key_t bzst_comp_key;
 
-static void bgzf2_tls_comp_free(void *ptr) {
+static void bzst_tls_comp_free(void *ptr) {
     ZSTD_CStream *zcs = (ZSTD_CStream *)ptr;
     if (zcs)
         ZSTD_freeCStream(zcs);
 }
 
-static void bgzf2_tls_comp_init(void) {
-    pthread_key_create(&bgzf2_comp_key, bgzf2_tls_comp_free);
+static void bzst_tls_comp_init(void) {
+    pthread_key_create(&bzst_comp_key, bzst_tls_comp_free);
 }
 
 /*
@@ -407,11 +399,11 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
     // -15
     // => 43.3s / 5m37s / 1.6s this
     // vs 44.3s / 5m41s / 5.0s below
-    pthread_once(&bgzf2_comp_once, bgzf2_tls_comp_init);
-    ZSTD_CStream *zcs = pthread_getspecific(bgzf2_comp_key);
+    pthread_once(&bzst_comp_once, bzst_tls_comp_init);
+    ZSTD_CStream *zcs = pthread_getspecific(bzst_comp_key);
     if (!zcs) {
         zcs = ZSTD_createCStream();
-        pthread_setspecific(bgzf2_comp_key, zcs);
+        pthread_setspecific(bzst_comp_key, zcs);
 
         if (ZSTD_initCStream(zcs, level) != 0) {
             ZSTD_freeCStream(zcs);
@@ -468,27 +460,41 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
 }
 
 /*
- * Write a BGZF2 header block as a skippable frame.  This is just enough
- * data, uncompressed, to auto-detect the internal file format.
+ * Write a BZST header block as a skippable frame.
+ *
+ * Format is fixed size:
+ * 4:   BGZF2 frame magic number: 0x184D2A5B
+ * 4:   remaining frame size
+ * 1:   sub-type = 0
+ * 1:   format version = 1
+ * 4:   "BZST" magic number
+ * 4:   format signature (0 == none, but e.g. "BAM\1" etc)
+ * 1:   profile (bitmask of abilities used) = 0
+ * 1:   flags = 0
+ * 8:   XXH64 checksum
  *
  * Returns the number of bytes written on success,
  *         <0 on failure
  */
-static int bgzf2_write_header(bgzf2 *fp) {
-    uint8_t buf[21+8+4+2];
-    int len = MIN(21, fp->uncomp->sz);
-    u32_to_le(BGZF2_SKIPPABLE_ID, buf);
-    u32_to_le(len+6, buf+4);
-    buf[8] = BGZF2_HEADER;
-    buf[9] = 0; // header format
-    memcpy(buf+10, "BGZ2", 4);
-    memcpy(buf+14, fp->uncomp->buf, len);
+static int bzst_write_header(bzst *fp) {
+    uint8_t buf[28];
+    u32_to_le(BZST_SKIPPABLE_ID, buf);
+    u32_to_le(20, buf+4);           // size after this
+    buf[8] = BZST_HEADER;           // sub-type
+    buf[9] = 1;                     // header format
+    memcpy(buf+10, "BZST", 4);      // BZST magic
+    memcpy(buf+14, "\0\0\0\0", 4);  // parent-format magic
+    buf[18] = 0;                    // profile
+    buf[19] = 0;                    // flags
+    //u64_to_le(XXH64(buf, 20, 0), buf+20);
+    uint64_t ZSTD_XXH64(uint8_t *buf, size_t len, int seed);
+    u64_to_le(ZSTD_XXH64(buf, 20, 0), buf+20);
 
     // Add index entry so offsets work
-    if (bgzf2_add_index(fp, 0, 14+len) < 0)
+    if (bzst_add_index(fp, 0, 28) < 0)
         return -1;
 
-    return hwrite(fp->hfp, buf, 14+len);
+    return hwrite(fp->hfp, buf, 28);
 }
 
 /*
@@ -506,13 +512,13 @@ static int bgzf2_write_header(bgzf2 *fp) {
  * Returns 0 on success,
  *        <0 on failure
  */
-static int write_genomic_index(bgzf2 *fp) {
+static int write_genomic_index(bzst *fp) {
     kstring_t ks = {0,0};
 
     // Header
     ks_resize(&ks, 16); // try 8192
-    u32_to_le(BGZF2_SKIPPABLE_ID, (uint8_t *)ks.s); // BGZF2 skippable frame
-    ks.s[8] = BGZF2_GENOMIC_INDEX;
+    u32_to_le(BZST_SKIPPABLE_ID, (uint8_t *)ks.s); // BZST skippable frame
+    ks.s[8] = GZST_GENOMIC_INDEX;
     ks.s[9] = 0; // index format
     ks.l += 10; // fill out [4..7] later
 
@@ -534,7 +540,7 @@ static int write_genomic_index(bgzf2 *fp) {
         u32_to_le(fp->gindex_sz[i], (uint8_t *)ks.s + ks.l); ks.l += 4;
         // TODO: per-ref meta-data.  Eg other bits of "idxstats"
 
-        bgzf2_gindex_t *g = fp->gindex[i];
+        bzst_gindex_t *g = fp->gindex[i];
         int j;
         for (j = 0; j < fp->gindex_sz[i]; j++) {
             // Tid isn't needed here.  It belongs out of the loop (so we can
@@ -564,8 +570,8 @@ static int write_genomic_index(bgzf2 *fp) {
     return ret;
 }
 
-// Submits a command to bgzf2_mt_reader.  fp->command_m must be unlocked.
-static void submit_reader_command(bgzf2 *fp, int command, int done) {
+// Submits a command to bzst_mt_reader.  fp->command_m must be unlocked.
+static void submit_reader_command(bzst *fp, int command, int done) {
     pthread_mutex_lock(&fp->command_m);
 
     // Signal the reader thread to execute command
@@ -578,7 +584,7 @@ static void submit_reader_command(bgzf2 *fp, int command, int done) {
     hts_tpool_wake_dispatch(fp->out_queue);
     do {
         if (fp->command == CLOSE) {
-            // possible error in bgzf2_mt_reader
+            // possible error in bzst_mt_reader
             pthread_mutex_unlock(&fp->command_m);
             return;
         }
@@ -603,16 +609,16 @@ static void submit_reader_command(bgzf2 *fp, int command, int done) {
     pthread_mutex_unlock(&fp->command_m);
 }
 
-static int load_seekable_index_common(bgzf2 *fp);
+static int load_seekable_index_common(bzst *fp);
 
-static int load_seekable_index_mt(bgzf2 *fp) {
+static int load_seekable_index_mt(bzst *fp) {
     int err = load_seekable_index_common(fp);
     fp->command = LOAD_SINDEX_DONE;
     pthread_cond_signal(&fp->command_c);
     return err;
 }
 
-static int load_seekable_index(bgzf2 *fp) {
+static int load_seekable_index(bzst *fp) {
     int err;
     if (fp->pool) {
         submit_reader_command(fp, LOAD_SINDEX, LOAD_SINDEX_DONE);
@@ -634,7 +640,7 @@ static int load_seekable_index(bgzf2 *fp) {
  *        -2 on non-seekable stream,
  *        -3 if no index found.
  */
-static int load_genomic_index_common(bgzf2 *fp) {
+static int load_genomic_index_common(bzst *fp) {
     uint8_t *buf = NULL;
 
     if (fp->gindex)
@@ -673,8 +679,8 @@ static int load_genomic_index_common(bgzf2 *fp) {
     if (sz != hread(fp->hfp, buf, sz))
         goto err;
 
-    if (le_to_u32(buf) != BGZF2_SKIPPABLE_ID ||
-        buf[8] != BGZF2_GENOMIC_INDEX ||
+    if (le_to_u32(buf) != BZST_SKIPPABLE_ID ||
+        buf[8] != GZST_GENOMIC_INDEX ||
         buf[9] != 0) {
         free(buf);
         return -3; // index not found
@@ -702,7 +708,7 @@ static int load_genomic_index_common(bgzf2 *fp) {
         if (!fp->gindex[i])
             goto err;
 
-        bgzf2_gindex_t *g = fp->gindex[i];
+        bzst_gindex_t *g = fp->gindex[i];
         for (j = 0; j < fp->gindex_sz[i]; j++) {
             g[j].tid = le_to_u32(cp); cp += 4;
             // FIXME: beg and end are int64.  May want varint.
@@ -724,14 +730,14 @@ static int load_genomic_index_common(bgzf2 *fp) {
     return -1;
 }
 
-static int load_genomic_index_mt(bgzf2 *fp) {
+static int load_genomic_index_mt(bzst *fp) {
     int err = load_genomic_index_common(fp);
     fp->command = LOAD_GINDEX_DONE;
     pthread_cond_signal(&fp->command_c);
     return err;
 }
 
-static int load_genomic_index(bgzf2 *fp) {
+static int load_genomic_index(bzst *fp) {
     int err;
     if (fp->pool) {
         submit_reader_command(fp, LOAD_GINDEX, LOAD_GINDEX_DONE);
@@ -746,7 +752,7 @@ static int load_genomic_index(bgzf2 *fp) {
 
 /*
  * Finds the uncompressed file offset associated with a specific range.
- * This offset is only suitable for passing into bgzf2_seek.
+ * This offset is only suitable for passing into bzst_seek.
  *
  * Note will not likely be the exact location the first record covers this
  * region, but it will be prior to it.  The caller is expected to them
@@ -754,7 +760,7 @@ static int load_genomic_index(bgzf2 *fp) {
  *
  * TODO: or should we cache beg/end here and do the discard ourselves?
  * That's how CRAM's API works, and it may be more amenable to a
- * "bgzf2_query_many" func that can operate on multiple regions in a
+ * "bzst_query_many" func that can operate on multiple regions in a
  * threaded read-away way.
  *
  * If tid is outside of the bounds of the index, this is an error.
@@ -767,7 +773,7 @@ static int load_genomic_index(bgzf2 *fp) {
  *        -2 on non-seekable stream,
  *        -3 if no index found.
  */
-int64_t bgzf2_query(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
+int64_t bzst_query(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     int err;
     if (!fp->gindex) {
         err = load_genomic_index(fp);
@@ -819,8 +825,8 @@ int64_t bgzf2_query(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
  * Returns 0 on success,
  *        <0 on failure
  */
-static int write_seekable_index(bgzf2 *fp) {
-    bgzf2_index_t *idx = fp->index;
+static int write_seekable_index(bzst *fp) {
+    bzst_index_t *idx = fp->index;
     int nidx = fp->nindex;
 
     uint8_t *buf = malloc(4+4+nidx*8+9);
@@ -851,13 +857,13 @@ static int write_seekable_index(bgzf2 *fp) {
 }
 
 /*
- * Adds an entry to the bgzf2 index
+ * Adds an entry to the bzst index
  *
  * Returns 0 on success,
  *        -1 on failure.
  */
-static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
-    bgzf2_index_t *idx;
+static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp) {
+    bzst_index_t *idx;
 
 //    static size_t acc = 0; // STATIC but for debugging only
 //    fprintf(stderr, "cpos %ld, upos %ld, sz %ld %ld\n",
@@ -890,17 +896,17 @@ static int bgzf2_add_index(bgzf2 *fp, size_t uncomp, size_t comp) {
  * Returns 0 on success,
  *        -1 on failure
  */
-static int write_block_metadata(bgzf2 *fp, uint32_t comp_sz,
+static int write_block_metadata(bzst *fp, uint32_t comp_sz,
                                 kstring_t *meta) {
     uint8_t buf[18];
 
-    u32_to_le(BGZF2_SKIPPABLE_ID, buf); // pzstd skippable magic no.
+    u32_to_le(BZST_SKIPPABLE_ID, buf); // pzstd skippable magic no.
     u32_to_le(6 + (meta ? meta->l : 0), buf + 4);
-    buf[8] = BGZF2_BLOCK_META;
+    buf[8] = GZST_BLOCK_META;
     buf[9] = 0; // meta-data format version
     u32_to_le(comp_sz, buf+10);
 
-    int ret = bgzf2_add_index(fp, 0, 14 + (meta ? meta->l : 0));
+    int ret = bzst_add_index(fp, 0, 14 + (meta ? meta->l : 0));
     ret |= hwrite(fp->hfp, buf, 14) != 14;
     if (meta && meta->l)
         ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
@@ -908,15 +914,15 @@ static int write_block_metadata(bgzf2 *fp, uint32_t comp_sz,
     return ret ? -1 : 0;
 }
 
-static int write_file_metadata(bgzf2 *fp, kstring_t *meta) {
+static int write_file_metadata(bzst *fp, kstring_t *meta) {
     uint8_t buf[12];
 
-    u32_to_le(BGZF2_SKIPPABLE_ID, buf); // pzstd skippable magic no.
+    u32_to_le(BZST_SKIPPABLE_ID, buf); // pzstd skippable magic no.
     u32_to_le(10 + (meta ? meta->l : 0), buf + 4);
-    buf[8] = BGZF2_FILE_META;
+    buf[8] = GZST_FILE_META;
     buf[9] = 0; // meta-data format version
 
-    int ret = bgzf2_add_index(fp, 0, 18 + (meta ? meta->l : 0));
+    int ret = bzst_add_index(fp, 0, 18 + (meta ? meta->l : 0));
     ret |= hwrite(fp->hfp, buf, 10) != 10;
     if (meta && meta->l)
         ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
@@ -931,7 +937,7 @@ static int write_file_metadata(bgzf2 *fp, kstring_t *meta) {
 }
 
 // NB: If needed, call this before threading is enabled
-static kstring_t *load_file_metadata(bgzf2 *fp, kstring_t *ks) {
+static kstring_t *load_file_metadata(bzst *fp, kstring_t *ks) {
     // For ease we load the seekable index and genomic index so we can
     // use the variables there indicating the sizes.
     if (load_genomic_index_common(fp) < 0)
@@ -957,9 +963,9 @@ static kstring_t *load_file_metadata(bgzf2 *fp, kstring_t *ks) {
     uint8_t header[10];
     if (10 != hread(fp->hfp, header, 10))
         return NULL;
-    if (le_to_u32(header) != BGZF2_SKIPPABLE_ID)
+    if (le_to_u32(header) != BZST_SKIPPABLE_ID)
         return NULL;
-    if (header[8] != BGZF2_FILE_META || header[9] != 0)
+    if (header[8] != GZST_FILE_META || header[9] != 0)
         return NULL;
 
     uint32_t mlen = le_to_u32(header+4);
@@ -978,8 +984,8 @@ static kstring_t *load_file_metadata(bgzf2 *fp, kstring_t *ks) {
     return ks;
 }
 
-int bgzf2_idx_metadata(const hts_idx_t *idx, kstring_t *ks) {
-    const hts_bgzf2_idx_t *bidx = (const hts_bgzf2_idx_t *)idx;
+int bzst_idx_metadata(const hts_idx_t *idx, kstring_t *ks) {
+    const hts_bzst_idx_t *bidx = (const hts_bzst_idx_t *)idx;
     return load_file_metadata(bidx->fp, ks) ? 0 : -1;
 }
 
@@ -987,15 +993,15 @@ int bgzf2_idx_metadata(const hts_idx_t *idx, kstring_t *ks) {
  * Multi-threaded implementation.
  *
  * Encode: the main thread copies data into a block (main thread).  When full
- * this calls bgzf2_flush to compress and write it out.
- * The bgzf2_flush function is where things fork, with bgzf2_write_block
- * performing these operations within the main thread and bgzf2_write_block_mt
+ * this calls bzst_flush to compress and write it out.
+ * The bzst_flush function is where things fork, with bzst_write_block
+ * performing these operations within the main thread and bzst_write_block_mt
  * creating an encode job to dispatch to the pool of workers.
  *
- * The thread pool workers all call bgzf2_encode_func, whose only task is
+ * The thread pool workers all call bzst_encode_func, whose only task is
  * the data compression step.
  *
- * bgzf2_mt_writer is a dedicated I/O thread (not in the pool) whose sole
+ * bzst_mt_writer is a dedicated I/O thread (not in the pool) whose sole
  * purpoise is to asynchronously take the result of the compression jobs off
  * fp->out_queue and hwrite them to their destination.  This helps remove any
  * potential deadlocks in the main thread and means we can overlap any I/O
@@ -1006,11 +1012,11 @@ int bgzf2_idx_metadata(const hts_idx_t *idx, kstring_t *ks) {
  * the async nature means the main thread will finish before the workers
  * have completed.
  *
- * Decode: bgzf2_mt_reader is a dedicated I/O thread (not in the pool) that is
+ * Decode: bzst_mt_reader is a dedicated I/O thread (not in the pool) that is
  * reading blocks ahead of time and dispatching decompression jobs to be
- * executed on the main thread pool.  These jobs call bgzf2_decode_func.
+ * executed on the main thread pool.  These jobs call bzst_decode_func.
  *
- * We have a "command" channel for communicating with bgzf2_mt_read, for
+ * We have a "command" channel for communicating with bzst_mt_read, for
  * purposes such as specifying end ranges, closing down, and handling
  * errors.
  */
@@ -1019,11 +1025,11 @@ int bgzf2_idx_metadata(const hts_idx_t *idx, kstring_t *ks) {
  * Doesn't explicitly free the memory, but instead puts it on a free list
  * so we can reuse it.
  */
-static void bgzf2_job_free(void *vp) {
-    bgzf2_job *j = (bgzf2_job *)vp;
-    //fprintf(stderr, "bgzf2_job_free %p %d\n", j, j->job_num);
+static void bzst_job_free(void *vp) {
+    bzst_job *j = (bzst_job *)vp;
+    //fprintf(stderr, "bzst_job_free %p %d\n", j, j->job_num);
 
-    bgzf2 *fp = j->fp;
+    bzst *fp = j->fp;
     pthread_mutex_lock(&fp->job_pool_m);
     j->next = fp->job_free_list;
     fp->job_free_list = j;
@@ -1033,17 +1039,17 @@ static void bgzf2_job_free(void *vp) {
 /*
  * Actually deallocates memory used by a job
  */
-static void bgzf2_job_really_free(bgzf2_job *j) {
-    bgzf2_buffer_free(j->comp);
-    bgzf2_buffer_free(j->uncomp);
+static void bzst_job_really_free(bzst_job *j) {
+    bzst_buffer_free(j->comp);
+    bzst_buffer_free(j->uncomp);
 }
 
 /*
- * Fetches a new bgzf2_job struct.  Reuses previously freed ones if available,
+ * Fetches a new bzst_job struct.  Reuses previously freed ones if available,
  * or allocates new if not.
  */
-static bgzf2_job *bgzf2_job_new(bgzf2 *fp) {
-    bgzf2_job *j;
+static bzst_job *bzst_job_new(bzst *fp) {
+    bzst_job *j;
 
     pthread_mutex_lock(&fp->job_pool_m);
     if (fp->job_free_list) {
@@ -1060,7 +1066,7 @@ static bgzf2_job *bgzf2_job_new(bgzf2 *fp) {
         //fprintf(stderr, "Alloc new block\n");
     }
 
-    bgzf2_job tmp = *j;
+    bzst_job tmp = *j;
     memset(j, 0, sizeof(*j));
     j->uncomp = tmp.uncomp;
     j->comp   = tmp.comp;
@@ -1081,8 +1087,8 @@ static bgzf2_job *bgzf2_job_new(bgzf2 *fp) {
  *
  * Returns NULL when no more are left, or -1 on error
  */
-static void *bgzf2_mt_writer(void *vp) {
-    bgzf2 *fp = (bgzf2 *)vp;
+static void *bzst_mt_writer(void *vp) {
+    bzst *fp = (bzst *)vp;
     hts_tpool_result *r;
 
 //    if (fp->idx_build_otf) {
@@ -1093,7 +1099,7 @@ static void *bgzf2_mt_writer(void *vp) {
 
     // Iterates until result queue is shutdown, where it returns NULL.
     while ((r = hts_tpool_next_result_wait(fp->out_queue))) {
-        bgzf2_job *j = (bgzf2_job *)hts_tpool_result_data(r);
+        bzst_job *j = (bzst_job *)hts_tpool_result_data(r);
         assert(j);
 //      fprintf(stderr, "job: %d %d->%d %.10s\n",
 //              j->job_num, (int)j->uncomp->sz, (int)j->comp->sz,
@@ -1124,7 +1130,7 @@ static void *bgzf2_mt_writer(void *vp) {
             goto err;
 
         pthread_mutex_lock(&fp->job_pool_m);
-        int ret = bgzf2_add_index(fp, j->uncomp->pos, j->comp->sz);
+        int ret = bzst_add_index(fp, j->uncomp->pos, j->comp->sz);
         pthread_mutex_unlock(&fp->job_pool_m);
         if (ret < 0)
             goto err;
@@ -1156,7 +1162,7 @@ static void *bgzf2_mt_writer(void *vp) {
         pthread_mutex_lock(&fp->job_pool_m);
         fp->jobs_pending--;
         pthread_mutex_unlock(&fp->job_pool_m);
-        bgzf2_job_free(j);
+        bzst_job_free(j);
     }
 
     if (hflush(fp->hfp) != 0)
@@ -1177,10 +1183,10 @@ static void *bgzf2_mt_writer(void *vp) {
 /*
  * Threaded: runs in one of many thread pool workers.
  *
- * Function called by the bgzf2 encode multi-threaded worker tasks.
+ * Function called by the bzst encode multi-threaded worker tasks.
  */
-static void *bgzf2_encode_func(void *vp) {
-    bgzf2_job *j = (bgzf2_job *)vp;
+static void *bzst_encode_func(void *vp) {
+    bzst_job *j = (bzst_job *)vp;
 
     if ((j->comp->sz = compress_block(j->uncomp->buf, j->uncomp->pos,
                                       j->comp->buf, j->comp->alloc,
@@ -1203,8 +1209,8 @@ static void *bgzf2_encode_func(void *vp) {
  * Returns number of bytes read on success (size of index)
  *        <0 on failure (same codes as load_seekable_index)
  */
-static bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos);
-static void bgzf2_mt_seek(bgzf2 *fp) {
+static bzst_index_t *index_query(bzst *fp, uint64_t upos);
+static void bzst_mt_seek(bzst *fp) {
     if (!fp->index) {
         int err;
         if ((err = load_seekable_index_common(fp)) < 0) {
@@ -1217,12 +1223,12 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
     }
     hts_tpool_process_reset(fp->out_queue, 0);
     if (fp->uncomp)
-        // triggers a bgzf2_decode_block_mt call
+        // triggers a bzst_decode_block_mt call
         fp->uncomp->pos = fp->uncomp->sz;
 
     pthread_mutex_lock(&fp->job_pool_m);
 
-    bgzf2_index_t *idx = index_query(fp, fp->seek_to);
+    bzst_index_t *idx = index_query(fp, fp->seek_to);
     if (!idx) {
         fp->errcode = ENXIO;
         fp->command = SEEK_FAIL;
@@ -1237,7 +1243,7 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
 
         // The block is loaded later, as before, but we need to start with
         // pos part way through it.  We do this by modifying seek_to, which
-        // is used in bgzf2_decode_block_mt.
+        // is used in bzst_decode_block_mt.
         fp->seek_to -= idx->pos;
         fprintf(stderr, "bgzf seek pos %ld, seek_to %ld\n", idx->cpos, fp->seek_to);
     }
@@ -1248,7 +1254,7 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
     pthread_cond_signal(&fp->command_c);
 }
 
-static int bgzf2_check_EOF_common(bgzf2 *fp) {
+static int bzst_check_EOF_common(bzst *fp) {
     off_t offset = htell(fp->hfp);
     if (hseek(fp->hfp, -4, SEEK_END) < 0) {
         if (
@@ -1273,9 +1279,9 @@ static int bgzf2_check_EOF_common(bgzf2 *fp) {
     return (memcmp(buf, "\xb1\xea\x92\x8f", 4) == 0) ? 1 : 0;
 }
 
-static void bgzf2_mt_eof(bgzf2 *fp) {
+static void bzst_mt_eof(bzst *fp) {
     pthread_mutex_lock(&fp->job_pool_m);
-    fp->has_eof = bgzf2_check_EOF_common(fp);
+    fp->has_eof = bzst_check_EOF_common(fp);
     pthread_mutex_unlock(&fp->job_pool_m);
     fp->command = HAS_EOF_DONE;
     pthread_cond_signal(&fp->command_c);
@@ -1285,15 +1291,15 @@ static void bgzf2_mt_eof(bgzf2 *fp) {
  * Nul function so we can dispatch a job with the correct serial
  * to mark failure or to indicate an empty read (EOF).
  */
-static void *bgzf2_nul_func(void *arg) {
+static void *bzst_nul_func(void *arg) {
     return arg;
 }
 
 /*
- * Single threaded, called by bgzf2_mt_reader.
+ * Single threaded, called by bzst_mt_reader.
  *
  * Reads a compressed block of data using hread and unwraps the
- * relevant headers to fill out a bgzf2_job prior to decompression.
+ * relevant headers to fill out a bzst_job prior to decompression.
  * This doesn't actually dispatch the decompression job.
  *
  * Returns >0 on success (size once uncompressed),
@@ -1301,11 +1307,11 @@ static void *bgzf2_nul_func(void *arg) {
  *          0 on EOF,
  *         -1 on failure
  */
-static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
+static int bzst_mt_read_block(bzst *fp, bzst_job *j)
 {
-    size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp);
+    size_t bzst_read_block(bzst *fp, bzst_buffer **comp);
 
-    ssize_t usize = bgzf2_read_block(fp, &j->comp);
+    ssize_t usize = bzst_read_block(fp, &j->comp);
     if (usize == -2)
         return INT_MAX;
     if (usize <= 0)
@@ -1313,9 +1319,9 @@ static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
 
     // Allocate uncompressed data block
     if (usize != -2) {
-        if (usize > BGZF2_MAX_BLOCK_SIZE)
+        if (usize > BZST_MAX_BLOCK_SIZE)
             return -1; // protect against extreme memory size attacks
-        if (bgzf2_buffer_grow(&j->uncomp, usize) < 0)
+        if (bzst_buffer_grow(&j->uncomp, usize) < 0)
             return -1;
         j->known_size = 1;
     } else {
@@ -1335,15 +1341,15 @@ static int bgzf2_mt_read_block(bgzf2 *fp, bgzf2_job *j)
 /*
  * Threaded: runs in one of many thread pool workers.
  *
- * Function called by the bgzf2 decode multi-threaded worker tasks.
+ * Function called by the bzst decode multi-threaded worker tasks.
  */
-static void *bgzf2_decode_func(void *vp) {
-    bgzf2_job *j = (bgzf2_job *)vp;
+static void *bzst_decode_func(void *vp) {
+    bzst_job *j = (bzst_job *)vp;
 
-    int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
+    int bzst_decompress_block(bzst_buffer **comp, bzst_buffer **uncomp,
                                size_t usize);
 
-    if (bgzf2_decompress_block(&j->comp, &j->uncomp,
+    if (bzst_decompress_block(&j->comp, &j->uncomp,
                                j->known_size ? j->uncomp->sz : -2) < 0)
         j->errcode = 1;
 
@@ -1361,9 +1367,9 @@ static void *bgzf2_decode_func(void *vp) {
  * Reads compressed blocks from the file handle and dispatches jobs to the
  * thread pool to decompress them.
  */
-static void *bgzf2_mt_reader(void *vp) {
-    bgzf2 *fp = (bgzf2 *)vp;
-    bgzf2_job *j;
+static void *bzst_mt_reader(void *vp) {
+    bzst *fp = (bzst *)vp;
+    bzst_job *j;
 
     // Note we may have started with load_seekable_index being called by
     // the main application, and we're now in an IO thread. So hread
@@ -1377,17 +1383,17 @@ static void *bgzf2_mt_reader(void *vp) {
     pthread_mutex_unlock(&fp->command_m);
 
 restart:
-    if (!(j = bgzf2_job_new(fp)))
+    if (!(j = bzst_job_new(fp)))
         goto err;
     j->errcode = 0;
     j->hit_eof = 0;
     j->fp = fp;
 
-    while (bgzf2_mt_read_block(fp, j) > 0) {
+    while (bzst_mt_read_block(fp, j) > 0) {
         // Dispatch
-        if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_decode_func, j,
-                                bgzf2_job_free, bgzf2_job_free, 0) < 0) {
-            bgzf2_job_free(j);
+        if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bzst_decode_func, j,
+                                bzst_job_free, bzst_job_free, 0) < 0) {
+            bzst_job_free(j);
             goto err;
         }
 
@@ -1398,12 +1404,12 @@ restart:
         switch (fp->command) {
         case SEEK:
             // Sets fp->command to SEEK_DONE
-            bgzf2_mt_seek(fp);
+            bzst_mt_seek(fp);
             pthread_mutex_unlock(&fp->command_m);
             goto restart;
 
         case HAS_EOF:
-            bgzf2_mt_eof(fp);   // Sets fp->command to HAS_EOF_DONE
+            bzst_mt_eof(fp);   // Sets fp->command to HAS_EOF_DONE
             break;
 
         case LOAD_SINDEX:
@@ -1433,7 +1439,7 @@ restart:
         pthread_mutex_unlock(&fp->command_m);
 
         // Allocate buffer for next block
-        j = bgzf2_job_new(fp);
+        j = bzst_job_new(fp);
         if (!j) {
             hts_tpool_process_destroy(fp->out_queue);
             return NULL;
@@ -1443,9 +1449,9 @@ restart:
     if (j->errcode == 2 /* FIXME */) {
         // Attempt to multi-thread decode a raw gzip stream cannot be done.
         // We tear down the multi-threaded decoder and revert to the old code.
-        if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_nul_func, j,
-                                bgzf2_job_free, bgzf2_job_free, 0) < 0) {
-            bgzf2_job_free(j);
+        if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bzst_nul_func, j,
+                                bzst_job_free, bzst_job_free, 0) < 0) {
+            bzst_job_free(j);
             hts_tpool_process_destroy(fp->out_queue);
             return NULL;
         }
@@ -1458,9 +1464,9 @@ restart:
     // j->errcode is set already.
 
     j->hit_eof = 1;
-    if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_nul_func, j,
-                            bgzf2_job_free, bgzf2_job_free, 0) < 0) {
-        bgzf2_job_free(j);
+    if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bzst_nul_func, j,
+                            bzst_job_free, bzst_job_free, 0) < 0) {
+        bzst_job_free(j);
         hts_tpool_process_destroy(fp->out_queue);
         return NULL;
     }
@@ -1480,12 +1486,12 @@ restart:
             pthread_cond_wait(&fp->command_c, &fp->command_m);
         switch(fp->command) {
         case SEEK:
-            bgzf2_mt_seek(fp);
+            bzst_mt_seek(fp);
             pthread_mutex_unlock(&fp->command_m);
             goto restart;
 
         case HAS_EOF:
-            bgzf2_mt_eof(fp);   // Sets fp->command to HAS_EOF_DONE
+            bzst_mt_eof(fp);   // Sets fp->command to HAS_EOF_DONE
             break;
 
         case LOAD_SINDEX:
@@ -1533,7 +1539,7 @@ restart:
  *         -1 on failure
  *         -2 on switch to stream mode
  */
-static int bgzf2_decode_block_mt(bgzf2 *fp) {
+static int bzst_decode_block_mt(bzst *fp) {
     if (fp->hit_eof)
         return 0;
 
@@ -1543,20 +1549,20 @@ static int bgzf2_decode_block_mt(bgzf2 *fp) {
     if (!r)
         return -1;
 
-    bgzf2_job *j = (bgzf2_job *)hts_tpool_result_data(r);
+    bzst_job *j = (bzst_job *)hts_tpool_result_data(r);
     hts_tpool_delete_result(r, 0);
     if (j->hit_eof) {
         fp->hit_eof = 1;
-        bgzf2_job_free(j);
+        bzst_job_free(j);
         return 0;
     }
 
     // Swap j->uncomp with fp->uncomp to avoid a memcpy
-    bgzf2_buffer *tmp = fp->uncomp;
+    bzst_buffer *tmp = fp->uncomp;
     fp->uncomp = j->uncomp;
     j->uncomp = tmp;
 
-    bgzf2_job_free(j);
+    bzst_job_free(j);
 
     // We may need to start part way into this block if we've just done a
     // seek.  Seek_to is reset from absolute uncompressed offset before the
@@ -1572,13 +1578,13 @@ static int bgzf2_decode_block_mt(bgzf2 *fp) {
  */
 
 /*
- * Main thread: adds a thread pool to a bgzf2 fp, adding
+ * Main thread: adds a thread pool to a bzst fp, adding
  * multi-threading capabilities.
  *
  * Returns 0 on success,
  *        -1 on failure
  */
-int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize) {
+int bzst_thread_pool(bzst *fp, hts_tpool *pool, int qsize) {
     fp->own_pool = 0;
     fp->pool = pool;
     if (!qsize)
@@ -1587,7 +1593,7 @@ int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize) {
         return -1;
     hts_tpool_process_ref_incr(fp->out_queue);
 
-    fp->job_pool = pool_create(sizeof(bgzf2_job));
+    fp->job_pool = pool_create(sizeof(bzst_job));
     if (!fp->job_pool)
         return -1;
 
@@ -1599,7 +1605,7 @@ int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize) {
     fp->jobs_pending = 0;
 
     pthread_create(&fp->io_task, NULL,
-                   fp->is_write ? bgzf2_mt_writer : bgzf2_mt_reader, fp);
+                   fp->is_write ? bzst_mt_writer : bzst_mt_reader, fp);
     return 0;
 }
 
@@ -1613,8 +1619,8 @@ int bgzf2_thread_pool(bgzf2 *fp, hts_tpool *pool, int qsize) {
  * Returns 0 on success,
  *        -1 on failure
  */
-static int bgzf2_write_block(bgzf2 *fp, bgzf2_buffer *buf) {
-    if (bgzf2_buffer_grow(&fp->comp, ZSTD_compressBound(buf->sz)) < 0)
+static int bzst_write_block(bzst *fp, bzst_buffer *buf) {
+    if (bzst_buffer_grow(&fp->comp, ZSTD_compressBound(buf->sz)) < 0)
         return -1;
 
     if ((fp->comp->sz = compress_block(buf->buf, buf->pos,
@@ -1625,7 +1631,7 @@ static int bgzf2_write_block(bgzf2 *fp, bgzf2_buffer *buf) {
     if (write_block_metadata(fp, fp->comp->sz, &buf->meta) < 0)
         return -1;
 
-    int ret = bgzf2_add_index(fp, buf->pos, fp->comp->sz);
+    int ret = bzst_add_index(fp, buf->pos, fp->comp->sz);
 
     if (hwrite(fp->hfp, fp->comp->buf, fp->comp->sz) != fp->comp->sz)
         return -1;
@@ -1646,8 +1652,8 @@ static int bgzf2_write_block(bgzf2 *fp, bgzf2_buffer *buf) {
  * Returns 0 on success,
  *        -1 on failure
  */
-static int bgzf2_write_block_mt(bgzf2 *fp, bgzf2_buffer *buf) {
-    bgzf2_job *j = bgzf2_job_new(fp);
+static int bzst_write_block_mt(bzst *fp, bzst_buffer *buf) {
+    bzst_job *j = bzst_job_new(fp);
     if (!j)
         return -1;
 
@@ -1658,8 +1664,8 @@ static int bgzf2_write_block_mt(bgzf2 *fp, bgzf2_buffer *buf) {
     j->next = NULL;
 
     // We could steal "buf" and optimise this more.
-    if (bgzf2_buffer_grow(&j->uncomp, buf->sz) < 0 ||
-        bgzf2_buffer_grow(&j->comp, comp_sz) < 0)
+    if (bzst_buffer_grow(&j->uncomp, buf->sz) < 0 ||
+        bzst_buffer_grow(&j->comp, comp_sz) < 0)
         return -1;
     memcpy(j->uncomp->buf, buf->buf, buf->pos);
     j->uncomp->pos = buf->pos;
@@ -1678,15 +1684,15 @@ static int bgzf2_write_block_mt(bgzf2 *fp, bgzf2_buffer *buf) {
     fp->jobs_pending++;
     pthread_mutex_unlock(&fp->job_pool_m);
 
-    if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bgzf2_encode_func,
-                            j, bgzf2_job_free, bgzf2_job_free, 0) < 0)
+    if (hts_tpool_dispatch3(fp->pool, fp->out_queue, bzst_encode_func,
+                            j, bzst_job_free, bzst_job_free, 0) < 0)
         goto err;
 
     fp->uncomp->pos = 0;
     return 0;
 
  err:
-    bgzf2_job_free(j);
+    bzst_job_free(j);
     pthread_mutex_lock(&fp->job_pool_m);
     fp->jobs_pending--;
     pthread_mutex_unlock(&fp->job_pool_m);
@@ -1694,19 +1700,19 @@ static int bgzf2_write_block_mt(bgzf2 *fp, bgzf2_buffer *buf) {
 }
 
 /*
- * Flush the bgzf2 stream and ensure we start a new block.
+ * Flush the bzst stream and ensure we start a new block.
  *
  * Returns 0 on success,
  *        -1 on failure
  */
-int bgzf2_flush(bgzf2 *fp) {
+int bzst_flush(bzst *fp) {
     int ret = 0;
     if (!fp->uncomp->pos)
         return 0;
 
     if (fp->first_block) {
         fp->first_block = 0;
-        ret = bgzf2_write_header(fp) < 0;
+        ret = bzst_write_header(fp) < 0;
     }
 
     // uncompressed position of next frame
@@ -1717,9 +1723,9 @@ int bgzf2_flush(bgzf2 *fp) {
         ret |= fp->flush_callback(&fp->uncomp->meta, fp->flush_data, 0) < 0;
 
     if (fp->pool) {
-        ret |= bgzf2_write_block_mt(fp, fp->uncomp);
+        ret |= bzst_write_block_mt(fp, fp->uncomp);
     } else {
-        ret |= bgzf2_write_block(fp, fp->uncomp);
+        ret |= bzst_write_block(fp, fp->uncomp);
     }
 
     fp->last_flush_try = 0;
@@ -1734,15 +1740,15 @@ int bgzf2_flush(bgzf2 *fp) {
  * Returns 0 on success,
  *        <0 on failure
  */
-int bgzf2_flush_try(bgzf2 *fp, ssize_t size) {
+int bzst_flush_try(bzst *fp, ssize_t size) {
     if (fp->uncomp && fp->uncomp->pos + size > fp->uncomp->sz) {
-        int ret = bgzf2_flush(fp);
+        int ret = bzst_flush(fp);
         fp->idx_pos = fp->frame_pos;
 
         // We know we're trying to push size bytes, and we don't want to split
         // write requests, so we'll grow the current buffer if needed.
         if (fp->uncomp && size > fp->uncomp->sz)
-            ret |= bgzf2_buffer_grow(&fp->uncomp, size);
+            ret |= bzst_buffer_grow(&fp->uncomp, size);
 
         return ret;
     }
@@ -1760,8 +1766,8 @@ int bgzf2_flush_try(bgzf2 *fp, ssize_t size) {
  * Returns 0 on success,
  *        <0 on failure
  */
-int bgzf2_drain(bgzf2 *fp) {
-    if (bgzf2_flush(fp) < 0)
+int bzst_drain(bzst *fp) {
+    if (bzst_flush(fp) < 0)
         return -1;
 
     if (!fp->pool)
@@ -1791,42 +1797,42 @@ int bgzf2_drain(bgzf2 *fp) {
 }
 
 /*
- * Set the bgzf2 block size.  This can be performed at any point,
+ * Set the bzst block size.  This can be performed at any point,
  * but it is usually done immediately after opening for write.
  *
  * Returns 0 on success,
  *        -1 on failure
  */
-int bgzf2_set_block_size(bgzf2 *fp, size_t sz) {
+int bzst_set_block_size(bzst *fp, size_t sz) {
     if (!fp->is_write)
         return 0;
 
     fp->block_size = sz;
 
     if (fp->uncomp)
-        if (bgzf2_flush(fp) < 0)
+        if (bzst_flush(fp) < 0)
             return -1;
 
 //    if (fp->first_block)
 //      sz = sz < 1024 ? sz : 1024;
 
-    return bgzf2_buffer_grow(&fp->uncomp, sz);
+    return bzst_buffer_grow(&fp->uncomp, sz);
 }
 
-void bgzf2_set_level(bgzf2 *fp, int level) {
+void bzst_set_level(bzst *fp, int level) {
     fprintf(stderr, "bgzf level %d\n", level);
     fp->level = level;
 }
 
-static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) {
-    fp->is_zstd = 1;
+static bzst *bzst_open_common(bzst *fp, hFILE *hfp, const char *mode) {
+    fp->is_bzst = 1;
     fp->first_block = 1;
     fp->hfp = hfp;
     fp->frame_pos = 0;
 
     if (*mode == 'w') {
         fp->is_write = 1;
-        if (bgzf2_set_block_size(fp, BGZF2_DEFAULT_BLOCK_SIZE) < 0) {
+        if (bzst_set_block_size(fp, BZST_DEFAULT_BLOCK_SIZE) < 0) {
             if (hclose(fp->hfp)) // can't ignore :/
                 free(fp);
             else
@@ -1834,7 +1840,7 @@ static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) {
             return NULL;
         }
 
-        int level = BGZF2_DEFAULT_LEVEL;
+        int level = BZST_DEFAULT_LEVEL;
         for (const char *cp = mode; *cp; cp++) {
             if (*cp >= '0' && *cp <= '9') {
                 level = atoi(cp);
@@ -1853,34 +1859,34 @@ static bgzf2 *bgzf2_open_common(bgzf2 *fp, hFILE *hfp, const char *mode) {
 //    // Threading
 //    fp->pool = hts_tpool_init(4);
 //    fp->out_queue = hts_tpool_process_init(fp->pool, 8, 0);
-//    if (bgzf2_thread_pool(fp, fp->pool, 0) < 0)
+//    if (bzst_thread_pool(fp, fp->pool, 0) < 0)
 //      goto err;
 
     return fp;
 }
 
 /*
- * Opens a bgzf2 file from an existing hfile for read ("r") or write
+ * Opens a bzst file from an existing hfile for read ("r") or write
  * ("w", or "w1" to "w19").
  *
- * Returns bgzf2 file handle on success,
+ * Returns bzst file handle on success,
  *         or NULL on failure.
  */
-bgzf2 *bgzf2_hopen(hFILE *hfp, const char *mode) {
-    bgzf2 *fp = calloc(1, sizeof(*fp));
+bzst *bzst_hopen(hFILE *hfp, const char *mode) {
+    bzst *fp = calloc(1, sizeof(*fp));
     if (!fp)
         return NULL;
 
-    return bgzf2_open_common(fp, hfp, mode);
+    return bzst_open_common(fp, hfp, mode);
 }
 /*
- * Opens a bgzf2 file 'fn' for read ("r") or write ("w", or "w1" to "w19").
+ * Opens a bzst file 'fn' for read ("r") or write ("w", or "w1" to "w19").
  *
- * Returns bgzf2 file handle on success,
+ * Returns bzst file handle on success,
  *         or NULL on failure.
  */
-bgzf2 *bgzf2_open(const char *fn, const char *mode) {
-    bgzf2 *fp = calloc(1, sizeof(*fp));
+bzst *bzst_open(const char *fn, const char *mode) {
+    bzst *fp = calloc(1, sizeof(*fp));
     if (!fp)
         return NULL;
 
@@ -1890,21 +1896,21 @@ bgzf2 *bgzf2_open(const char *fn, const char *mode) {
         return NULL;
     }
 
-    return bgzf2_open_common(fp, fp->hfp, mode);
+    return bzst_open_common(fp, fp->hfp, mode);
 }
 
 
 /*
- * Closes a bgzf2 file.
+ * Closes a bzst file.
  *
  * Returns 0 on success,
  *        <0 on failure
  */
-int bgzf2_close(bgzf2 *fp) {
+int bzst_close(bzst *fp) {
     int ret = 0;
 
     if (fp->is_write) {
-        ret |= (bgzf2_drain(fp) < 0);
+        ret |= (bzst_drain(fp) < 0);
 
         if (fp->flush_callback) {
             kstring_t final_meta = KS_INITIALIZE;
@@ -1942,11 +1948,11 @@ int bgzf2_close(bgzf2 *fp) {
         pthread_mutex_destroy(&fp->command_m);
         pthread_cond_destroy(&fp->command_c);
 
-        bgzf2_job *j, *n;
+        bzst_job *j, *n;
         for (j = fp->job_free_list; j; j = n) {
             //fprintf(stderr, "free job %d\n", j->job_num);
             n = j->next;
-            bgzf2_job_really_free(j);
+            bzst_job_really_free(j);
         }
 
         pool_destroy(fp->job_pool);
@@ -1954,8 +1960,8 @@ int bgzf2_close(bgzf2 *fp) {
             hts_tpool_destroy(fp->pool);
     }
 
-    if (fp->comp)   bgzf2_buffer_free(fp->comp);
-    if (fp->uncomp) bgzf2_buffer_free(fp->uncomp);
+    if (fp->comp)   bzst_buffer_free(fp->comp);
+    if (fp->uncomp) bzst_buffer_free(fp->uncomp);
 
     ret |= hclose(fp->hfp);
 
@@ -1975,10 +1981,10 @@ int bgzf2_close(bgzf2 *fp) {
     return ret ? -1 : 0;
 }
 
-// Registers a callback function and a block of data with the bgzf2 fp.
+// Registers a callback function and a block of data with the bzst fp.
 // We call this callback on each flush and use the results to generate
 // arbitrary per-frame meta-data.
-void bgzf2_add_flush_callback(bgzf2 *fp, void *flush_data,
+void bzst_add_flush_callback(bzst *fp, void *flush_data,
                               int (*flush_callback)(kstring_t *,
                                                     void *,
                                                     int final)) {
@@ -1986,13 +1992,13 @@ void bgzf2_add_flush_callback(bgzf2 *fp, void *flush_data,
     fp->flush_callback = flush_callback;
 }
 
-// Returns the registered bgzf2 flush_data
-void *bgzf2_flush_data(bgzf2 *fp) {
+// Returns the registered bzst flush_data
+void *bzst_flush_data(bzst *fp) {
     return fp->flush_data;
 }
 
 /*
- * Writes a block of data to a bgzf2 file handle.
+ * Writes a block of data to a bzst file handle.
  *
  * If "can_split" is set then buf may be split into two indexable chunks.
  * Otherwise buf will never span two blocks.
@@ -2000,18 +2006,18 @@ void *bgzf2_flush_data(bgzf2 *fp) {
  * Returns number of bytes written on success
  *        -1 on failure
  */
-int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
+int bzst_write(bzst *fp, const char *buf, size_t buf_sz, int can_split) {
     int r = 0;
 
     do {
         if (fp->uncomp && fp->uncomp->sz == fp->uncomp->pos) {
             // Full
-            if (bgzf2_flush(fp))
+            if (bzst_flush(fp))
                 return -1;
         }
 
         if (!fp->uncomp)
-            if (bgzf2_buffer_grow(&fp->uncomp, fp->block_size) < 0)
+            if (bzst_buffer_grow(&fp->uncomp, fp->block_size) < 0)
                 return -1;
 
         ssize_t consumes = fp->uncomp->sz - fp->uncomp->pos;
@@ -2028,8 +2034,8 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
         } else {
             // Can't split and doesn't fit, so flush and write this new item
             // as a new block if it's too large.
-            int err = bgzf2_flush(fp);
-            if (err || bgzf2_buffer_grow(&fp->uncomp,
+            int err = bzst_flush(fp);
+            if (err || bzst_buffer_grow(&fp->uncomp,
                                          MAX(buf_sz, fp->block_size)) < 0)
                 return -1;
             memcpy(fp->uncomp->buf, buf, buf_sz);
@@ -2042,7 +2048,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
 }
 
 /*
- * Reads more compressed data into the bgzf2_buffer.
+ * Reads more compressed data into the bzst_buffer.
  * NB: The return value is the size of the data when uncompressed.
  * The compressed size will be in (*comp)->sz.
  *
@@ -2052,7 +2058,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
  *         -2 on unknown sized blocks (eg pzstd format)
  *         -3 on switch to stream mode
  */
-/*static*/ size_t bgzf2_read_block(bgzf2 *fp, bgzf2_buffer **comp) {
+/*static*/ size_t bzst_read_block(bzst *fp, bzst_buffer **comp) {
     uint8_t buf[14];
     size_t n;
     uint32_t meta_sz;
@@ -2063,7 +2069,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
 
     uint32_t fsize = le_to_u32(buf+4);
 
-    if (le_to_u32(buf) != BGZF2_SKIPPABLE_ID) {
+    if (le_to_u32(buf) != BZST_SKIPPABLE_ID) {
         if ((le_to_u32(buf) & 0x184D2A50) == 0x184D2A50) {
             // Another skippable frame, so skip it
             char tmp[8192];
@@ -2093,7 +2099,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
             return -1;
         }
 
-        bgzf2_frame_t type = meta[0];
+        bzst_frame_t type = meta[0];
         if (meta_sz < 6) {
             free(meta);
             return -1;
@@ -2104,7 +2110,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
         // FIXME: put it into buffer kstring
         free(meta);
 
-        if (type != BGZF2_BLOCK_META)
+        if (type != GZST_BLOCK_META)
             goto next_block;
     }
 
@@ -2112,7 +2118,7 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
     if (meta_sz < 6)
         return -1;
     size_t csize = le_to_u32(buf+10);
-    if (bgzf2_buffer_grow(comp, csize) < 0)
+    if (bzst_buffer_grow(comp, csize) < 0)
         return -1;
     if (csize != hread(fp->hfp, (*comp)->buf, csize))
         return -1;
@@ -2131,21 +2137,21 @@ int bgzf2_write(bgzf2 *fp, const char *buf, size_t buf_sz, int can_split) {
     return usize;
 }
 
-static pthread_once_t bgzf2_once = PTHREAD_ONCE_INIT;
-static pthread_key_t bgzf2_key;
+static pthread_once_t bzst_once = PTHREAD_ONCE_INIT;
+static pthread_key_t bzst_key;
 
-static void bgzf2_tls_free(void *ptr) {
+static void bzst_tls_free(void *ptr) {
     ZSTD_DStream *zds = (ZSTD_DStream *)ptr;
     if (zds)
         ZSTD_freeDStream(zds);
 }
 
-static void bgzf2_tls_init(void) {
-    pthread_key_create(&bgzf2_key, bgzf2_tls_free);
+static void bzst_tls_init(void) {
+    pthread_key_create(&bzst_key, bzst_tls_free);
 }
 
 /*static*/
-int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
+int bzst_decompress_block(bzst_buffer **comp, bzst_buffer **uncomp,
                            size_t usize) {
     // Allocate uncompressed data block
     if (usize == -2) {
@@ -2158,12 +2164,12 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
         if (*uncomp)
             (*uncomp)->pos = 0;
         if (usize != -2) {
-            if (bgzf2_buffer_grow(uncomp, usize) < 0)
+            if (bzst_buffer_grow(uncomp, usize) < 0)
                 return -1;
         }
         if (!*uncomp || (*uncomp)->alloc == 0)
             // first cautious guess
-            if (bgzf2_buffer_grow(uncomp, (*comp)->sz*4 + 8192) < 0)
+            if (bzst_buffer_grow(uncomp, (*comp)->sz*4 + 8192) < 0)
                 return -1;
         ZSTD_inBuffer input = {
             .src  = (*comp)->buf,
@@ -2180,11 +2186,11 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
         // Cache ZSTD_DStream, one per thread.
         // This is an 8% speed gain in a test, but that may not be
         // representative.
-        pthread_once(&bgzf2_once, bgzf2_tls_init);
-        ZSTD_DStream *zds = pthread_getspecific(bgzf2_key);
+        pthread_once(&bzst_once, bzst_tls_init);
+        ZSTD_DStream *zds = pthread_getspecific(bzst_key);
         if (!zds) {
             zds = ZSTD_createDStream();
-            pthread_setspecific(bgzf2_key, zds);
+            pthread_setspecific(bzst_key, zds);
         }
         //ZSTD_DCtx_reset(zds, ZSTD_reset_session_only);
 
@@ -2208,7 +2214,7 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
                 guess = guess > (*uncomp)->alloc + 10000
                       ? guess : (*uncomp)->alloc + 10000;
                 //fprintf(stderr, "Grow %ld to %ld\n", (*uncomp)->alloc, guess);
-                if (bgzf2_buffer_grow(uncomp, guess) < 0)
+                if (bzst_buffer_grow(uncomp, guess) < 0)
                     return -1;
 
                 output.dst  = (*uncomp)->buf;
@@ -2220,7 +2226,7 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
         while (dsize != 0) {
             fprintf(stderr, "Second zstd decode\n");
             if ((*uncomp)->pos == (*uncomp)->sz)
-                if (bgzf2_buffer_grow(uncomp, (*uncomp)->alloc*1.5+100000) < 0)
+                if (bzst_buffer_grow(uncomp, (*uncomp)->alloc*1.5+100000) < 0)
                     return -1;
 
             output.dst  = (*uncomp)->buf;
@@ -2245,9 +2251,9 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
         //
         // FIXME: merge at some point when we're more confident in robustness
         // of pzstd support.
-        if (usize > BGZF2_MAX_BLOCK_SIZE)
+        if (usize > BZST_MAX_BLOCK_SIZE)
             return -1; // protect against extreme memory size attacks
-        if (bgzf2_buffer_grow(uncomp, usize) < 0)
+        if (bzst_buffer_grow(uncomp, usize) < 0)
             return -1;
         assert((*uncomp)->sz == usize);
 
@@ -2281,12 +2287,12 @@ int bgzf2_decompress_block(bgzf2_buffer **comp, bgzf2_buffer **uncomp,
  *         -1 on failure
  *         -2 on switch to stream mode
  */
-static int bgzf2_decode_block(bgzf2 *fp) {
-    ssize_t usize = bgzf2_read_block(fp, &fp->comp);
+static int bzst_decode_block(bzst *fp) {
+    ssize_t usize = bzst_read_block(fp, &fp->comp);
     if (usize != -2 && usize <= 0)
         return usize;
 
-    return bgzf2_decompress_block(&fp->comp, &fp->uncomp, usize);
+    return bzst_decompress_block(&fp->comp, &fp->uncomp, usize);
 
     // Allocate uncompressed data block
     if (usize == -2) {
@@ -2299,7 +2305,7 @@ static int bgzf2_decode_block(bgzf2 *fp) {
         if (fp->uncomp)
             fp->uncomp->pos = 0;
         if (!fp->uncomp || fp->uncomp->sz == 0)
-            if (bgzf2_buffer_grow(&fp->uncomp, fp->comp->sz*2) < 0)
+            if (bzst_buffer_grow(&fp->uncomp, fp->comp->sz*2) < 0)
                 return -1;
         ZSTD_inBuffer input = {
             .src  = fp->comp->buf,
@@ -2330,7 +2336,7 @@ static int bgzf2_decode_block(bgzf2 *fp) {
                     output.size + 1000;
                 guess = guess > fp->uncomp->sz + 10000
                       ? guess : fp->uncomp->sz + 10000;
-                if (bgzf2_buffer_grow(&fp->uncomp, guess) < 0)
+                if (bzst_buffer_grow(&fp->uncomp, guess) < 0)
                     return -1;
 
                 output.dst  = fp->uncomp->buf;
@@ -2340,7 +2346,7 @@ static int bgzf2_decode_block(bgzf2 *fp) {
 
         // We've used all input, but may still be blocked on output size.
         while (dsize != 0) {
-            if (bgzf2_buffer_grow(&fp->uncomp,
+            if (bzst_buffer_grow(&fp->uncomp,
                                   fp->uncomp->sz * 1.5 + 100000) < 0)
                 return -1;
 
@@ -2358,9 +2364,9 @@ static int bgzf2_decode_block(bgzf2 *fp) {
     } else {
         // FIXME: we could use the same logic above, but seeding the
         // fp->uncomp buffer size with usize instead of a starting guess.
-        if (usize > BGZF2_MAX_BLOCK_SIZE)
+        if (usize > BZST_MAX_BLOCK_SIZE)
             return -1; // protect against extreme memory size attacks
-        if (bgzf2_buffer_grow(&fp->uncomp, usize) < 0)
+        if (bzst_buffer_grow(&fp->uncomp, usize) < 0)
             return -1;
         assert(fp->uncomp->sz == usize);
 
@@ -2383,14 +2389,14 @@ static int bgzf2_decode_block(bgzf2 *fp) {
  *        -1 on eof
  *        -2 on failure
  */
-static int bgzf2_refill_uncomp(bgzf2 *fp) {
+static int bzst_refill_uncomp(bzst *fp) {
     ssize_t n = 0;
 
     if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
         // out of buffered content, fetch some more
         n = fp->pool
-            ? bgzf2_decode_block_mt(fp)
-            : bgzf2_decode_block(fp);
+            ? bzst_decode_block_mt(fp)
+            : bzst_decode_block(fp);
         if (n < 0) {
             return -2; // err
         } else if (n == 0) {
@@ -2403,12 +2409,12 @@ static int bgzf2_refill_uncomp(bgzf2 *fp) {
 }
 
 /*
- * Reads a data from a bgzf2 file handle.
+ * Reads a data from a bzst file handle.
  *
  * Returns number of bytes read on success
  *        -1 on failure
  */
-int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
+int bzst_read(bzst *fp, char *buf, size_t buf_sz) {
     if (fp->hit_eof)
         return 0;
 
@@ -2420,7 +2426,7 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
     //    copy from buffer to buf
     while (buf_sz) {
 #if 1
-        switch (bgzf2_refill_uncomp(fp)) {
+        switch (bzst_refill_uncomp(fp)) {
         case -1:  return decoded; // EOF
         case -2:  return -1;      // error
         }
@@ -2428,8 +2434,8 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
         if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
             // out of buffered content, fetch some more
             size_t n = fp->pool
-                ? bgzf2_decode_block_mt(fp)
-                : bgzf2_decode_block(fp);
+                ? bzst_decode_block_mt(fp)
+                : bzst_decode_block(fp);
             if (n < 0)
                 return -1;
             else if (n == 0) {
@@ -2451,7 +2457,7 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
 }
 
 /*
- * Reads a data from a bgzf2 file handle.  This modifies *buf to
+ * Reads a data from a bzst file handle.  This modifies *buf to
  * point to a block of internal data and returns the size of this data.
  * In will be between 1 and buf_sz bytes long.  This data should not be
  * modified.
@@ -2459,7 +2465,7 @@ int bgzf2_read(bgzf2 *fp, char *buf, size_t buf_sz) {
  * Returns number of bytes read on success
  *        -1 on failure
  */
-int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz) {
+int bzst_read_zero_copy(bzst *fp, const char **buf, size_t buf_sz) {
     if (fp->hit_eof)
         return 0;
 
@@ -2472,8 +2478,8 @@ int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz) {
     if (!fp->uncomp || fp->uncomp->pos == fp->uncomp->sz) {
         // out of buffered content, fetch some more
         ssize_t n = fp->pool
-            ? bgzf2_decode_block_mt(fp)
-            : bgzf2_decode_block(fp);
+            ? bzst_decode_block_mt(fp)
+            : bzst_decode_block(fp);
         if (n < 0)
             return -1;
         else if (n == 0) {
@@ -2493,14 +2499,14 @@ int bgzf2_read_zero_copy(bgzf2 *fp, const char **buf, size_t buf_sz) {
 }
 
 /*
- * Loads a seekable index from a bgzf2 file.
+ * Loads a seekable index from a bzst file.
  *
  * Returns 0 on success,
  *        -1 on error,
  *        -2 on non-seekable stream,
  *        -3 if no index found.
  */
-static int load_seekable_index_common(bgzf2 *fp) {
+static int load_seekable_index_common(bzst *fp) {
     // Look for and validate index footer
     off_t off = hseek(fp->hfp, -9, SEEK_END);
     if (off < 0)
@@ -2521,7 +2527,7 @@ static int load_seekable_index_common(bgzf2 *fp) {
     if (off < 0)
         return -1;
 
-    bgzf2_index_t *idx = NULL;
+    bzst_index_t *idx = NULL;
     uint8_t *buf = malloc(sz);
     if (!buf)
         return -1;
@@ -2579,11 +2585,11 @@ static int load_seekable_index_common(bgzf2 *fp) {
  * Returns an index entry on success,
  *         NULL on failure (errno==ERANGE if beyond end of file)
  */
-static bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos) {
+static bzst_index_t *index_query(bzst *fp, uint64_t upos) {
     int istart = 0;
     int iend = fp->nindex-1;
     int imid;
-    bgzf2_index_t *idx = fp->index;
+    bzst_index_t *idx = fp->index;
 
     // Find approximate location
     for (imid = (iend+1)/2; imid != istart; imid = (istart+iend)/2) {
@@ -2629,7 +2635,7 @@ static bgzf2_index_t *index_query(bgzf2 *fp, uint64_t upos) {
  *
  * TODO: consider "whence" and returning off_t, like lseek?
  */
-int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
+int bzst_seek(bzst *fp, uint64_t upos) {
     int ret = 0;
 
     if (fp->pool) {
@@ -2651,7 +2657,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
             case SEEK_DONE:
                 break;
             case SEEK:
-                // Resend signal intended for bgzf2_mt_reader(), incase
+                // Resend signal intended for bzst_mt_reader(), incase
                 // we were woke up by something else.
                 pthread_cond_signal(&fp->command_c);
                 break;
@@ -2672,7 +2678,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
         }
 
         // Query in index
-        bgzf2_index_t *idx = index_query(fp, upos);
+        bzst_index_t *idx = index_query(fp, upos);
         if (!idx)
             return -1;
         assert(upos >= idx->pos);
@@ -2682,7 +2688,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
         fprintf(stderr, "Seek to %ld\n", idx->cpos);
 
         // Load the relevant block
-        if (bgzf2_decode_block(fp) < 0)
+        if (bzst_decode_block(fp) < 0)
             return -1;
 
         // Skip past any partial data
@@ -2700,7 +2706,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
  *         2 if unable to check (eg cannot seek),
  *        -1 for I/O error, with errno set.
  */
-int bgzf2_check_EOF(bgzf2 *fp) {
+int bzst_check_EOF(bzst *fp) {
     int has_eof, err = 0;
 
     if (fp->pool) {
@@ -2710,7 +2716,7 @@ int bgzf2_check_EOF(bgzf2 *fp) {
         err = fp->errcode;
         pthread_mutex_unlock(&fp->command_m);
     } else {
-        has_eof = bgzf2_check_EOF_common(fp);
+        has_eof = bzst_check_EOF_common(fp);
     }
 
     return err ? -1 : has_eof;
@@ -2725,17 +2731,17 @@ int bgzf2_check_EOF(bgzf2 *fp) {
  * @return       length of the string (capped at INT_MAX);
  *               -1 on end-of-file; <= -2 on error
  */
-int bgzf2_getline(bgzf2 *fp, int delim, kstring_t *str) {
+int bzst_getline(bzst *fp, int delim, kstring_t *str) {
     int state = 0;
     str->l = 0;
     do {
         ssize_t n = 0;
-        if ((n = bgzf2_refill_uncomp(fp)) < 0)
+        if ((n = bzst_refill_uncomp(fp)) < 0)
             return n; // EOF (-1) or error (-2)
 
         // Find end of line, or point to end of buffer if continues.
         // NB: this latter case shouldn't happen as we should always have
-        // whole records in a bgzf2 block, but this is to protect against
+        // whole records in a bzst block, but this is to protect against
         // extreme data (eg >4GB line lengths) and just for extra safety.
         char *eol = memchr(fp->uncomp->buf + fp->uncomp->pos, delim,
                            fp->uncomp->sz - fp->uncomp->pos);
@@ -2764,9 +2770,9 @@ int bgzf2_getline(bgzf2 *fp, int delim, kstring_t *str) {
 }
 
 // -1 for EOF, -2 for error, 0-255 for byte.
-int bgzf2_peek(bgzf2 *fp) {
+int bzst_peek(bzst *fp) {
     ssize_t n = 0;
-    if ((n = bgzf2_refill_uncomp(fp)) < 0)
+    if ((n = bzst_refill_uncomp(fp)) < 0)
         return n; // EOF (-1) or error (-2)
 
     return fp->uncomp->buf[fp->uncomp->pos];
@@ -2791,7 +2797,7 @@ int bgzf2_peek(bgzf2 *fp) {
  * Returns 0 on success,
  *        <0 on failure
  */
-int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
+int bzst_idx_add(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     // Detect unsorted data
     if (fp->last_used < 0)
         return 0; // unsorted
@@ -2820,8 +2826,8 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
         return -1;
 
     // chr22 10511189 rs1234474560 TTTCTTCCCAAATGTGTATTGATTACAC
-    // => bgzf2_idx_add: 22 10511188 10511216
-    //fprintf(stderr, "bgzf2_idx_add: %d %ld %ld\n", tid, beg, end);
+    // => bzst_idx_add: 22 10511188 10511216
+    //fprintf(stderr, "bzst_idx_add: %d %ld %ld\n", tid, beg, end);
 
     if (tid == 0)
         beg = end = 0;
@@ -2832,7 +2838,7 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
             return -1;
         fp->gindex_sz = t;
 
-        bgzf2_gindex_t **t2 = realloc(fp->gindex, (tid+1)*sizeof(*t2));
+        bzst_gindex_t **t2 = realloc(fp->gindex, (tid+1)*sizeof(*t2));
         if (!t)
             return -1;
         fp->gindex = t2;
@@ -2848,13 +2854,13 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     }
 
     // Check for current entry, or allocate a new one
-    bgzf2_gindex_t *idx = NULL;
+    bzst_gindex_t *idx = NULL;
     if (fp->gindex_sz[tid] > 0)
         idx = &fp->gindex[tid][fp->gindex_sz[tid]-1];
 
     if (!idx || fp->last_flush_try <= 0) {
         // A new frame, so add to the index
-        bgzf2_gindex_t *t = realloc(fp->gindex[tid],
+        bzst_gindex_t *t = realloc(fp->gindex[tid],
                                     (fp->gindex_sz[tid]+1) * sizeof(*t));
         if (!t)
             return -1;
@@ -2866,7 +2872,7 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
         idx->beg = beg;
         idx->end = end;
 
-        //fprintf(stderr, "bgzf2_idx_add: %d %ld %ld: %ld %ld\n", tid, beg, end,
+        //fprintf(stderr, "bzst_idx_add: %d %ld %ld: %ld %ld\n", tid, beg, end,
         //      fp->frame_pos, fp->last_flush_try);
     }
 
@@ -2879,30 +2885,30 @@ int bgzf2_idx_add(bgzf2 *fp, int tid, hts_pos_t beg, hts_pos_t end) {
 }
 
 /*
- * Returns the internal temporary kstring associated with this bgzf2 fd.
+ * Returns the internal temporary kstring associated with this bzst fd.
  */
-kstring_t *bgzf2_ks(bgzf2 *fp) {
+kstring_t *bzst_ks(bzst *fp) {
    return &fp->ks;
 }
 
 
 /*
- * Returns the next item from a bgzf2 iterator.
+ * Returns the next item from a bzst iterator.
  * Returns 0 if found,
  *        -1 at EOF,
  *      <=-2 for error.
  */
-int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
+int bzst_itr_next(bzst *fp, hts_itr_t *iter, void *r, void *data) {
     if (!iter || iter->finished)
         return -1;
 
-    if (!iter->is_bgzf2)
+    if (!iter->is_bzst)
         return -2;
 
     if (iter->n_off) {
         iter->n_off = 0;
         // Check pos and cpos work correctly vs /tmp/_1.bcf
-        if (bgzf2_seek(fp, iter->curr_off) < 0) {
+        if (bzst_seek(fp, iter->curr_off) < 0) {
             hts_log_error("Failed to seek to offset %"PRIu64"%s%s",
                           iter->curr_off,
                           errno ? ": " : "", strerror(errno));
@@ -2920,7 +2926,7 @@ int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
 
     do {
         ret = iter->readrec((BGZF *)fp, data, r, &tid, &beg, &end);
-        //fprintf(stderr, "bgzf2_itr_next: %d:%ld-%ld vs %d:%ld-%ld\n",
+        //fprintf(stderr, "bzst_itr_next: %d:%ld-%ld vs %d:%ld-%ld\n",
         //        tid, beg, end, iter->tid, iter->beg, iter->end);
         if (tid == -1)
             tid = INT_MAX;
@@ -2947,24 +2953,24 @@ int bgzf2_itr_next(bgzf2 *fp, hts_itr_t *iter, void *r, void *data) {
 }
 
 /*
- * Query a BGZF2 genomic index on region
+ * Query a BZST genomic index on region
  *
  * Returns hts_itr_t struct ptr on success,
  *         NULL on failure
  */
-hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
+hts_itr_t *bzst_itr_query(const hts_idx_t *idx,
 			   int tid,
 			   hts_pos_t beg,
 			   hts_pos_t end,
 			   hts_readrec_func *readrec) {
-    const hts_bgzf2_idx_t *bidx = (const hts_bgzf2_idx_t *)idx;
+    const hts_bzst_idx_t *bidx = (const hts_bzst_idx_t *)idx;
     hts_itr_t *iter = (hts_itr_t *)calloc(1, sizeof(hts_itr_t));
     if (iter == NULL) return NULL;
 
     if (tid == HTS_IDX_NOCOOR)
         tid = -1;
 
-    int64_t pos = bgzf2_query(bidx->fp, tid, beg, end);
+    int64_t pos = bzst_query(bidx->fp, tid, beg, end);
 
     // hts_itr_t is public and extremely BGZF(1) specific.
     // We fill out tid, beg, end from arguments here, and we reuse
@@ -2974,11 +2980,11 @@ hts_itr_t *bgzf2_itr_query(const hts_idx_t *idx,
     // from seeking.  (We may in theory query multiple places and then seek
     // back to them later on.)
 
-    // An alternative to this would be to put all bgzf2 specific region
-    // functionality internal to the bgzf2 fp, as was done with cram_fd.
+    // An alternative to this would be to put all bzst specific region
+    // functionality internal to the bzst fp, as was done with cram_fd.
     // This may be preferable long term for handling multi-region iterators.
 
-    iter->is_bgzf2 = 1;
+    iter->is_bzst = 1;
     iter->tid = tid;
     iter->beg = tid == -1 ? -1 : beg;
     iter->end = tid == -1 ?  0 : end;

@@ -966,6 +966,39 @@ int bam_write1(BGZF *fp, const bam1_t *b)
         fs->nunmapped_tid[0] += (c->flag & BAM_FUNMAP) != 0;
     }
 
+    if (fp->is_bzst) {
+        frame_stats *fs = bzst_flush_data((bzst *)fp);
+        if (!fs) {
+            if (!(fs = calloc(1, sizeof(*fs))))
+                return -1;
+            bzst_add_flush_callback((bzst *)fp, fs, bam_flush_callback);
+        }
+
+        fs->nmapped   += (c->flag & BAM_FUNMAP) == 0;
+        fs->nunmapped += (c->flag & BAM_FUNMAP) != 0;
+
+        if (c->tid >= -1 && c->tid+2 >= fs->ntid) {
+            uint64_t *tmp;
+            if (!(tmp = realloc(fs->nmapped_tid, (c->tid+3)*sizeof(*tmp))))
+                return -1;
+            fs->nmapped_tid = tmp;
+            if (!(tmp = realloc(fs->nunmapped_tid, (c->tid+3)*sizeof(*tmp))))
+                return -1;
+            fs->nunmapped_tid = tmp;
+            memset(&fs->nmapped_tid[fs->ntid], 0,
+                   (c->tid+3 - fs->ntid)*sizeof(*tmp));
+            memset(&fs->nunmapped_tid[fs->ntid], 0,
+                   (c->tid+3 - fs->ntid)*sizeof(*tmp));
+            fs->ntid = c->tid+3;
+        }
+        if (c->tid >= -1 && c->tid+2 < fs->ntid) {
+            fs->nmapped_tid[c->tid+2]   += (c->flag & BAM_FUNMAP) == 0;
+            fs->nunmapped_tid[c->tid+2] += (c->flag & BAM_FUNMAP) != 0;
+        }
+        fs->nmapped_tid[0]   += (c->flag & BAM_FUNMAP) == 0;
+        fs->nunmapped_tid[0] += (c->flag & BAM_FUNMAP) != 0;
+    }
+
     ok = (bgzf_flush_try(fp, 4 + block_len) >= 0);
     if (fp->is_be) {
         for (i = 0; i < 8; ++i) ed_swap_4p(x + i);
@@ -1132,7 +1165,8 @@ int sam_index_build3(const char *fn, const char *fnidx, int min_shift, int nthre
     case bam:
     case sam:
         if (fp->format.compression != bgzf &&
-            fp->format.compression != bgzf2_compression) {
+            fp->format.compression != bgzf2_compression &&
+            fp->format.compression != bzst_compression) {
             hts_log_error("%s file \"%s\" not BGZF compressed",
                           fp->format.format == bam ? "BAM" : "SAM", fn);
             ret = -1;
@@ -1180,7 +1214,8 @@ int sam_idx_init(htsFile *fp, sam_hdr_t *h, int min_shift, const char *fnidx) {
     if (fp->format.format == bam || fp->format.format == bcf ||
         (fp->format.format == sam &&
          (fp->format.compression == bgzf ||
-          fp->format.compression == bgzf2_compression))) {
+          fp->format.compression == bgzf2_compression ||
+          fp->format.compression != bzst_compression))) {
         int n_lvls, fmt = HTS_FMT_CSI;
         if (min_shift > 0) {
             int64_t max_len = 0;
@@ -1206,7 +1241,7 @@ int sam_idx_init(htsFile *fp, sam_hdr_t *h, int min_shift, const char *fnidx) {
 // Finishes an index. Call after the last record has been written.
 // Returns 0 on success, <0 on failure.
 int sam_idx_save(htsFile *fp) {
-    if (fp->is_bgzf2)
+    if (fp->is_bgzf2 || fp->is_bzst)
         return 0;
 
     if (fp->format.format == bam || fp->format.format == bcf ||
@@ -1737,6 +1772,14 @@ hts_idx_t *hts_bgzf2_idx_init(void *fp) {
     return (hts_idx_t *)idx;
 }
 
+hts_idx_t *hts_bzst_idx_init(void *fp) {
+    hts_bzst_idx_t *idx = calloc(1, sizeof(*idx));
+    if (idx == NULL) return NULL;
+    idx->fmt = HTS_FMT_BZST;
+    idx->fp = fp;
+    return (hts_idx_t *)idx;
+}
+
 hts_idx_t *hts_cram_idx_init(void *fp) {
     hts_cram_idx_t *idx = malloc(sizeof(*idx));
     if (idx == NULL) return NULL;
@@ -1753,6 +1796,11 @@ static hts_idx_t *index_load(htsFile *fp, const char *fn, const char *fnidx, int
         if (fp->format.compression == bgzf2_compression) {
             // Cons up a fake "index" just pointing at the associated cram_fd:
             return hts_bgzf2_idx_init(fp->fp.bgzf2);
+        }
+
+        if (fp->format.compression == bzst_compression) {
+            // Cons up a fake "index" just pointing at the associated cram_fd:
+            return hts_bzst_idx_init(fp->fp.bzst);
         }
 
         return hts_idx_load3(fn, fnidx, HTS_FMT_BAI, flags);
@@ -1849,6 +1897,8 @@ hts_itr_t *sam_itr_queryi(const hts_idx_t *idx, int tid, hts_pos_t beg, hts_pos_
         return cram_itr_query(idx, tid, beg, end, sam_readrec);
     else if (cidx->fmt == HTS_FMT_BGZF2)
         return bgzf2_itr_query(idx, tid, beg, end, sam_readrec);
+    else if (cidx->fmt == HTS_FMT_BZST)
+        return bzst_itr_query(idx, tid, beg, end, sam_readrec);
     else
         return hts_itr_query(idx, tid, beg, end, sam_readrec);
 }
@@ -1862,12 +1912,20 @@ static int cram_name2id(void *fdv, const char *ref)
 hts_itr_t *sam_itr_querys(const hts_idx_t *idx, sam_hdr_t *hdr, const char *region)
 {
     const hts_cram_idx_t *cidx = (const hts_cram_idx_t *) idx;
-    return hts_itr_querys(idx, region, bam_name2id_wrapper, hdr,
-                          cidx->fmt == HTS_FMT_CRAI ? cram_itr_query
-                          : cidx->fmt == HTS_FMT_BGZF2
-                            ? bgzf2_itr_query
-                            : hts_itr_query,
-                          sam_readrec);
+    switch (cidx->fmt) {
+    case HTS_FMT_CRAI:
+        return hts_itr_querys(idx, region, bam_name2id_wrapper, hdr,
+                              cram_itr_query, sam_readrec);
+    case HTS_FMT_BGZF2:
+        return hts_itr_querys(idx, region, bam_name2id_wrapper, hdr,
+                              bgzf2_itr_query, sam_readrec);
+    case HTS_FMT_BZST:
+        return hts_itr_querys(idx, region, bam_name2id_wrapper, hdr,
+                              bzst_itr_query, sam_readrec);
+    default:
+        return hts_itr_querys(idx, region, bam_name2id_wrapper, hdr,
+                              hts_itr_query, sam_readrec);
+    }
 }
 
 hts_itr_t *sam_itr_regarray(const hts_idx_t *idx, sam_hdr_t *hdr, char **regarray, unsigned int regcount)
@@ -2159,6 +2217,8 @@ int sam_hdr_write(htsFile *fp, const sam_hdr_t *h)
             if (bgzf_flush(fp->fp.bgzf) != 0) return -1;
         } else if (fp->is_bgzf2) {
             if (bgzf2_flush(fp->fp.bgzf2) != 0) return -1;
+        } else if (fp->is_bzst) {
+            if (bzst_flush(fp->fp.bzst) != 0) return -1;
         } else {
             if (hflush(fp->fp.hfile) != 0) return -1;
         }
@@ -3639,7 +3699,8 @@ static void *sam_dispatcher_write(void *vp) {
 
                 bam1_t *b = &gb->bams[count++];
                 if (fp->format.compression == bgzf ||
-                    fp->format.compression == bgzf2_compression) {
+                    fp->format.compression == bgzf2_compression ||
+                    fp->format.compression == bzst_compression) {
                     if (bgzf_idx_push(fp->fp.bgzf, fp->idx,
                                       b->core.tid, b->core.pos, bam_endpos(b),
                                       bgzf_tell(fp->fp.bgzf),
@@ -3852,6 +3913,8 @@ int sam_set_thread_pool(htsFile *fp, htsThreadPool *p) {
         return bgzf_thread_pool(fp->fp.bgzf, p->pool, p->qsize);
     else if (fp->format.compression == bgzf2_compression)
         return bgzf2_thread_pool(fp->fp.bgzf2, p->pool, p->qsize);
+    else if (fp->format.compression == bzst_compression)
+        return bzst_thread_pool(fp->fp.bzst, p->pool, p->qsize);
 
     return 0;
 }
@@ -4771,7 +4834,8 @@ int sam_write1(htsFile *fp, const sam_hdr_t *h, const bam1_t *b)
 
             if (fp->idx) {
                 if (fp->format.compression == bgzf ||
-                    fp->format.compression == bgzf2_compression) {
+                    fp->format.compression == bgzf2_compression ||
+                    fp->format.compression == bzst_compression) {
                     if (bgzf_idx_push(fp->fp.bgzf, fp->idx, b->core.tid, b->core.pos, bam_endpos(b),
                                       bgzf_tell(fp->fp.bgzf), !(b->core.flag&BAM_FUNMAP)) < 0) {
                         hts_log_error("Read '%s' with ref_name='%s', ref_length=%"PRIhts_pos", flags=%d, pos=%"PRIhts_pos" cannot be indexed",

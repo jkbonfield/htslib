@@ -63,6 +63,7 @@ enum test_op {
     WRITE_FASTQ        = 64,
     WRITE_FASTA        = 128,
     WRITE_COMPRESSED_ZSTD = 256, // eg vcf.zst, sam.zst, bam (bgzf2)
+    WRITE_COMPRESSED_BZST = 512, // eg vcf.bzst, sam.bzst, bam (bzst)
 };
 
 int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, htsFile *out) {
@@ -200,7 +201,7 @@ int vcf_readrec(BGZF *fp, void *hp, void *bp,
                 int *tid, hts_pos_t *beg, hts_pos_t *end) {
     //kstring_t s = {0,0,0}; // FIXME cache this somewhere
     //int ret = bgzf_getline(fp, '\n', &s);
-    kstring_t *s = bgzf2_ks((bgzf2 *)fp);
+    kstring_t *s = bzst_ks((bzst *)fp);
     int ret = bgzf_getline(fp, '\n', s);
     if (ret < 0)
         return ret;
@@ -250,6 +251,13 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
                 if (!tbx)
                     return -1;
 
+            } else if (in->format.compression == bzst_compression) {
+                // Fake up an index as it's inherently part of the file
+                // descriptor for BZST
+                tbx = (tbx_t *)hts_bzst_idx_init(in->fp.bzst);
+                if (!tbx)
+                    return -1;
+
             } else {
                 if ((tbx = tbx_index_load2(argv[optind], NULL)) == 0) {
                     fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
@@ -272,7 +280,11 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
                                      //(hts_name2id_f)(tbx_name2id), tbx
                                      (hts_name2id_f)(bcf_hdr_name2id), h,
                                      bgzf2_itr_query, vcf_readrec)
-                    : tbx_itr_querys(tbx, argv[i]);
+                    : ( *(int *)tbx == HTS_FMT_BZST
+                        ? hts_itr_querys((hts_idx_t*)tbx, argv[i],
+                                         (hts_name2id_f)(bcf_hdr_name2id), h,
+                                         bzst_itr_query, vcf_readrec)
+                        : tbx_itr_querys(tbx, argv[i]));
                 if (!iter) {
                     fprintf(stderr, "[E::%s] fail to parse region '%s'\n",
                             __func__, argv[i]);
@@ -280,8 +292,9 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
                     break;
                 }
 
-                if (in->format.compression == bgzf2_compression) {
-                    while ((r = tbx_itr_next(in, h, iter, b)) >= 0) {
+                if (in->format.compression == bgzf2_compression ||
+                    in->format.compression == bzst_compression) {
+                    while ((r = tbx_itr_next(in, (tbx_t *)h, iter, b)) >= 0) {
                         if (!opts->benchmark && bcf_write1(out, h, b) < 0) {
                             fprintf(stderr, "Error writing output.\n");
                             exit_code = 1;
@@ -314,7 +327,8 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
             }
             free(line.s);
 
-            if (in->format.compression == bgzf2_compression)
+            if (in->format.compression == bgzf2_compression ||
+                in->format.compression == bzst_compression)
                 free(tbx);
             else
                 tbx_destroy(tbx);
@@ -328,6 +342,13 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
                 if (!idx)
                     return -1;
 
+            } else if (in->format.compression == bzst_compression) {
+                // Fake up an index as it's inherently part of the file
+                // descriptor for BZST
+                idx = hts_bzst_idx_init(in->fp.bzst);
+                if (!idx)
+                    return -1;
+
             } else if ((idx = bcf_index_load(argv[optind])) == 0) {
                 fprintf(stderr, "[E::%s] fail to load the BVCF index\n",
                         __func__);
@@ -336,10 +357,14 @@ int vcf_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
 
             for (i = optind + 1; i < argc; i++) {
                 // FIXME: idx is opaque
-                hts_itr_t *iter = *(int *)idx == HTS_FMT_BGZF2
+                hts_itr_t *iter = (*(int *)idx == HTS_FMT_BGZF2 ||
+                                   *(int *)idx == HTS_FMT_BZST)
                     ? hts_itr_querys(idx, argv[i],
-                                     (hts_name2id_f)(bcf_hdr_name2id),
-                                     h, bgzf2_itr_query, bcf_readrec)
+                                     (hts_name2id_f)(bcf_hdr_name2id), h,
+                                     *(int *)idx == HTS_FMT_BGZF2
+                                     ? bgzf2_itr_query
+                                     : bzst_itr_query,
+                                     bcf_readrec)
                     : bcf_itr_querys(idx, h, argv[i]);
                 if (!iter) {
                     fprintf(stderr, "[E::%s] fail to parse region '%s'\n",
@@ -428,12 +453,15 @@ int main(int argc, char *argv[])
         case 'i': if (hts_opt_add(&in_opts, optarg)) return 1; break;
         case 'b': opts.flag |= WRITE_BINARY_COMP; break;
         case 'z':
-            // toggle between bgzf and bgzf2
+            // toggle between bgzf, bgzf2 and bzst
             if (opts.flag & WRITE_COMPRESSED) {
                 opts.flag &= ~WRITE_COMPRESSED;
                 opts.flag |= WRITE_COMPRESSED_ZSTD;
-            } else {
+            } else if (opts.flag & WRITE_COMPRESSED_ZSTD) {
                 opts.flag &= ~WRITE_COMPRESSED_ZSTD;
+                opts.flag |= WRITE_COMPRESSED_BZST;
+            } else {
+                opts.flag &= ~WRITE_COMPRESSED_BZST;
                 opts.flag |= WRITE_COMPRESSED;
             }
             break;
@@ -500,6 +528,7 @@ int main(int argc, char *argv[])
     else if (opts.flag & WRITE_COMPRESSED) strcat(modew, "z");
     else if (opts.flag & WRITE_UNCOMPRESSED) strcat(modew, "bu");
     if (opts.flag & WRITE_COMPRESSED_ZSTD) strcat(modew, "Z");
+    if (opts.flag & WRITE_COMPRESSED_BZST) strcat(modew, "B");
     if (opts.flag & WRITE_FASTQ) strcat(modew, "f");
     else if (opts.flag & WRITE_FASTA) strcat(modew, "F");
     out = hts_open(out_fn, modew);

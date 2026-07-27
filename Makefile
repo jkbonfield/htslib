@@ -215,6 +215,7 @@ LIBHTS_OBJS = \
 	bcf_sr_sort.o \
 	bgzf.o \
 	bgzf2.o \
+	bzst.o \
 	errmod.o \
 	faidx.o \
 	header.o \
@@ -505,6 +506,7 @@ hts-object-files: $(LIBHTS_OBJS)
 
 bgzf.o bgzf.pico: bgzf.c config.h $(htslib_hts_h) $(htslib_bgzf_h) $(htslib_hfile_h) $(htslib_thread_pool_h) $(htslib_hts_alloc_h) $(htslib_hts_endian_h) cram/pooled_alloc.h $(hts_internal_h) $(bgzf_internal_h) $(htslib_khash_h)
 bgzf2.o bgzf2.pico: bgzf2.c config.h $(htslib_hts_h) $(htslib_bgzf_h) $(htslib_hfile_h)
+bzst.o bzst.pico: bzst.c config.h $(htslib_hts_h) $(htslib_bgzf_h) $(htslib_hfile_h)
 errmod.o errmod.pico: errmod.c config.h $(htslib_hts_h) $(htslib_ksort_h) $(htslib_hts_os_h)
 kstring.o kstring.pico: kstring.c config.h $(htslib_kstring_h) $(htslib_hts_alloc_h)
 header.o header.pico: header.c config.h $(textutils_internal_h) $(header_h) $(htslib_bgzf_h) $(htslib_hfile_h) $(htslib_hts_alloc_h) $(htslib_kseq_h)
@@ -589,6 +591,7 @@ ref_cache/ref-cache: $(REF_CACHE_OBJS)
 annot-tsv.o: annot-tsv.c config.h $(htslib_hts_h) $(htslib_hts_alloc_h) $(htslib_hts_defs_h) $(htslib_khash_str2int_h) $(htslib_kstring_h) $(htslib_kseq_h) $(htslib_bgzf_h) $(htslib_regidx_h) $(textutils_internal_h)
 bgzip.o: bgzip.c config.h $(htslib_bgzf_h) $(htslib_hts_h) $(htslib_hts_alloc_h) $(htslib_hfile_h)
 bgzip2.o: bgzip2.c config.h $(htslib_bgzf2_h) $(htslib_hts_h) $(htslib_hfile_h)
+bzst.o: bzst.c config.h $(htslib_bzts_h) $(htslib_hts_h) $(htslib_hfile_h)
 htsfile.o: htsfile.c config.h $(htslib_hfile_h) $(htslib_hts_h) $(htslib_sam_h) $(htslib_vcf_h)
 tabix.o: tabix.c config.h $(htslib_tbx_h) $(htslib_sam_h) $(htslib_vcf_h) $(htslib_kseq_h) $(htslib_bgzf_h) $(htslib_hts_h) $(htslib_hts_alloc_h) $(htslib_regidx_h) $(htslib_hts_defs_h) $(htslib_hts_log_h) $(htslib_thread_pool_h)
 
@@ -698,7 +701,10 @@ SRC = $(srcprefix)
 test_bgzf2:
 	cd test/bgzf2 && ./test-bgzf2.sh
 
-check test: all $(HTSCODECS_TEST_TARGETS) test_bgzf2
+test_bzst:
+	cd test/bzst && ./test-bzst.sh
+
+check test: all $(HTSCODECS_TEST_TARGETS) test_bgzf2 test_bzst
 	test/hts_endian
 	test/test_alloc
 	test/test_expr
