@@ -60,6 +60,7 @@ typedef struct bzst bzst;
 #include "hts.h"
 
 #define BZST_SKIPPABLE_ID 0x184D2A5B
+#define BZST_EOF          0x8f92ea5b
 
 // Subdivide the BZST skippable frame sub-types
 typedef enum bzst_frame {

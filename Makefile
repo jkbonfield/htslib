@@ -71,6 +71,7 @@ BUILT_PROGRAMS = \
 	annot-tsv \
 	bgzip \
 	bgzip2 \
+	bzst_cli \
 	htsfile \
 	tabix
 
@@ -578,6 +579,9 @@ bgzip: bgzip.o libhts.a
 
 bgzip2: bgzip2.o libhts.a
 	$(CC) $(LDFLAGS) -o $@ bgzip2.o libhts.a $(LIBS) -lpthread
+
+bzst_cli: bzst_cli.o libhts.a
+	$(CC) $(LDFLAGS) -o $@ bzst_cli.o libhts.a $(LIBS) -lpthread
 
 htsfile: htsfile.o libhts.a
 	$(CC) $(LDFLAGS) -o $@ htsfile.o libhts.a $(LIBS) -lpthread
