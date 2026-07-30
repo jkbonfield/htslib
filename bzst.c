@@ -98,6 +98,9 @@ Known skippable frame IDs:
 #include <zstd.h>
 #include <math.h>
 
+#define XXH_STATIC_LINKING_ONLY
+#define XXH_IMPLEMENTATION
+#include "xxhash.h"
 #include "htslib/hfile.h"
 #include "htslib/hts_endian.h"
 #include "htslib/thread_pool.h"
@@ -486,9 +489,7 @@ static int bzst_write_header(bzst *fp) {
     memcpy(buf+14, "\0\0\0\0", 4);  // parent-format magic
     buf[18] = 0;                    // profile
     buf[19] = 0;                    // flags
-    //u64_to_le(XXH64(buf, 20, 0), buf+20);
-    uint64_t ZSTD_XXH64(uint8_t *buf, size_t len, int seed);
-    u64_to_le(ZSTD_XXH64(buf, 20, 0), buf+20);
+    u64_to_le(XXH64(buf, 20, 0), buf+20);
 
     // Add index entry so offsets work
     if (bzst_add_index(fp, 0, 28) < 0)
@@ -889,27 +890,70 @@ static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp) {
 }
 
 /*
- * Writes a meta-data skippable frame indicating the size of
+ * Writes a per-block meta-data skippable frame holding any format
+ * specific additional information per block.  Eg the chromosome range
+ * covered by alignments or variants.
+ *
+ * Format:
+ * 4      skippable id: 0x184D2A5B
+ * 4      frame size (N+6)
+ * 1      sub-type: GZST_BLOCK_META
+ * 1      sub-type version (0)
+ * N      meta-data
+ * 4      checksum (low 32-bit xxhash64)
+ *
+ * Returns 0 on success,
+ *        -1 on failure
+ */
+static int write_block_metadata(bzst *fp, kstring_t *meta) {
+    uint8_t buf[18];
+
+    if (!meta || !meta->l)
+	return 0;
+
+    u32_to_le(BZST_SKIPPABLE_ID, buf); // skippable frame id
+    u32_to_le(meta->l + 6, buf+4);     // frame size
+    buf[8] = GZST_BLOCK_META;          // sub-type
+    buf[9] = 0;                        // sub-type version
+
+    int ret = 0;
+    ret |= hwrite(fp->hfp, buf, 10) != 10;
+    ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
+
+    // or XXH64_state_t *state = XXH64_createState()
+    // if we didn't define XXH_STATIC_LINKING_ONLY
+    XXH64_state_t state;
+    XXH64_reset(&state, 0);
+    XXH64_update(&state, buf, 10);
+    XXH64_update(&state, meta->s, meta->l);
+    u32_to_le(XXH64_digest(&state), buf); // checksum
+
+    ret |= hwrite(fp->hfp, buf, 4) != 4;
+
+    return ret ? -1 : 0;
+}
+
+/*
+ * Writes a BZST_BLOCK_HEADER skippable frame indicating the size of
  * the next compressed data frame.  We also add it to the index we're
  * building up for zstd seekable.
  *
  * Returns 0 on success,
  *        -1 on failure
  */
-static int write_block_metadata(bzst *fp, uint32_t comp_sz,
-                                kstring_t *meta) {
-    uint8_t buf[18];
+static int write_block_header(bzst *fp, ssize_t comp_sz, ssize_t uncomp_sz) {
+    uint8_t buf[30];
 
-    u32_to_le(BZST_SKIPPABLE_ID, buf); // pzstd skippable magic no.
-    u32_to_le(6 + (meta ? meta->l : 0), buf + 4);
-    buf[8] = GZST_BLOCK_META;
-    buf[9] = 0; // meta-data format version
-    u32_to_le(comp_sz, buf+10);
+    u32_to_le(BZST_SKIPPABLE_ID, buf); // skippable ID
+    u32_to_le(22, buf + 4);            // frame size
+    buf[8] = BZST_BLOCK_HEADER;        // subtype
+    u64_to_le(comp_sz, buf+9);         // next block compressed size
+    u64_to_le(uncomp_sz, buf+17);      // " uncompressed size
+    buf[25] = 0; // flags              // flags (bit 0 = stored; advisory?)
+    u32_to_le(XXH64(buf, 0, 26), buf+26);  // low-32 bit checksum 
 
-    int ret = bzst_add_index(fp, 0, 14 + (meta ? meta->l : 0));
-    ret |= hwrite(fp->hfp, buf, 14) != 14;
-    if (meta && meta->l)
-        ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
+    int ret = bzst_add_index(fp, 0, 30 + comp_sz);
+    ret |= hwrite(fp->hfp, buf, 30) != 30;
 
     return ret ? -1 : 0;
 }
@@ -1126,7 +1170,9 @@ static void *bzst_mt_writer(void *vp) {
 //            goto err;
 
 
-        if (write_block_metadata(fp, j->comp->sz, &j->uncomp->meta) < 0)
+        if (write_block_metadata(fp, &j->uncomp->meta) < 0)
+            goto err;
+        if (write_block_header(fp, j->comp->sz, j->uncomp->sz) < 0)
             goto err;
 
         pthread_mutex_lock(&fp->job_pool_m);
@@ -1628,7 +1674,9 @@ static int bzst_write_block(bzst *fp, bzst_buffer *buf) {
                                        fp->level)) < 0)
         return -1;
 
-    if (write_block_metadata(fp, fp->comp->sz, &buf->meta) < 0)
+    if (write_block_metadata(fp, &buf->meta) < 0)
+	return -1;
+    if (write_block_header(fp, fp->comp->sz, fp->uncomp->sz) < 0)
         return -1;
 
     int ret = bzst_add_index(fp, buf->pos, fp->comp->sz);
@@ -1916,7 +1964,6 @@ int bzst_close(bzst *fp) {
             kstring_t final_meta = KS_INITIALIZE;
             fp->flush_callback(&final_meta, fp->flush_data, 1);
             ret |= write_file_metadata(fp, &final_meta);
-            //ret |= write_block_metadata(fp, 0, &final_meta);
             free(final_meta.s);
         }
 
