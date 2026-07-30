@@ -70,7 +70,7 @@ typedef enum bzst_frame {
 	BZST_DICT          = 3,  // Localised dictionary
 
     // Genomic coordinate sub-types
-    GZST_HEADER        = 64, // eg SAM header text
+	GZST_HEADER        = 64, // eg SAM header text
 	GZST_BLOCK_META    = 65, // eg CRAM container struct with chr:start-end
 	GZST_FILE_META     = 66, // idxstats equivalent
 	GZST_GENOMIC_INDEX = 67, // mapping chr:pos to uncompressed offset
