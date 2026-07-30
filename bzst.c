@@ -200,7 +200,6 @@ struct bzst {
     unsigned dummy1:16, is_zstd:1, first_block:1, dummy2:13, is_bzst:1;
 
     struct hFILE *hfp;    // actual file handle
-    int format;           // encoding format (unused, but zlib, zstd, bsc, ...)
     int level;            // compression level
     int is_write;         // open for write
     int block_size;       // ideal block size
@@ -258,6 +257,11 @@ struct bzst {
     // Per frame meta-data callback
     int (*flush_callback)(kstring_t *ks, void *flush_data, int final);
     void *flush_data;
+
+    // Sub-format information
+    uint32_t format;
+    uint8_t profiles;
+    uint8_t flags;
 };
 
 static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp);
@@ -496,6 +500,38 @@ static int bzst_write_header(bzst *fp) {
         return -1;
 
     return hwrite(fp->hfp, buf, 28);
+}
+
+/*
+ * Reads and validates the BZST header.
+ * Fills out fp format, profile and flags fields too.
+ *
+ * Returns -1 on failure
+ *          format number on success
+ */
+static int bzst_read_header(bzst *fp) {
+    uint8_t buf[28];
+    if (10 != hpeek(fp->hfp, buf, 10))
+	return -1;
+
+    if (le_to_u32(buf) != BZST_SKIPPABLE_ID
+	|| buf[8] != BZST_HEADER
+	|| buf[9] != 1 /* format version */
+	|| le_to_u32(buf+4) != 20)
+	return -1;
+
+    if (28 != hread(fp->hfp, buf, 28))
+	return -1;
+    if (memcmp(buf+10, "BZST", 4) != 0)
+	return -1;
+    if (XXH64(buf, 20, 0) != le_to_u64(buf+20))
+	return -1;
+
+    fp->format = le_to_u32(buf+14);
+    fp->profiles = buf[18];
+    fp->flags = buf[19];
+
+    return 0;
 }
 
 /*
@@ -815,17 +851,9 @@ int64_t bzst_query(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     return UINT64_MAX;
 }
 
-/*
- * Write an index in the format expected by zstd seekable-format
- * https://github.com/facebook/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md
- *
- * We don't add checksums as these are already part of zstd.
- * This index must come last in the file if we wish seekable-format to
- * be able to process this file.
- *
- * Returns 0 on success,
- *        <0 on failure
- */
+
+#if 0
+// The old seekable-index format
 static int write_seekable_index(bzst *fp) {
     bzst_index_t *idx = fp->index;
     int nidx = fp->nindex;
@@ -852,6 +880,77 @@ static int write_seekable_index(bzst *fp) {
     u32_to_le(0x8F92EAB1, buf+off); off += 4;
 
     int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
+    free(buf);
+
+    return ret;
+}
+#endif
+
+/*
+ * Write an index holding a compressed to uncompressed lookup table.
+ * This is also used as an EOF marker and must be the last frame in the file.
+ *
+ * Format:
+ * 4      skippable id: 0x184D2A5B
+ * 4      frame size (N+6)
+ * 1      sub-type: BZST_INDEX
+ * 1      index flags
+ * 8      entry count
+ * 8      uncompressed file size
+ * --- per entry
+ *   8    uncompressed offset
+ *   8    compressed offset of block header frame
+ *   8    block length (block header frame + zstd data frame)
+ * ---
+ * 8      XXH64 checksum (not including next 12)
+ * 8      Index offset (should be 4 bytes due to frame_size?)
+ * 4      BZST_EOF  magic
+ *
+ * = 46 + N * 24 bytes
+ *
+ * Returns 0 on success,
+ *        <0 on failure
+ */
+static int write_bzst_index(bzst *fp) {
+    bzst_index_t *idx = fp->index;
+    uint64_t nidx = fp->nindex;
+    uint64_t frame_size = 38 + nidx/2 * 24;
+    uint8_t *buf = malloc(8 + frame_size);
+    if (!buf)
+        return -1;
+
+    // header
+    uint64_t tot_size = 0;
+    for (int i = 0; i < nidx; i++)
+	tot_size += idx[i].uncomp;
+
+    u32_to_le(BZST_SKIPPABLE_ID, buf);
+    u32_to_le(frame_size, buf+4);
+    buf[8] = BZST_INDEX;           // sub-type
+    buf[9] = 0;                    // index flags (uncompressed for now)
+    u64_to_le(nidx, buf+10);     // index count
+    u64_to_le(tot_size, buf+18); // total file size
+
+    // Index entries; in pairs with header block and data block
+    uint64_t comp_acc = 0; // wrong: location of first block header
+    uint64_t uncomp_acc = 0;
+    uint64_t off = 26;
+    for (uint64_t i = 0; i+1 < nidx; i+=2, off += 24) {
+        u64_to_le(comp_acc,   buf+off);
+        u64_to_le(uncomp_acc, buf+off+8);
+	uint64_t block_length = idx[i+0].comp + idx[i+1].comp;
+	u64_to_le(block_length, buf+off+16);
+	comp_acc   += block_length; // FIXME: + format specific meta-data
+	uncomp_acc += idx[i+1].uncomp;
+    }
+
+    // Index footer
+    u64_to_le(XXH64(buf, off, 0), buf+off); off += 8;
+    u64_to_le(off, buf+off);                off += 8;
+    u32_to_le(BZST_EOF, buf+off);           off += 4;
+    
+    int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
+    fprintf(stderr, "Wrote %ld for %ld items\n", off, nidx);
     free(buf);
 
     return ret;
@@ -950,7 +1049,7 @@ static int write_block_header(bzst *fp, ssize_t comp_sz, ssize_t uncomp_sz) {
     u64_to_le(comp_sz, buf+9);         // next block compressed size
     u64_to_le(uncomp_sz, buf+17);      // " uncompressed size
     buf[25] = 0; // flags              // flags (bit 0 = stored; advisory?)
-    u32_to_le(XXH64(buf, 0, 26), buf+26);  // low-32 bit checksum 
+    u32_to_le(XXH64(buf, 26, 0), buf+26);  // low-32 bit checksum
 
     int ret = bzst_add_index(fp, 0, 30 + comp_sz);
     ret |= hwrite(fp->hfp, buf, 30) != 30;
@@ -1676,7 +1775,7 @@ static int bzst_write_block(bzst *fp, bzst_buffer *buf) {
 
     if (write_block_metadata(fp, &buf->meta) < 0)
 	return -1;
-    if (write_block_header(fp, fp->comp->sz, fp->uncomp->sz) < 0)
+    if (write_block_header(fp, fp->comp->sz, buf->pos) < 0)
         return -1;
 
     int ret = bzst_add_index(fp, buf->pos, fp->comp->sz);
@@ -1902,6 +2001,12 @@ static bzst *bzst_open_common(bzst *fp, hFILE *hfp, const char *mode) {
         fp->level = level;
     } else {
         fp->is_write = 0;
+
+	//hfile_set_blksize(fp->hfp, 1024*1024);
+
+	// Read and validate header
+	if (bzst_read_header(fp) < 0)
+	    return NULL;
     }
 
 //    // Threading
@@ -1968,7 +2073,7 @@ int bzst_close(bzst *fp) {
         }
 
         ret |= write_genomic_index(fp);
-        ret |= write_seekable_index(fp);
+        ret |= write_bzst_index(fp);
     }
 
     if (fp->pool) {
@@ -2095,6 +2200,29 @@ int bzst_write(bzst *fp, const char *buf, size_t buf_sz, int can_split) {
 }
 
 /*
+ * Skip an unrecognised skippable frame.
+ * "incr" is how many bytes to add to fsize to discard.
+ *
+ * Returns the last 4 bytes on success,
+ *        -1 on failure
+ */
+static uint32_t skip_frame(bzst *fp, uint32_t fsize, uint32_t incr) {
+    uint32_t eof = 0;
+    uint8_t tmp[8192];
+    size_t n, c = fsize + incr;
+    while (c > 0 && (n = hread(fp->hfp, tmp, MIN(8192, c))) > 0) {
+	switch(n) {
+	default: eof <<= 8; eof |= tmp[--n]; c--;
+	case 3:  eof <<= 8; eof |= tmp[--n]; c--;
+	case 2:  eof <<= 8; eof |= tmp[--n]; c--;
+	case 1:  eof <<= 8; eof |= tmp[--n]; c--;
+	}
+	c -= n;
+    }
+    return n > 0 ? eof : -1;
+}
+
+/*
  * Reads more compressed data into the bzst_buffer.
  * NB: The return value is the size of the data when uncompressed.
  * The compressed size will be in (*comp)->sz.
@@ -2106,76 +2234,75 @@ int bzst_write(bzst *fp, const char *buf, size_t buf_sz, int can_split) {
  *         -3 on switch to stream mode
  */
 /*static*/ size_t bzst_read_block(bzst *fp, bzst_buffer **comp) {
-    uint8_t buf[14];
+    uint8_t buf[9], frame[100];
     size_t n;
-    uint32_t meta_sz;
+    uint32_t frame_sz;
+    ssize_t usize = 0, csize = 0;
+    uint8_t flags;
+    uint32_t eof = 0;
 
- next_block:
-    if (8 != (n = hread(fp->hfp, buf, 8)))
-        return n == 0 ? 0 : -1;
+    while (((n = hpeek(fp->hfp, buf, 9)) == 9 || n == 8) &&
+	   (le_to_u32(buf) & 0x184D2A50) == 0x184D2A50) {
+	frame_sz = le_to_u32(buf+4);
+	if (le_to_u32(buf) != BZST_SKIPPABLE_ID) {
+	    if (skip_frame(fp, frame_sz, 8) < 0)
+		return -1;
+	    continue;
+	}
 
-    uint32_t fsize = le_to_u32(buf+4);
+	bzst_frame_t type = n == 9 ? buf[8] : -1;
+	if (type != BZST_BLOCK_HEADER) {
+	    // This could be an trailing block, e.g. BZST_INDEX
+	    // fprintf(stderr, "Unexpected BZST block type %d\n", type);
+	    if ((eof = skip_frame(fp, frame_sz, 8)) < 0)
+		return -1;
+	    continue;
+	}
 
-    if (le_to_u32(buf) != BZST_SKIPPABLE_ID) {
-        if ((le_to_u32(buf) & 0x184D2A50) == 0x184D2A50) {
-            // Another skippable frame, so skip it
-            char tmp[8192];
-            size_t n, c = fsize;
-            while (c > 0 && (n = hread(fp->hfp, tmp, MIN(8192, c))) > 0)
-                c -= n;
+	if (frame_sz != 22) {
+	    fprintf(stderr, "Incorrect BZST_BLOCK_HEADER frame size\n");
+	    return -1;
+	}
 
-            if (c)
-                return -1;
+	if (8 + frame_sz != hread(fp->hfp, frame, 8 + frame_sz))
+	    return -1;
 
-            goto next_block;
-        }
-        return -3;
-    } else {
-        meta_sz = le_to_u32(buf+4);
-        if (meta_sz > 100000) {
-            fprintf(stderr, "Unexpectedly large meta-data size.  Aborting\n");
-            return -3;
-        }
-        uint8_t *meta = malloc(meta_sz);
-        if (!meta)
-            return -1;
+	uint32_t chk = XXH64(frame, 26, 0) & 0xffffffff;
+	if (le_to_u32(frame+26) != chk) {
+	    fprintf(stderr, "BZST_BLOCK_HEADER checksum failure\n");
+	    return -1;
+	}
 
-        // remainder of pzstd skippable frame, now we know it is one
-        if (meta_sz != hread(fp->hfp, meta, meta_sz)) {
-            free(meta);
-            return -1;
-        }
-
-        bzst_frame_t type = meta[0];
-        if (meta_sz < 6) {
-            free(meta);
-            return -1;
-        }
-
-        memcpy(buf+8, meta, 6); // csize
-
-        // FIXME: put it into buffer kstring
-        free(meta);
-
-        if (type != GZST_BLOCK_META)
-            goto next_block;
+	csize = le_to_u64(frame+9);
+	usize = le_to_u64(frame+17);
+	flags = frame[25];
     }
 
-    // Load compressed data
-    if (meta_sz < 6)
-        return -1;
-    size_t csize = le_to_u32(buf+10);
+
+    // Load compressed data.
+    // We should now have computed usize and csize.  If not then we've
+    // failed to have the correct zstd frame layout or it's EOF.
+    if (!csize)
+	return (hpeek(fp->hfp, buf, 8) == 0) && eof == BZST_EOF ? 0 : -1;
+
     if (bzst_buffer_grow(comp, csize) < 0)
         return -1;
     if (csize != hread(fp->hfp, (*comp)->buf, csize))
         return -1;
 
+    // FIXME: check for flags&1.
+    // If set then this is uncompressed data.  Is this true? Test
+    // with uncompressible data and see what happens.
+
     // Get decompressed size and return it.
-    size_t usize = ZSTD_getFrameContentSize((*comp)->buf, csize);
-    if (usize == ZSTD_CONTENTSIZE_UNKNOWN)
+    size_t zstd_usize = ZSTD_getFrameContentSize((*comp)->buf, csize);
+    if (zstd_usize == ZSTD_CONTENTSIZE_UNKNOWN)
         return -2;
-    if (usize == ZSTD_CONTENTSIZE_ERROR)
+    if (zstd_usize == ZSTD_CONTENTSIZE_ERROR)
         return -1;
+    if (zstd_usize != usize)
+	// How can this happen?  Why is it duplicated this way?
+	return -1;
     if (usize == 0) {
         return 0; // empty frame => skip to next
         // FIXME: this isn't an EOF, so try again with a goto next_block?
