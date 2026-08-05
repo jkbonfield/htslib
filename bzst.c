@@ -273,7 +273,7 @@ struct bzst {
 };
 
 static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp,
-			  size_t blk_sz);
+                          size_t blk_sz);
 
 /*----------------------------------------------------------------------
  * Utility functions shared by both single and multi-threaded implementations
@@ -521,20 +521,20 @@ static int bzst_write_header(bzst *fp) {
 static int bzst_read_header(bzst *fp) {
     uint8_t buf[28];
     if (10 != hpeek(fp->hfp, buf, 10))
-	return -1;
+        return -1;
 
     if (le_to_u32(buf) != BZST_SKIPPABLE_ID
-	|| buf[8] != BZST_HEADER
-	|| buf[9] != 1 /* format version */
-	|| le_to_u32(buf+4) != 20)
-	return -1;
+        || buf[8] != BZST_HEADER
+        || buf[9] != 1 /* format version */
+        || le_to_u32(buf+4) != 20)
+        return -1;
 
     if (28 != hread(fp->hfp, buf, 28))
-	return -1;
+        return -1;
     if (memcmp(buf+10, "BZST", 4) != 0)
-	return -1;
+        return -1;
     if (XXH64(buf, 20, 0) != le_to_u64(buf+20))
-	return -1;
+        return -1;
 
     fp->format = le_to_u32(buf+14);
     fp->profiles = buf[18];
@@ -941,14 +941,14 @@ static int bzst_write_index(bzst *fp) {
     for (uint64_t i = 0; i < nidx; i++, off += 24) {
         u64_to_le(idx[i].u_pos,  buf+off);
         u64_to_le(idx[i].c_pos,  buf+off+8);
-	u64_to_le(idx[i].c_size, buf+off+16);
+        u64_to_le(idx[i].c_size, buf+off+16);
     }
 
     // Index footer
     u64_to_le(XXH64(buf+9, off-9, 0), buf+off); off += 8;
     u64_to_le(fp->idx_cpos, buf+off);           off += 8;
     u32_to_le(BZST_EOF, buf+off);               off += 4;
-    
+
     int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
     //fprintf(stderr, "Wrote %ld for %ld items\n", off, nidx);
     free(buf);
@@ -967,7 +967,7 @@ static int bzst_write_index(bzst *fp) {
  *        -1 on failure.
  */
 static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp,
-			  size_t hdr_sz) {
+                          size_t hdr_sz) {
     bzst_index_t *idx;
 
     // Grow index
@@ -980,15 +980,15 @@ static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp,
     }
 
     //fprintf(stderr, "Add index %d: upos %ld+%ld, cpos %ld+%ld\n",
-    //	    fp->nindex, (long)fp->idx_upos, (long)uncomp,
-    //	    (long)fp->idx_cpos, (long)(hdr_sz + comp));
+    //      fp->nindex, (long)fp->idx_upos, (long)uncomp,
+    //      (long)fp->idx_cpos, (long)(hdr_sz + comp));
 
     // Add entry.
     idx = &fp->index[fp->nindex++];
     idx->u_pos = fp->idx_upos;
     idx->c_pos = fp->idx_cpos;
     if ((int64_t)hdr_sz + (int64_t)comp > hdr_sz + comp)
-	return -1; // overflow for 32-bit size_t.
+        return -1; // overflow for 32-bit size_t.
     idx->c_size = hdr_sz + comp;
 
     fp->idx_upos += uncomp;
@@ -1017,7 +1017,7 @@ static int write_block_metadata(bzst *fp, kstring_t *meta) {
     uint8_t buf[18];
 
     if (!meta || !meta->l)
-	return 0;
+        return 0;
 
     u32_to_le(BZST_SKIPPABLE_ID, buf); // skippable frame id
     u32_to_le(meta->l + 6, buf+4);     // frame size
@@ -1281,7 +1281,7 @@ static void *bzst_mt_writer(void *vp) {
 
         if (write_block_metadata(fp, &j->uncomp->meta) < 0)
             goto err;
-	int32_t blk_sz;
+        int32_t blk_sz;
         if ((blk_sz = write_block_header(fp, j->comp->sz, j->uncomp->pos)) < 0)
             goto err;
 
@@ -1785,7 +1785,7 @@ static int bzst_write_block(bzst *fp, bzst_buffer *buf) {
         return -1;
 
     if (write_block_metadata(fp, &buf->meta) < 0)
-	return -1;
+        return -1;
     int64_t blk_sz;
     if ((blk_sz = write_block_header(fp, fp->comp->sz, buf->pos)) < 0)
         return -1;
@@ -2015,11 +2015,11 @@ static bzst *bzst_open_common(bzst *fp, hFILE *hfp, const char *mode) {
     } else {
         fp->is_write = 0;
 
-	//hfile_set_blksize(fp->hfp, 1024*1024);
+        //hfile_set_blksize(fp->hfp, 1024*1024);
 
-	// Read and validate header
-	if (bzst_read_header(fp) < 0)
-	    return NULL;
+        // Read and validate header
+        if (bzst_read_header(fp) < 0)
+            return NULL;
     }
 
 //    // Threading
@@ -2224,13 +2224,13 @@ static uint32_t skip_frame(bzst *fp, uint32_t fsize, uint32_t incr) {
     uint8_t tmp[8192];
     size_t n = 1, c = fsize + incr;
     while (c > 0 && (n = hread(fp->hfp, tmp, MIN(8192, c))) > 0) {
-	switch(n) {
-	default: eof <<= 8; eof |= tmp[--n]; c--;
-	case 3:  eof <<= 8; eof |= tmp[--n]; c--;
-	case 2:  eof <<= 8; eof |= tmp[--n]; c--;
-	case 1:  eof <<= 8; eof |= tmp[--n]; c--;
-	}
-	c -= n;
+        switch(n) {
+        default: eof <<= 8; eof |= tmp[--n]; c--;
+        case 3:  eof <<= 8; eof |= tmp[--n]; c--;
+        case 2:  eof <<= 8; eof |= tmp[--n]; c--;
+        case 1:  eof <<= 8; eof |= tmp[--n]; c--;
+        }
+        c -= n;
     }
     return n > 0 ? eof : -1;
 }
@@ -2255,40 +2255,40 @@ static uint32_t skip_frame(bzst *fp, uint32_t fsize, uint32_t incr) {
     uint32_t eof = 0;
 
     while (((n = hpeek(fp->hfp, buf, 9)) == 9 || n == 8) &&
-	   (le_to_u32(buf) & 0x184D2A50) == 0x184D2A50) {
-	frame_sz = le_to_u32(buf+4);
-	if (le_to_u32(buf) != BZST_SKIPPABLE_ID) {
-	    if (skip_frame(fp, frame_sz, 8) < 0)
-		return -1;
-	    continue;
-	}
+           (le_to_u32(buf) & 0x184D2A50) == 0x184D2A50) {
+        frame_sz = le_to_u32(buf+4);
+        if (le_to_u32(buf) != BZST_SKIPPABLE_ID) {
+            if (skip_frame(fp, frame_sz, 8) < 0)
+                return -1;
+            continue;
+        }
 
-	bzst_frame_t type = n == 9 ? buf[8] : -1;
-	if (type != BZST_BLOCK_HEADER) {
-	    // This could be an trailing block, e.g. BZST_INDEX
-	    // fprintf(stderr, "Unexpected BZST block type %d\n", type);
-	    if ((eof = skip_frame(fp, frame_sz, 8)) < 0)
-		return -1;
-	    continue;
-	}
+        bzst_frame_t type = n == 9 ? buf[8] : -1;
+        if (type != BZST_BLOCK_HEADER) {
+            // This could be an trailing block, e.g. BZST_INDEX
+            // fprintf(stderr, "Unexpected BZST block type %d\n", type);
+            if ((eof = skip_frame(fp, frame_sz, 8)) < 0)
+                return -1;
+            continue;
+        }
 
-	if (frame_sz != 22) {
-	    fprintf(stderr, "Incorrect BZST_BLOCK_HEADER frame size\n");
-	    return -1;
-	}
+        if (frame_sz != 22) {
+            fprintf(stderr, "Incorrect BZST_BLOCK_HEADER frame size\n");
+            return -1;
+        }
 
-	if (8 + frame_sz != hread(fp->hfp, frame, 8 + frame_sz))
-	    return -1;
+        if (8 + frame_sz != hread(fp->hfp, frame, 8 + frame_sz))
+            return -1;
 
-	uint32_t chk = XXH64(frame, 26, 0) & 0xffffffff;
-	if (le_to_u32(frame+26) != chk) {
-	    fprintf(stderr, "BZST_BLOCK_HEADER checksum failure\n");
-	    return -1;
-	}
+        uint32_t chk = XXH64(frame, 26, 0) & 0xffffffff;
+        if (le_to_u32(frame+26) != chk) {
+            fprintf(stderr, "BZST_BLOCK_HEADER checksum failure\n");
+            return -1;
+        }
 
-	csize = le_to_u64(frame+9);
-	usize = le_to_u64(frame+17);
-	flags = frame[25];
+        csize = le_to_u64(frame+9);
+        usize = le_to_u64(frame+17);
+        flags = frame[25];
     }
 
 
@@ -2296,7 +2296,7 @@ static uint32_t skip_frame(bzst *fp, uint32_t fsize, uint32_t incr) {
     // We should now have computed usize and csize.  If not then we've
     // failed to have the correct zstd frame layout or it's EOF.
     if (!csize)
-	return (hpeek(fp->hfp, buf, 8) == 0) && eof == BZST_EOF ? 0 : -1;
+        return (hpeek(fp->hfp, buf, 8) == 0) && eof == BZST_EOF ? 0 : -1;
 
     if (bzst_buffer_grow(comp, csize) < 0)
         return -1;
@@ -2314,8 +2314,8 @@ static uint32_t skip_frame(bzst *fp, uint32_t fsize, uint32_t incr) {
     if (zstd_usize == ZSTD_CONTENTSIZE_ERROR)
         return -1;
     if (zstd_usize != usize)
-	// How can this happen?  Why is it duplicated this way?
-	return -1;
+        // How can this happen?  Why is it duplicated this way?
+        return -1;
     if (usize == 0) {
         return 0; // empty frame => skip to next
         // FIXME: this isn't an EOF, so try again with a goto next_block?
@@ -2710,27 +2710,27 @@ static int load_seekable_index_common(bzst *fp) {
         return -3;
     off_t pos = le_to_u64(footer);
     if (hseek(fp->hfp, pos, SEEK_SET) < 0)
-	return -1;
+        return -1;
 
     uint64_t sz = file_size - pos;
     uint8_t *buf = malloc(sz), *cp;
     if (!buf)
-	return -1;
+        return -1;
 
     if (hread(fp->hfp, buf, sz) != sz)
-	goto err;
-    
+        goto err;
+
     // Validation
     if (le_to_u64(&buf[sz-20]) != XXH64(buf+9, sz-20-9, 0)) {
-	fprintf(stderr, "Index checksum failure\n");
-	goto err;
+        fprintf(stderr, "Index checksum failure\n");
+        goto err;
     }
 
     if (le_to_u32(buf) != BZST_SKIPPABLE_ID ||
-	le_to_u32(buf+4) != sz - 8 ||
-	buf[8] != BZST_INDEX) {
-	fprintf(stderr, "Malformed index frame (magic numbers)\n");
-	goto err;
+        le_to_u32(buf+4) != sz - 8 ||
+        buf[8] != BZST_INDEX) {
+        fprintf(stderr, "Malformed index frame (magic numbers)\n");
+        goto err;
     }
 
     // TODO: check flags (buf[9]) for compression bit
@@ -2740,20 +2740,20 @@ static int load_seekable_index_common(bzst *fp) {
     fp->aindex = fp->nindex = le_to_u64(cp);    cp += 8;
     fp->file_size = le_to_u64(cp); cp += 8;
     if ((sz - 26) / 24 < fp->nindex) {
-	fprintf(stderr, "Malformed index frame (nindex too large)\n");
-	goto err;
+        fprintf(stderr, "Malformed index frame (nindex too large)\n");
+        goto err;
     }
 
     fp->index = malloc(fp->nindex * 24);
     if (!fp->index) {
-	perror("bzst_read_index");
-	goto err;
+        perror("bzst_read_index");
+        goto err;
     }
 
     for (uint64_t i = 0; i < fp->nindex; i++, cp += 24) {
-	fp->index[i].u_pos  = le_to_u64(cp);
-	fp->index[i].c_pos  = le_to_u64(cp+8);
-	fp->index[i].c_size = le_to_u64(cp+16);
+        fp->index[i].u_pos  = le_to_u64(cp);
+        fp->index[i].c_pos  = le_to_u64(cp+8);
+        fp->index[i].c_size = le_to_u64(cp+16);
     }
 
     // rewind
@@ -2785,8 +2785,8 @@ static bzst_index_t *index_query(bzst *fp, uint64_t upos) {
 
     // Check for upos being off the end of the index
     if (upos > fp->file_size) {
-	errno = ERANGE;
-	return NULL;
+        errno = ERANGE;
+        return NULL;
     }
 
     // Find approx index entry
@@ -2799,7 +2799,7 @@ static bzst_index_t *index_query(bzst *fp, uint64_t upos) {
 
     // We may be a bit early, especially when searching for the last block
     while (imid+1 < fp->nindex && idx[imid+1].u_pos < upos)
-	imid++;
+        imid++;
 
     return &idx[imid];
 }
@@ -3136,10 +3136,10 @@ int bzst_itr_next(bzst *fp, hts_itr_t *iter, void *r, void *data) {
  *         NULL on failure
  */
 hts_itr_t *bzst_itr_query(const hts_idx_t *idx,
-			   int tid,
-			   hts_pos_t beg,
-			   hts_pos_t end,
-			   hts_readrec_func *readrec) {
+                           int tid,
+                           hts_pos_t beg,
+                           hts_pos_t end,
+                           hts_readrec_func *readrec) {
     const hts_bzst_idx_t *bidx = (const hts_bzst_idx_t *)idx;
     hts_itr_t *iter = (hts_itr_t *)calloc(1, sizeof(hts_itr_t));
     if (iter == NULL) return NULL;
