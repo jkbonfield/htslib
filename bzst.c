@@ -123,10 +123,15 @@ Known skippable frame IDs:
 // #define pthread_cond_wait(c,m) do {fprintf(stderr, "%d: %s:%d wait %p\n", (int)gettid(), __FILE__, __LINE__, m); pthread_cond_wait(c,m);} while(0)
 
 typedef struct {
-    off_t pos;      // cumulative uncompressed position prior to this
-    off_t cpos;     // cumulative compression poisition in file
-    ssize_t uncomp; // uncompressed size of this block
-    ssize_t comp;   // compressed size of this block
+    // deprecate
+    off_t pos;       // cumulative uncompressed position prior to this
+    off_t cpos;      // cumulative compression poisition in file
+    ssize_t uncomp;  // uncompressed size of this block
+    ssize_t comp;    // compressed size of this block
+
+    off_t u_pos;     // absolute offset into uncompressed file
+    off_t c_pos;     // absolute offset into compressed file
+    off_t c_size;    // size of compressed block (hdr + data)
 } bzst_index_t;
 
 // Genomic index.  We maintain one of these per chromosome, indexed by
@@ -210,6 +215,10 @@ struct bzst {
     int errcode;          // FIXME
     int has_eof;          // Has an EOF block
 
+    // Using during index writing for cumulative coordinates
+    off_t idx_upos;
+    off_t idx_cpos;
+
     off_t frame_pos;      // uncompressed offset of current frame start
     off_t idx_pos;        // as frame_pos, but on explicit flush_try calls only
     off_t tid_pos;        // uncompressed offset of tid within frame.
@@ -264,7 +273,8 @@ struct bzst {
     uint8_t flags;
 };
 
-static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp);
+static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp,
+			  size_t blk_sz);
 
 /*----------------------------------------------------------------------
  * Utility functions shared by both single and multi-threaded implementations
@@ -495,9 +505,7 @@ static int bzst_write_header(bzst *fp) {
     buf[19] = 0;                    // flags
     u64_to_le(XXH64(buf, 20, 0), buf+20);
 
-    // Add index entry so offsets work
-    if (bzst_add_index(fp, 0, 28) < 0)
-        return -1;
+    fp->idx_cpos += 28;
 
     return hwrite(fp->hfp, buf, 28);
 }
@@ -914,40 +922,31 @@ static int write_seekable_index(bzst *fp) {
 static int write_bzst_index(bzst *fp) {
     bzst_index_t *idx = fp->index;
     uint64_t nidx = fp->nindex;
-    uint64_t frame_size = 38 + nidx/2 * 24;
+    uint64_t frame_size = 38 + nidx * 24;
     uint8_t *buf = malloc(8 + frame_size);
     if (!buf)
         return -1;
 
     // header
-    uint64_t tot_size = 0;
-    for (int i = 0; i < nidx; i++)
-	tot_size += idx[i].uncomp;
-
     u32_to_le(BZST_SKIPPABLE_ID, buf);
     u32_to_le(frame_size, buf+4);
-    buf[8] = BZST_INDEX;           // sub-type
-    buf[9] = 0;                    // index flags (uncompressed for now)
-    u64_to_le(nidx, buf+10);     // index count
-    u64_to_le(tot_size, buf+18); // total file size
+    buf[8] = BZST_INDEX;             // sub-type
+    buf[9] = 0;                      // index flags (uncompressed for now)
+    u64_to_le(nidx, buf+10);         // index count
+    u64_to_le(fp->idx_upos, buf+18); // total file size
 
-    // Index entries; in pairs with header block and data block
-    uint64_t comp_acc = 0; // wrong: location of first block header
-    uint64_t uncomp_acc = 0;
+    // Index entries;
     uint64_t off = 26;
-    for (uint64_t i = 0; i+1 < nidx; i+=2, off += 24) {
-        u64_to_le(comp_acc,   buf+off);
-        u64_to_le(uncomp_acc, buf+off+8);
-	uint64_t block_length = idx[i+0].comp + idx[i+1].comp;
-	u64_to_le(block_length, buf+off+16);
-	comp_acc   += block_length; // FIXME: + format specific meta-data
-	uncomp_acc += idx[i+1].uncomp;
+    for (uint64_t i = 0; i < nidx; i++, off += 24) {
+        u64_to_le(idx[i].u_pos,  buf+off);
+        u64_to_le(idx[i].c_pos,  buf+off+8);
+	u64_to_le(idx[i].c_size, buf+off+16);
     }
 
     // Index footer
-    u64_to_le(XXH64(buf, off, 0), buf+off); off += 8;
-    u64_to_le(off, buf+off);                off += 8;
-    u32_to_le(BZST_EOF, buf+off);           off += 4;
+    u64_to_le(XXH64(buf+9, off-9, 0), buf+off); off += 8;
+    u64_to_le(fp->idx_cpos, buf+off);           off += 8;
+    u32_to_le(BZST_EOF, buf+off);               off += 4;
     
     int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
     fprintf(stderr, "Wrote %ld for %ld items\n", off, nidx);
@@ -957,18 +956,18 @@ static int write_bzst_index(bzst *fp) {
 }
 
 /*
- * Adds an entry to the bzst index
+ * Adds an entry to the bzst index.
+ * Uncomp and comp are the uncompressed and compressed sizes of the
+ * zstd data frame.
+ * Hdr_sz is the size of the preceeding block header.
+ * The two are combined together for indexing purposes into a single entry.
  *
  * Returns 0 on success,
  *        -1 on failure.
  */
-static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp) {
+static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp,
+			  size_t hdr_sz) {
     bzst_index_t *idx;
-
-//    static size_t acc = 0; // STATIC but for debugging only
-//    fprintf(stderr, "cpos %ld, upos %ld, sz %ld %ld\n",
-//          htell(fp->hfp), acc, uncomp, comp);
-//    acc += comp;
 
     // Grow index
     if (fp->nindex >= fp->aindex) {
@@ -979,11 +978,18 @@ static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp) {
         fp->index = idx;
     }
 
-    // Add
+    fprintf(stderr, "Add index %d: upos %ld+%ld, cpos %ld+%ld\n",
+	    fp->nindex, (long)fp->idx_upos, (long)uncomp,
+	    (long)fp->idx_cpos, (long)(hdr_sz + comp));
+
+    // Add entry.
     idx = &fp->index[fp->nindex++];
-    idx->comp = comp;
-    idx->uncomp = uncomp;
-    //idx->pos += uncomp; // not needed while writing
+    idx->u_pos = fp->idx_upos;
+    idx->c_pos = fp->idx_cpos;
+    idx->c_size = hdr_sz + comp;
+
+    fp->idx_upos += uncomp;
+    fp->idx_cpos += hdr_sz + comp;
 
     return 0;
 }
@@ -1029,6 +1035,8 @@ static int write_block_metadata(bzst *fp, kstring_t *meta) {
 
     ret |= hwrite(fp->hfp, buf, 4) != 4;
 
+    fp->idx_cpos += 10 + meta->l + 4;
+
     return ret ? -1 : 0;
 }
 
@@ -1037,10 +1045,11 @@ static int write_block_metadata(bzst *fp, kstring_t *meta) {
  * the next compressed data frame.  We also add it to the index we're
  * building up for zstd seekable.
  *
- * Returns 0 on success,
+ * Returns size of block header on success (currently 30),
  *        -1 on failure
  */
-static int write_block_header(bzst *fp, ssize_t comp_sz, ssize_t uncomp_sz) {
+static int64_t
+write_block_header(bzst *fp, ssize_t comp_sz, ssize_t uncomp_sz) {
     uint8_t buf[30];
 
     u32_to_le(BZST_SKIPPABLE_ID, buf); // skippable ID
@@ -1051,10 +1060,7 @@ static int write_block_header(bzst *fp, ssize_t comp_sz, ssize_t uncomp_sz) {
     buf[25] = 0; // flags              // flags (bit 0 = stored; advisory?)
     u32_to_le(XXH64(buf, 26, 0), buf+26);  // low-32 bit checksum
 
-    int ret = bzst_add_index(fp, 0, 30 + comp_sz);
-    ret |= hwrite(fp->hfp, buf, 30) != 30;
-
-    return ret ? -1 : 0;
+    return hwrite(fp->hfp, buf, 30);
 }
 
 static int write_file_metadata(bzst *fp, kstring_t *meta) {
@@ -1065,8 +1071,7 @@ static int write_file_metadata(bzst *fp, kstring_t *meta) {
     buf[8] = GZST_FILE_META;
     buf[9] = 0; // meta-data format version
 
-    int ret = bzst_add_index(fp, 0, 18 + (meta ? meta->l : 0));
-    ret |= hwrite(fp->hfp, buf, 10) != 10;
+    int ret = hwrite(fp->hfp, buf, 10) != 10;
     if (meta && meta->l)
         ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
 
@@ -1271,11 +1276,12 @@ static void *bzst_mt_writer(void *vp) {
 
         if (write_block_metadata(fp, &j->uncomp->meta) < 0)
             goto err;
-        if (write_block_header(fp, j->comp->sz, j->uncomp->sz) < 0)
+	int32_t blk_sz;
+        if ((blk_sz = write_block_header(fp, j->comp->sz, j->uncomp->sz)) < 0)
             goto err;
 
         pthread_mutex_lock(&fp->job_pool_m);
-        int ret = bzst_add_index(fp, j->uncomp->pos, j->comp->sz);
+        int ret = bzst_add_index(fp, j->uncomp->pos, j->comp->sz, blk_sz);
         pthread_mutex_unlock(&fp->job_pool_m);
         if (ret < 0)
             goto err;
@@ -1775,10 +1781,11 @@ static int bzst_write_block(bzst *fp, bzst_buffer *buf) {
 
     if (write_block_metadata(fp, &buf->meta) < 0)
 	return -1;
-    if (write_block_header(fp, fp->comp->sz, buf->pos) < 0)
+    int64_t blk_sz;
+    if ((blk_sz = write_block_header(fp, fp->comp->sz, buf->pos)) < 0)
         return -1;
 
-    int ret = bzst_add_index(fp, buf->pos, fp->comp->sz);
+    int ret = bzst_add_index(fp, buf->pos, fp->comp->sz, blk_sz);
 
     if (hwrite(fp->hfp, fp->comp->buf, fp->comp->sz) != fp->comp->sz)
         return -1;
@@ -1976,6 +1983,7 @@ static bzst *bzst_open_common(bzst *fp, hFILE *hfp, const char *mode) {
     fp->first_block = 1;
     fp->hfp = hfp;
     fp->frame_pos = 0;
+    fp->idx_upos = fp->idx_cpos = 0;
 
     if (*mode == 'w') {
         fp->is_write = 1;
@@ -2072,7 +2080,7 @@ int bzst_close(bzst *fp) {
             free(final_meta.s);
         }
 
-        ret |= write_genomic_index(fp);
+        //ret |= write_genomic_index(fp);
         ret |= write_bzst_index(fp);
     }
 
