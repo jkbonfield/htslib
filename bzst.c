@@ -123,12 +123,6 @@ Known skippable frame IDs:
 // #define pthread_cond_wait(c,m) do {fprintf(stderr, "%d: %s:%d wait %p\n", (int)gettid(), __FILE__, __LINE__, m); pthread_cond_wait(c,m);} while(0)
 
 typedef struct {
-    // deprecate
-    off_t pos;       // cumulative uncompressed position prior to this
-    off_t cpos;      // cumulative compression poisition in file
-    ssize_t uncomp;  // uncompressed size of this block
-    ssize_t comp;    // compressed size of this block
-
     off_t u_pos;     // absolute offset into uncompressed file
     off_t c_pos;     // absolute offset into compressed file
     off_t c_size;    // size of compressed block (hdr + data)
@@ -209,9 +203,14 @@ struct bzst {
     int is_write;         // open for write
     int block_size;       // ideal block size
     size_t index_frame_sz;// size of seekable index frame
-    bzst_index_t *index; // index entries
-    int nindex;           // used size of index array
-    int aindex;           // allocated size of index array
+
+    //--- index.  Move these to their own struct
+    bzst_index_t *index;  // index entries
+    uint64_t nindex;      // used size of index array
+    uint64_t aindex;      // allocated size of index array
+    uint64_t file_size;   // total file size (from index)
+    //--- index end
+
     int errcode;          // FIXME
     int has_eof;          // Has an EOF block
 
@@ -921,7 +920,7 @@ static int write_seekable_index(bzst *fp) {
  * Returns 0 on success,
  *        <0 on failure
  */
-static int write_bzst_index(bzst *fp) {
+static int bzst_write_index(bzst *fp) {
     bzst_index_t *idx = fp->index;
     uint64_t nidx = fp->nindex;
     uint64_t frame_size = 38 + nidx * 24;
@@ -1390,7 +1389,7 @@ static void bzst_mt_seek(bzst *fp) {
         fp->errcode = ENXIO;
         fp->command = SEEK_FAIL;
     } else {
-        if (hseek(fp->hfp, idx->cpos, SEEK_SET) < 0) {
+        if (hseek(fp->hfp, idx->c_pos, SEEK_SET) < 0) {
             fp->errcode = errno;
             fp->command = SEEK_FAIL;
         } else {
@@ -1401,8 +1400,8 @@ static void bzst_mt_seek(bzst *fp) {
         // The block is loaded later, as before, but we need to start with
         // pos part way through it.  We do this by modifying seek_to, which
         // is used in bzst_decode_block_mt.
-        fp->seek_to -= idx->pos;
-        fprintf(stderr, "bgzf seek pos %ld, seek_to %ld\n", idx->cpos, fp->seek_to);
+        fp->seek_to -= idx->u_pos;
+        fprintf(stderr, "bgzf seek pos %ld, seek_to %ld\n", idx->c_pos, fp->seek_to);
     }
     fp->hit_eof = 0;
 
@@ -2087,7 +2086,7 @@ int bzst_close(bzst *fp) {
         }
 
         //ret |= write_genomic_index(fp);
-        ret |= write_bzst_index(fp);
+        ret |= bzst_write_index(fp);
     }
 
     if (fp->pool) {
@@ -2696,58 +2695,65 @@ int bzst_read_zero_copy(bzst *fp, const char **buf, size_t buf_sz) {
  */
 static int load_seekable_index_common(bzst *fp) {
     // Look for and validate index footer
-    off_t off = hseek(fp->hfp, -9, SEEK_END);
+    off_t off = hseek(fp->hfp, -12, SEEK_END);
+    off_t file_size = off + 12;
     if (off < 0)
         return -1 - (errno == ESPIPE);
 
-    uint8_t footer[9];
-    if (9 != hread(fp->hfp, footer, 9))
+    // Load the index fully into memory.
+    // TODO: Add support for partial index querying at this point.
+    uint8_t footer[12];
+    if (12 != hread(fp->hfp, footer, 12))
         return -1;
 
-    if (le_to_u32(footer+5) != 0x8F92EAB1 || (footer[4] & 0x7C) != 0)
+    if (le_to_u32(footer+8) != BZST_EOF)
         return -3;
-    int has_chksum = footer[4] & 0x80 ? 1 : 0;
+    off_t pos = le_to_u64(footer);
+    if (hseek(fp->hfp, pos, SEEK_SET) < 0)
+	return -1;
 
-    // Read entire index frame
-    uint32_t nframes = le_to_u32(footer);
-    size_t sz = 9 + nframes*4*(2+has_chksum) + 8;
-    off = hseek(fp->hfp, -sz, SEEK_END);
-    if (off < 0)
-        return -1;
-
-    bzst_index_t *idx = NULL;
-    uint8_t *buf = malloc(sz);
+    uint64_t sz = file_size - pos;
+    uint8_t *buf = malloc(sz), *cp;
     if (!buf)
-        return -1;
+	return -1;
 
-    if (sz != hread(fp->hfp, buf, sz))
-        goto err;
-    if (le_to_u32(buf) != 0x184D2A5E)
-        return -3;
-    if (le_to_u32(buf+4) != sz-8)
-        return -3;
+    if (hread(fp->hfp, buf, sz) != sz)
+	goto err;
+    
+    // Validation
+    if (le_to_u64(&buf[sz-20]) != XXH64(buf+9, sz-20-9, 0)) {
+	fprintf(stderr, "Index checksum failure\n");
+	goto err;
+    }
 
-    // Decode index
-    fp->index_frame_sz = sz;
-    fp->index = idx = malloc(nframes * sizeof(*idx));
-    fp->nindex = fp->aindex = nframes;
-    if (!idx)
-        goto err;
+    if (le_to_u32(buf) != BZST_SKIPPABLE_ID ||
+	le_to_u32(buf+4) != sz - 8 ||
+	buf[8] != BZST_INDEX) {
+	fprintf(stderr, "Malformed index frame (magic numbers)\n");
+	goto err;
+    }
 
-    uint32_t i;
-    uint64_t pos = 0, cpos = 0;
-    uint8_t *idxp = buf + 8;
-    for (i = 0; i < nframes; i++) {
-        idx[i].pos    = pos;
-        idx[i].cpos   = cpos;
-        idx[i].comp   = le_to_u32(idxp);
-        idx[i].uncomp = le_to_u32(idxp+4);
-//      fprintf(stderr, "frame %ld..%ld  %ld..%ld\n",
-//              cpos, cpos+idx[i].comp,
-//              pos, pos+idx[i].uncomp);
-        idxp += 4*(2+has_chksum);
-        pos += idx[i].uncomp;
-        cpos += idx[i].comp;
+    // TODO: check flags (buf[9]) for compression bit
+
+    // Decode the index
+    cp = buf + 10;
+    fp->aindex = fp->nindex = le_to_u64(cp);    cp += 8;
+    fp->file_size = le_to_u64(cp); cp += 8;
+    if ((sz - 26) / 24 < fp->nindex) {
+	fprintf(stderr, "Malformed index frame (nindex too large)\n");
+	goto err;
+    }
+
+    fp->index = malloc(fp->nindex * 24);
+    if (!fp->index) {
+	perror("bzst_read_index");
+	goto err;
+    }
+
+    for (uint64_t i = 0; i < fp->nindex; i++, cp += 24) {
+	fp->index[i].u_pos  = le_to_u64(cp);
+	fp->index[i].c_pos  = le_to_u64(cp+8);
+	fp->index[i].c_size = le_to_u64(cp+16);
     }
 
     // rewind
@@ -2759,14 +2765,12 @@ static int load_seekable_index_common(bzst *fp) {
 
  err:
     free(buf);
-    free(idx);
     return -1;
 }
 
 /*
  * Binary search the index for the first block that covers uncompressed
- * position upos.  If the index has pzstd skippable frames, we point to
- * that element.  This ensures we know the size of the next data container.
+ * position upos.
  *
  * NB: Index entries are non-overlapping.  So A to B, B+1 to C, C+1 to D.
  *
@@ -2779,38 +2783,23 @@ static bzst_index_t *index_query(bzst *fp, uint64_t upos) {
     int imid;
     bzst_index_t *idx = fp->index;
 
-    // Find approximate location
+    // Check for upos being off the end of the index
+    if (upos > fp->file_size) {
+	errno = ERANGE;
+	return NULL;
+    }
+
+    // Find approx index entry
     for (imid = (iend+1)/2; imid != istart; imid = (istart+iend)/2) {
-        if (idx[imid].pos >= upos)
+        if (idx[imid].u_pos >= upos)
             iend = imid;
         else
             istart = imid;
     }
 
-    // We end with either imid or next (non-skip) imid being correct.
-    // Select non-skippable frame
-    while (imid+1 < fp->nindex && idx[imid].uncomp == 0)
-        imid++;
-
-    // We end with correct being idx[imid] or idx[imid+1]
-    if (idx[imid].pos + idx[imid].uncomp <= upos) {
-        // Select next non-skippable frame
-        if (imid+1 < fp->nindex)
-            imid++;
-        while (imid+1 < fp->nindex && idx[imid].uncomp == 0)
-            imid++;
-
-        // Check for upos being end of index
-        if (idx[imid].pos + idx[imid].uncomp <= upos) {
-            errno = ERANGE;
-            return NULL;
-        }
-    }
-
-    // Finally walk back back to include skippable frames prior to this
-    // offset, as these hold our meta-data.
-    while (imid > 0 && idx[imid-1].uncomp == 0)
-        imid--;
+    // We may be a bit early, especially when searching for the last block
+    while (imid+1 < fp->nindex && idx[imid+1].u_pos < upos)
+	imid++;
 
     return &idx[imid];
 }
@@ -2869,18 +2858,18 @@ int bzst_seek(bzst *fp, uint64_t upos) {
         bzst_index_t *idx = index_query(fp, upos);
         if (!idx)
             return -1;
-        assert(upos >= idx->pos);
+        assert(upos >= idx->u_pos);
 
-        if (idx->cpos != hseek(fp->hfp, idx->cpos, SEEK_SET))
+        if (idx->c_pos != hseek(fp->hfp, idx->c_pos, SEEK_SET))
             return -1;
-        fprintf(stderr, "Seek to %ld\n", idx->cpos);
+        //fprintf(stderr, "Seek to %ld\n", idx->c_pos);
 
         // Load the relevant block
         if (bzst_decode_block(fp) < 0)
             return -1;
 
         // Skip past any partial data
-        fp->uncomp->pos = upos - idx->pos;
+        fp->uncomp->pos = upos - idx->u_pos;
     }
 
     return ret;
