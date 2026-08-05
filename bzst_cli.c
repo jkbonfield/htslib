@@ -349,18 +349,24 @@ static int list_bzst_genomic_index(hFILE *fp, uint64_t cpos,
     return -1;
 }
 
-static int list_seekable_index(hFILE *fp, uint64_t cpos, int level) {
-    uint8_t *g = NULL, buf[4];
+static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
+    uint8_t *g = NULL, buf[22];
 
-    if (hread(fp, (char *)buf, 4) != 4)
-        return -1;
-    uint32_t len = le_to_u32(buf);
-
-    if (level > 1)
-        printf("Seekable Index, len %d @ %"PRId64"\n", len, cpos);
+    uint8_t flags;
+    uint64_t count;
+    if (level > 1) {
+        if (hread(fp, (char *)buf, 17) != 17)
+            return -1;
+        flags = buf[0];
+        count = le_to_u64(buf+1);
+        uint64_t fsize = le_to_u64(buf+9);
+        printf("BZST_INDEX, len %d @ %"PRId64", flags=%d, count=%"PRId64
+               ", usize=%"PRId64"\n", len+1, cpos, flags, count, fsize);
+        len -= 17;
+    }
 
     if (level > 2) {
-        // Dump seekable index
+        // Dump bzst seekable index
         uint8_t *g = malloc(len);
         if (!g)
             goto err;
@@ -369,24 +375,28 @@ static int list_seekable_index(hFILE *fp, uint64_t cpos, int level) {
 
         uint8_t *gp = g, *g_end = gp+len;
 
-        unsigned int nframes = le_to_u32(g_end-9);
-        int has_chksum = *(g_end-5) & 0x80 ? 1 : 0;
-
-        uint64_t pos = 0, upos = 0;
-        if (gp + nframes*4*(2+has_chksum) > g_end)
-            goto err;
-        for (unsigned int i = 0; i < nframes; i++) {
-            unsigned int csz = le_to_u32(gp);
-            unsigned int usz = le_to_u32(gp+4);
-            gp += 8;
-            if (has_chksum)
-                gp += 4;
-            printf("    cpos %"PRId64", upos %"PRId64
-                   ", csize %u, usize %u\n",
-                   pos, upos, csz, usz);
-            pos += csz;
-            upos += usz;
+        if (count > INT64_MAX/24 || len < 24*count) {
+            fprintf(stderr, "BZST index is too small. Aborting\n");
+            return -1;
         }
+
+        for (uint64_t i = 0; i < count; i++) {
+            uint64_t upos  = le_to_u64(gp);
+            uint64_t cpos  = le_to_u64(gp+8);
+            uint64_t csize = le_to_u64(gp+16);
+            gp += 24;
+            printf("    %"PRIu64": upos %"PRIu64", cpos %"PRIu64
+                   ", csize %"PRIu64"\n", i, upos, cpos, csize);
+        }
+
+        len -= 24*count;
+        if (len != 20) {
+            fprintf(stderr, "BZST index: expected 20 byte footer, got %d\n",
+                    len);
+            return -1;
+        }
+        if (hseek(fp, len, SEEK_CUR) < 0)
+            return -1;
 
         free(g);
     } else {
@@ -441,7 +451,7 @@ static int list_zstd_data_frame(hFILE *fp, uint64_t cpos, int level,
     int checksum_flag = (flag>>2) & 1;
     int single_flag = (flag>>5) & 1;
     int fcs_flag = flag>>6;
-    if (level>1)
+    if (level>2)
         printf("    Hdr descriptor: dict=%d, checksum=%d, single=%d, "
                "frame_content_sz_flag=%d\n",
                dict_flag, checksum_flag, single_flag, fcs_flag);
@@ -525,63 +535,96 @@ static int list_file(char *fn, int level) {
     int64_t nheader = 0;
     int64_t nblockmeta = 0;
     int64_t nfilemeta = 0;
+    int64_t nblockhdr = 0;
     int64_t ndata = 0;
     int64_t nsindex = 0;
     int64_t ngindex = 0;
     int64_t nblock = 0;
 
-    unsigned char buf[8];
+    unsigned char buf[20];
     bzst_frame_t type;
     while (hread(fp, (char *)buf, 4) == 4) {
         uint64_t cpos = htell(fp)-4;
         uint32_t magic = le_to_u32(buf), len;
         switch (magic) {
-        case BZST_SKIPPABLE_ID: // BZST skippable magic; len+type+fmt[+dat]
-            if (hread(fp, (char *)buf, 6) != 6)
+        case BZST_SKIPPABLE_ID: // BZST skippable magic
+            if (hread(fp, (char *)buf, 5) != 5)
                 goto err;
-            len = le_to_u32(buf);
+            len = le_to_u32(buf); // frame size
             type = buf[4];
-            //version = buf[5];
-            len -= 2;
+            len--;
 
             switch (type) {
             case BZST_HEADER: {
                 char dat[100];
+                uint8_t version = buf[5];
+                char *format = (char *)&buf[6];
                 int l = hread(fp, dat, MIN(100, len));
                 if (l<0)
                     goto err;
 
                 nheader++;
                 if (level>1)
-                    printf("BZST magic, len %d: %.*s\n", len+2, l, dat);
+                    printf("BZST_HEADER: len %d, version %d, format \"%.4s\"\n",
+                           len+1, version, format);
+                len -= l;
+
+                break;
+            }
+
+            case BZST_BLOCK_HEADER: {
+                char dat[100];
+                int l = hread(fp, dat, MIN(100, len));
+                if (l<0)
+                    goto err;
+
+                uint64_t csize = le_to_u64(dat);
+                uint64_t usize = le_to_u64(dat+8);
+                uint8_t flags = dat[16];
+                // + 4 byte checksum
+                
+                nblockhdr++;
+                if (level > 1)
+                    printf("BZST_BLOCK_HEADER: len %d, csize %"PRIu64
+                           ", usize %"PRIu64", flags %d\n",
+                           len, csize, usize, flags); 
 
                 len -= l;
                 break;
             }
 
-            case GZST_BLOCK_META: {
-                nblockmeta++;
-                if (list_bzst_block_metadata(fp, cpos, &len, level) < 0)
+            case BZST_INDEX: {
+                nsindex++;
+                if (list_bzst_index(fp, len, cpos, level) < 0)
                     goto err;
                 break;
             }
 
-            case GZST_FILE_META: {
-                nfilemeta++;
-                if (list_bzst_file_metadata(fp, cpos, &len, level) < 0)
-                    goto err;
-                break;
-            }
+//            case GZST_BLOCK_META: {
+//                nblockmeta++;
+//                if (list_bzst_block_metadata(fp, cpos, &len, level) < 0)
+//                    goto err;
+//                break;
+//            }
 
-            case GZST_GENOMIC_INDEX: {
-                ngindex++;
-                if (list_bzst_genomic_index(fp, cpos, &len, level) < 0)
-                    goto err;
-
-                break;
-            }
+//            case GZST_FILE_META: {
+//                nfilemeta++;
+//                if (list_bzst_file_metadata(fp, cpos, &len, level) < 0)
+//                    goto err;
+//                break;
+//            }
+//
+//            case GZST_GENOMIC_INDEX: {
+//                ngindex++;
+//                if (list_bzst_genomic_index(fp, cpos, &len, level) < 0)
+//                    goto err;
+//
+//                break;
+//            }
 
             default:
+                fprintf(stderr, "Unknown skippable frame with sub-type %d\n",
+                        type);
                 abort();
             }
 
@@ -589,12 +632,6 @@ static int list_file(char *fn, int level) {
             if (len > 0)
                 if (hseek(fp, len, SEEK_CUR) < 0)
                     goto err;
-            break;
-
-        case 0x184D2A5E: // Seekable index
-            nsindex++;
-            if (list_seekable_index(fp, cpos, level) < 0)
-                goto err;
             break;
 
         case ZSTD_MAGICNUMBER: // 0xFD2FB528, zstd data frame
@@ -619,13 +656,14 @@ static int list_file(char *fn, int level) {
         }
     }
 
-    printf("Frames: %10"PRId64"\tBZST magic number\n", nheader);
-    printf("Frames: %10"PRId64"\tdata frames\n", ndata);
-    printf("Blocks: %10"PRId64"\tdata blocks\n", nblock);
+    printf("Frames: %10"PRId64"\tBZST_HEADER\n", nheader);
+    printf("Frames: %10"PRId64"\tBZST_BLOCK_HEADER\n", nblockhdr);
+    printf("Frames: %10"PRId64"\tZSTD data frames\n", ndata);
+    printf("Blocks: %10"PRId64"\tZSTD data blocks\n", nblock);
     printf("Frames: %10"PRId64"\tframe metadata\n", nblockmeta);  
     printf("Frames: %10"PRId64"\tfile metadata\n", nfilemeta); 
     printf("Frames: %10"PRId64"\tgenomic index\n", ngindex);
-    printf("Frames: %10"PRId64"\tseekable index\n", nsindex);
+    printf("Frames: %10"PRId64"\tBZST_INDEX\n", nsindex);
 
     return hclose(fp);
 
