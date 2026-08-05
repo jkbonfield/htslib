@@ -515,6 +515,17 @@ static int bzst_write_header(bzst *fp) {
  * Reads and validates the BZST header.
  * Fills out fp format, profile and flags fields too.
  *
+ * Format:
+ * 4      skippable id: 0x184D2A5B
+ * 4      frame size (20)
+ * 1      sub-type: BZST_HEADER
+ * 1      format version
+ * 4      signature "BZST"
+ * 4      format-signature (bam etc)
+ * 1      profile
+ * 1      flags
+ * 8      checksum
+ *
  * Returns -1 on failure
  *          format number on success
  */
