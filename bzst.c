@@ -655,16 +655,16 @@ static void submit_reader_command(bzst *fp, int command, int done) {
     pthread_mutex_unlock(&fp->command_m);
 }
 
-static int load_seekable_index_common(bzst *fp);
+static int bzst_read_index_common(bzst *fp);
 
-static int load_seekable_index_mt(bzst *fp) {
-    int err = load_seekable_index_common(fp);
+static int bzst_read_index_mt(bzst *fp) {
+    int err = bzst_read_index_common(fp);
     fp->command = LOAD_SINDEX_DONE;
     pthread_cond_signal(&fp->command_c);
     return err;
 }
 
-static int load_seekable_index(bzst *fp) {
+static int bzst_read_index(bzst *fp) {
     int err;
     if (fp->pool) {
         submit_reader_command(fp, LOAD_SINDEX, LOAD_SINDEX_DONE);
@@ -672,7 +672,7 @@ static int load_seekable_index(bzst *fp) {
         err = fp->errcode;
         pthread_mutex_unlock(&fp->command_m);
     } else {
-        err = load_seekable_index_common(fp);
+        err = bzst_read_index_common(fp);
     }
     return err;
 }
@@ -695,7 +695,7 @@ static int load_genomic_index_common(bzst *fp) {
     if (!fp->index) {
         int err;
 
-        if ((err = load_seekable_index_common(fp)) < 0)
+        if ((err = bzst_read_index_common(fp)) < 0)
             return err;
     }
 
@@ -860,40 +860,6 @@ int64_t bzst_query(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end) {
     return UINT64_MAX;
 }
 
-
-#if 0
-// The old seekable-index format
-static int write_seekable_index(bzst *fp) {
-    bzst_index_t *idx = fp->index;
-    int nidx = fp->nindex;
-
-    uint8_t *buf = malloc(4+4+nidx*8+9);
-    int off = 0;
-    if (!buf)
-        return -1;
-
-    // header
-    u32_to_le(0x184D2A5E, buf);
-    u32_to_le(nidx*8+9, buf+4);
-
-    // Index entries
-    int i;
-    for (off = 8, i = 0; i < nidx; i++, off += 8) {
-        u32_to_le(idx[i].comp, buf+off);
-        u32_to_le(idx[i].uncomp, buf+off+4);
-    }
-
-    // Index footer
-    u32_to_le(nidx, buf+off); off += 4;
-    buf[off++] = 0; // no checksums
-    u32_to_le(0x8F92EAB1, buf+off); off += 4;
-
-    int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
-    free(buf);
-
-    return ret;
-}
-#endif
 
 /*
  * Write an index holding a compressed to uncompressed lookup table.
@@ -1363,13 +1329,13 @@ static void *bzst_encode_func(void *vp) {
  * and starts it up again.  Brute force, but maybe sufficient.
  *
  * Returns number of bytes read on success (size of index)
- *        <0 on failure (same codes as load_seekable_index)
+ *        <0 on failure (same codes as bzst_read_index)
  */
 static bzst_index_t *index_query(bzst *fp, uint64_t upos);
 static void bzst_mt_seek(bzst *fp) {
     if (!fp->index) {
         int err;
-        if ((err = load_seekable_index_common(fp)) < 0) {
+        if ((err = bzst_read_index_common(fp)) < 0) {
             pthread_mutex_lock(&fp->job_pool_m);
             fp->errcode = -err;
             fp->command = SEEK_FAIL;
@@ -1527,7 +1493,7 @@ static void *bzst_mt_reader(void *vp) {
     bzst *fp = (bzst *)vp;
     bzst_job *j;
 
-    // Note we may have started with load_seekable_index being called by
+    // Note we may have started with bzst_read_index being called by
     // the main application, and we're now in an IO thread. So hread
     // caches represent a data race.  We know however the index isn't
     // loaded after this function starts, so we explicitly lock and unlock
@@ -1569,7 +1535,7 @@ restart:
             break;
 
         case LOAD_SINDEX:
-            fp->errcode = load_seekable_index_mt(fp);
+            fp->errcode = bzst_read_index_mt(fp);
             break;
 
         case LOAD_GINDEX:
@@ -1651,7 +1617,7 @@ restart:
             break;
 
         case LOAD_SINDEX:
-            fp->errcode = load_seekable_index_mt(fp);
+            fp->errcode = bzst_read_index_mt(fp);
             break;
 
         case LOAD_GINDEX:
@@ -2693,7 +2659,7 @@ int bzst_read_zero_copy(bzst *fp, const char **buf, size_t buf_sz) {
  *        -2 on non-seekable stream,
  *        -3 if no index found.
  */
-static int load_seekable_index_common(bzst *fp) {
+static int bzst_read_index_common(bzst *fp) {
     // Look for and validate index footer
     off_t off = hseek(fp->hfp, -12, SEEK_END);
     off_t file_size = off + 12;
@@ -2848,7 +2814,7 @@ int bzst_seek(bzst *fp, uint64_t upos) {
     } else {
         if (!fp->index) {
             int err;
-            if ((err = load_seekable_index(fp)) < 0) {
+            if ((err = bzst_read_index(fp)) < 0) {
                 fp->errcode = -err;
                 return -1;
             }
