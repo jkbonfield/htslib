@@ -978,9 +978,9 @@ static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp,
         fp->index = idx;
     }
 
-    fprintf(stderr, "Add index %d: upos %ld+%ld, cpos %ld+%ld\n",
-	    fp->nindex, (long)fp->idx_upos, (long)uncomp,
-	    (long)fp->idx_cpos, (long)(hdr_sz + comp));
+    //fprintf(stderr, "Add index %d: upos %ld+%ld, cpos %ld+%ld\n",
+    //	    fp->nindex, (long)fp->idx_upos, (long)uncomp,
+    //	    (long)fp->idx_cpos, (long)(hdr_sz + comp));
 
     // Add entry.
     idx = &fp->index[fp->nindex++];
@@ -1051,6 +1051,8 @@ static int write_block_metadata(bzst *fp, kstring_t *meta) {
 static int64_t
 write_block_header(bzst *fp, ssize_t comp_sz, ssize_t uncomp_sz) {
     uint8_t buf[30];
+
+    //fprintf(stderr, "Write block %ld->%ld\n", uncomp_sz, comp_sz);
 
     u32_to_le(BZST_SKIPPABLE_ID, buf); // skippable ID
     u32_to_le(22, buf + 4);            // frame size
@@ -1277,7 +1279,7 @@ static void *bzst_mt_writer(void *vp) {
         if (write_block_metadata(fp, &j->uncomp->meta) < 0)
             goto err;
 	int32_t blk_sz;
-        if ((blk_sz = write_block_header(fp, j->comp->sz, j->uncomp->sz)) < 0)
+        if ((blk_sz = write_block_header(fp, j->comp->sz, j->uncomp->pos)) < 0)
             goto err;
 
         pthread_mutex_lock(&fp->job_pool_m);
