@@ -2784,7 +2784,7 @@ static bzst_index_t *index_query(bzst *fp, uint64_t upos) {
     bzst_index_t *idx = fp->index;
 
     // Check for upos being off the end of the index
-    if (upos > fp->file_size) {
+    if (upos >= fp->file_size) {
         errno = ERANGE;
         return NULL;
     }
