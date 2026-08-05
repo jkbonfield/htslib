@@ -374,6 +374,8 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
     if (comp_bound > comp_alloc)
         return -1;
 
+    //fprintf(stderr, "Compressing block >>%.*s<<\n", (int)uncomp_sz, uncomp);
+
     // Currently we use Zstd only.
     // For now we create and configure new streams each time, but we
     // could consider reusing the same zstd stream (NB: needs 1 per thread).
@@ -949,7 +951,7 @@ static int write_bzst_index(bzst *fp) {
     u32_to_le(BZST_EOF, buf+off);               off += 4;
     
     int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
-    fprintf(stderr, "Wrote %ld for %ld items\n", off, nidx);
+    //fprintf(stderr, "Wrote %ld for %ld items\n", off, nidx);
     free(buf);
 
     return ret;
@@ -986,6 +988,8 @@ static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp,
     idx = &fp->index[fp->nindex++];
     idx->u_pos = fp->idx_upos;
     idx->c_pos = fp->idx_cpos;
+    if ((int64_t)hdr_sz + (int64_t)comp > hdr_sz + comp)
+	return -1; // overflow for 32-bit size_t.
     idx->c_size = hdr_sz + comp;
 
     fp->idx_upos += uncomp;
@@ -2219,7 +2223,7 @@ int bzst_write(bzst *fp, const char *buf, size_t buf_sz, int can_split) {
 static uint32_t skip_frame(bzst *fp, uint32_t fsize, uint32_t incr) {
     uint32_t eof = 0;
     uint8_t tmp[8192];
-    size_t n, c = fsize + incr;
+    size_t n = 1, c = fsize + incr;
     while (c > 0 && (n = hread(fp->hfp, tmp, MIN(8192, c))) > 0) {
 	switch(n) {
 	default: eof <<= 8; eof |= tmp[--n]; c--;

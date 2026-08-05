@@ -39,17 +39,24 @@
 #endif
 
 #define BUFSZ 5000000
+static char buff_static[BUFSZ];
+
+enum mode_t {
+    MODE_AUTO,
+    MODE_TEXT,
+    MODE_BIN
+};
 
 /* ------------------------------------------------------------------------
  * Compression and decompression.
  */
-static int encode(char *in, char *out, int level, long block_size,
-                  int nthreads) {
+static int encode(char *in, char *out, int level, size_t block_size,
+                  int nthreads, enum mode_t mode, int rec_mod, char hdr_chr) {
     hFILE *fp_in = NULL;
     bzst *fp_out = NULL;
-    char buffer[BUFSZ];
     int ret = -1;
     hts_tpool *pool = NULL;
+    char *buffer = buff_static;
 
     fp_in = hopen(in, "r");
     if (!fp_in) goto err;
@@ -71,9 +78,74 @@ static int encode(char *in, char *out, int level, long block_size,
         goto err;
 
     ssize_t n;
-    while ((n = hread(fp_in, buffer, BUFSZ)) > 0) {
-        if (bzst_write(fp_out, buffer, n, 1) < 0)
+    if (mode == MODE_TEXT) {
+        buffer = malloc(block_size);
+        if (!buffer)
             goto err;
+        size_t offset = 0;
+        size_t orig_block_size = block_size;
+
+        int in_hdr = 1;
+    bigger_block:
+        while ((n = hread(fp_in, buffer+offset, block_size-offset)) > 0) {
+            //fprintf(stderr, "Read %ld bytes to %ld..%ld\n",
+            //        n, offset, offset+n);
+            int64_t rc = 0; // rec counter in this buffer
+            char *cp = buffer, *cp2, *last = buffer;
+            size_t remaining = n + offset;
+            while ((cp2 = memchr(cp, '\n', remaining))) {
+                cp2++;
+                remaining -= cp2-cp;
+                if (in_hdr && *cp == hdr_chr && *cp2 != hdr_chr) {
+                    last = cp2;
+                    in_hdr = 0;
+                    break;
+                } else if (in_hdr) {
+                    last = cp2;
+                } else if (!in_hdr || *cp != hdr_chr) {
+                    in_hdr = 0;
+                    if (++rc % rec_mod == 0)
+                        last = cp2;
+                }
+                cp = cp2;
+            }
+
+            if (last == buffer) {
+                //fprintf(stderr, "Record does not fit in the block size\n");
+                block_size *= 1.3;
+                //fprintf(stderr, "Resizing block_size to %ld\n", block_size);
+                char *buf_new = realloc(buffer, block_size);
+                if (!buf_new)
+                    goto err;
+                buffer = buf_new;
+                offset += n;
+                goto bigger_block;
+            }
+            //fprintf(stderr, "bzst_write %ld of %ld\n", last-buffer, n+offset);
+            //fprintf(stderr, "<<%.*s>>\n", (int)(last-buffer), buffer);
+            if (bzst_write(fp_out, buffer, last-buffer, 0) < 0)
+                goto err;
+            if (bzst_flush(fp_out) < 0)
+                goto err;
+            if (orig_block_size > offset)
+                block_size = orig_block_size;
+
+            offset = n+offset - (last-buffer);
+            //fprintf(stderr, "Move %ld bytes down %ld\n",
+            //        offset, (long)(last-buffer));
+            memmove(buffer, last, offset);
+        }
+        //fprintf(stderr, "n=%ld with attempted read of %ld\n", n, block_size-offset);
+        if (offset) {
+            // remainder if we're not a multiple of rec_mod
+            if (bzst_write(fp_out, buffer, offset, 0) < 0)
+                goto err;
+        }
+    } else {
+        while ((n = hread(fp_in, buffer, BUFSZ)) > 0) {
+            if (bzst_write(fp_out, buffer, n, 1) < 0)
+                goto err;
+        }
     }
 
     ret = 0;
@@ -87,6 +159,9 @@ static int encode(char *in, char *out, int level, long block_size,
 
     if (pool)
         hts_tpool_destroy(pool);
+
+    if (buffer != buff_static)
+        free(buffer);
 
     return ret;
 }
@@ -566,6 +641,7 @@ static void usage(FILE *fp) {
     fprintf(fp, "Usage: bzip2 [opts] [file]\n");
     fprintf(fp, "    -h         show usage\n");
     fprintf(fp, "    -c         output to stdout\n");
+    fprintf(fp, "    -o FILE    output to FILE\n");
     fprintf(fp, "    -d         decompress\n");
     fprintf(fp, "    -b SIZE    Specify block size, with optional suffix K, M or G\n");
     fprintf(fp, "    -@ INT     Use INT threads\n");
@@ -573,20 +649,26 @@ static void usage(FILE *fp) {
     fprintf(fp, "    -c         output to stdout\n");
     fprintf(fp, "    -r RANGE   Uncompressed byte range to decode, eg -r 10M-20M\n");
     fprintf(fp, "    -l         List contents.  Use 2 or 3 times for more verbose output\n");
+    fprintf(fp, "    -m MODE    Select input data type; text, bin, auto\n");
+    fprintf(fp, "    -L INT     Number of lines per record in text mode\n");
+    fprintf(fp, "    -H CHR     Character starting lines to identify file headers\n");
     exit(fp == stderr);
 }
 
 int main(int argc, char **argv) {
     int c;
     int level = 0;
-    long blk_size = BZST_DEFAULT_BLOCK_SIZE;
+    size_t blk_size = BZST_DEFAULT_BLOCK_SIZE;
     int compress = 1;
     char *infn = NULL;
     char *outfn = NULL;
     int64_t start = 0, end = 0;
     int nthreads = 0, list = 0;
+    enum mode_t mode = MODE_BIN;
+    int rec_mod = 1;
+    char hdr_chr = '@';
 
-    while ((c = getopt(argc, argv, "cdhb:0123456789r:@:l")) >= 0) {
+    while ((c = getopt(argc, argv, "co:dhb:0123456789r:@:lm:L:H:")) >= 0) {
         switch(c) {
         case '@':
             nthreads = atoi(optarg);
@@ -594,6 +676,10 @@ int main(int argc, char **argv) {
 
         case 'c': // stdout
             outfn = "-";
+            break;
+
+        case 'o':
+            outfn = optarg;
             break;
 
         case 'd':
@@ -615,6 +701,8 @@ int main(int argc, char **argv) {
                         BZST_MAX_BLOCK_SIZE);
                 return 1;
             }
+            if (blk_size < 8)
+                blk_size = 8;
             break;
         }
         case '0': case '1': case '2': case '3': case '4':
@@ -664,6 +752,28 @@ int main(int argc, char **argv) {
             list++;
             break;
 
+        case 'm':
+            mode = MODE_AUTO;
+            if (strcasecmp(optarg, "text") == 0)
+                mode = MODE_TEXT;
+            else if (strcasecmp(optarg, "bin") == 0)
+                mode = MODE_BIN;
+            else if (strcasecmp(optarg, "auto") == 0)
+                mode = MODE_AUTO;
+            else
+                fprintf(stderr, "Unknown mode '%s', using 'auto'\n", optarg);
+            break;
+
+        case 'L':
+            rec_mod = atoi(optarg);
+            if (rec_mod < 1)
+                rec_mod = 1;
+            break;
+
+        case 'H':
+            hdr_chr = *optarg;
+            break;
+
         case 'h':
             usage(stdout);
             // fall through
@@ -676,7 +786,8 @@ int main(int argc, char **argv) {
         usage(stdout);
 
     infn = (optind < argc) ? argv[optind++] : "-";
-    outfn = (optind < argc) ? argv[optind++] : "-";
+    if (!outfn)
+        outfn = (optind < argc) ? argv[optind++] : "-";
     if (!level)
         level = BZST_DEFAULT_LEVEL;
 
@@ -685,7 +796,8 @@ int main(int argc, char **argv) {
 
     int ret;
     if (compress) {
-        ret = encode(infn, outfn, level, blk_size, nthreads) ? 1 : 0;
+        ret = encode(infn, outfn, level, blk_size, nthreads,
+                     mode, rec_mod, hdr_chr) ? 1 : 0;
     } else {
         ret = decode(infn, outfn, start, end, nthreads) ? 1 : 0;
     }
