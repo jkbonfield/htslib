@@ -63,6 +63,13 @@ jobs:
         cmake -B build -DLIBDEFLATE_BUILD_SHARED_LIB=OFF -DLIBDEFLATE_BUILD_GZIP=OFF -DCMAKE_C_FLAGS="-g -O3 -fPIC -arch arm64 -arch x86_64"
         cmake --build build --verbose
 
+    # TODO the CFLAGS and LDFLAGS code needs moving to autoconf.  They're
+    # very hidden on the Mac, but for now we override compiler flags here
+    # as it's easier during the development.
+    - name: install zstd
+      run: |
+        brew install zstd
+
     # MacOS.  We validate compilation of x86_64 and arm64, but only
     # test arm64.  This will also be using clang by default
     - name: configure
@@ -90,8 +97,8 @@ jobs:
 
         if [ '${{ matrix.sanitize }}' = 'sanitize' ] ; then
           config_opts='--enable-werror'
-          cflags="-g -Og -fsanitize=address,undefined -Wno-format-truncation -Wno-format-overflow -arch arm64 -arch x86_64 -DHTS_ALLOW_UNALIGNED=0${libdeflate_prefix:+ -I$libdeflate_prefix}"
-          ldflags="-fsanitize=address,undefined${libdeflate_prefix:+ -L$libdeflate_prefix/build}"
+          cflags="-g -Og -fsanitize=address,undefined -Wno-format-truncation -Wno-format-overflow -arch arm64 -arch x86_64 -DHTS_ALLOW_UNALIGNED=0${libdeflate_prefix:+ -I$libdeflate_prefix} `pkg-config --cflags libzstd`"
+          ldflags="-fsanitize=address,undefined${libdeflate_prefix:+ -L$libdeflate_prefix/build} `pkg-config --libs libzstd`"
         fi
 
         # Run configure, and ensure that it did set -Werror
@@ -109,7 +116,7 @@ jobs:
         if [ '${{ matrix.use-configure }}' = 'use-configure' ] ; then
           make -j5
         else
-          make -j5 CC=clang CFLAGS='-g -O3 -Wall -Werror'
+          make -j5 CC=clang CFLAGS="-g -O3 -Wall -Werror `pkg-config --cflags libzstd`" LDFLAGS="`pkg-config --libs libzstd`"
         fi
 
     - name: Check
