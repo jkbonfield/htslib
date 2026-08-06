@@ -1748,21 +1748,21 @@ static int64_t cram_ptell(void *fp)
     return ret;
 }
 
-static int bam_pseek(void *fp, int64_t offset, int whence)
-{
-    BGZF *fd = (BGZF *)fp;
-
-    return bgzf_seek(fd, offset, whence);
-}
-
-static int64_t bam_ptell(void *fp)
-{
-    BGZF *fd = (BGZF *)fp;
-    if (!fd)
-        return -1L;
-
-    return bgzf_tell(fd);
-}
+// static int bam_pseek(void *fp, int64_t offset, int whence)
+// {
+//     BGZF *fd = (BGZF *)fp;
+// 
+//     return bgzf_seek(fd, offset, whence);
+// }
+// 
+// static int64_t bam_ptell(void *fp)
+// {
+//     BGZF *fd = (BGZF *)fp;
+//     if (!fd)
+//         return -1L;
+// 
+//     return bgzf_tell(fd);
+// }
 
 hts_idx_t *hts_bgzf2_idx_init(void *fp) {
     hts_bgzf2_idx_t *idx = calloc(1, sizeof(*idx));
