@@ -242,8 +242,8 @@ typedef struct htsFormat {
 struct hts_idx_t;
 typedef struct hts_idx_t hts_idx_t;
 struct hts_filter_t;
-typedef struct bgzf2 bgzf2;
-typedef struct bzst bzst;
+struct bgzf2;
+struct bzst;
 
 /**
  * @brief File handle returned by hts_open() etc.
@@ -271,8 +271,8 @@ typedef struct htsFile {
         BGZF *bgzf;
         struct cram_fd *cram;
         struct hFILE *hfile;
-        bgzf2 *bgzf2;
-        bzst  *bzst;
+        struct bgzf2 *bgzf2;
+        struct bzst  *bzst;
     } fp;
     void *state;  // format specific state information
     htsFormat format;

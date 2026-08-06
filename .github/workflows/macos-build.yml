@@ -65,7 +65,9 @@ jobs:
 
     # TODO the CFLAGS and LDFLAGS code needs moving to autoconf.  They're
     # very hidden on the Mac, but for now we override compiler flags here
-    # as it's easier during the development.
+    # as it's easier during the development and debugging autoconf at the
+    # other end of a CI hook is tedious.  (Ie get someone with a Mac to debug
+    # this.)
     - name: install zstd
       run: |
         brew install zstd
@@ -92,13 +94,13 @@ jobs:
 
         config_opts='--enable-werror --enable-plugins'
         cc='clang'
-        cflags="-g -O3 -arch arm64 -arch x86_64${libdeflate_prefix:+ -I$libdeflate_prefix}"
-        ldflags="${libdeflate_prefix:+ -L$libdeflate_prefix/build}"
+        cflags="-g -O3 -arch arm64 -arch x86_64${libdeflate_prefix:+ -I$libdeflate_prefix} `pkg-config --cflags libzstd`"
+        ldflags="${libdeflate_prefix:+ -L$libdeflate_prefix/build} `pkg-config --libs libzstd`"
 
         if [ '${{ matrix.sanitize }}' = 'sanitize' ] ; then
           config_opts='--enable-werror'
-          cflags="-g -Og -fsanitize=address,undefined -Wno-format-truncation -Wno-format-overflow -arch arm64 -arch x86_64 -DHTS_ALLOW_UNALIGNED=0${libdeflate_prefix:+ -I$libdeflate_prefix} `pkg-config --cflags libzstd`"
-          ldflags="-fsanitize=address,undefined${libdeflate_prefix:+ -L$libdeflate_prefix/build} `pkg-config --libs libzstd`"
+          cflags="-g -Og -fsanitize=address,undefined -Wno-format-truncation -Wno-format-overflow -arch arm64 -arch x86_64 -DHTS_ALLOW_UNALIGNED=0${libdeflate_prefix:+ -I$libdeflate_prefix}"
+          ldflags="-fsanitize=address,undefined${libdeflate_prefix:+ -L$libdeflate_prefix/build}"
         fi
 
         # Run configure, and ensure that it did set -Werror
@@ -124,5 +126,5 @@ jobs:
         if [ '${{ matrix.use-configure }}' = 'use-configure' ] ; then
           make check
         else
-          make check CC=clang CFLAGS='-g -O3 -Wall -Werror'
+          make check CC=clang CFLAGS="-g -O3 -Wall -Werror `pkg-config --cflags libzstd`" LDFLAGS="`pkg-config --libs libzstd`"
         fi

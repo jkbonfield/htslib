@@ -246,108 +246,108 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
 /* ------------------------------------------------------------------------
  * ZSTD file structure listing
  */
-static int list_bzst_block_metadata(hFILE *fp, uint64_t cpos,
-                                     uint32_t *len_p, int level) {
-    uint32_t len = *len_p;
-    unsigned char buf[4];
-
-    if (level > 1) {
-        if (len < 4)
-            return -1;
-        if (hread(fp, buf, 4) != 4)
-            return -1;
-        uint32_t csize = le_to_u32(buf);
-        printf("BZST block meta skippable, len %d @ %"PRId64
-               ", next block csize %u\n", len, cpos, csize);
-
-        len -= 4;
-        if (len > 0) {
-            char *m = malloc(len);
-            if (!m)
-                return -1;
-            if (hread(fp, m, len) != len)
-                return -1;
-            printf("    Meta data: %.*s\n", len, m);
-            free(m);
-        }
-        *len_p = 0;
-    }
-
-    return 0;
-}
-
-static int list_bzst_file_metadata(hFILE *fp, uint64_t cpos,
-                                    uint32_t *len_p, int level) {
-    uint32_t len = *len_p;
-
-    if (level > 1) {
-        printf("File meta skippable, len %d @ %"PRId64"\n",
-               len, cpos);
-        if (len > 0) {
-            char *m = malloc(len);
-            if (!m)
-                return -1;
-            if (hread(fp, m, len) != len)
-                return -1;
-            printf("    Meta data: %.*s\n", len, m);
-            *len_p = 0;
-            free(m);
-        }
-    }
-
-    return 0;
-}
-
-static int list_bzst_genomic_index(hFILE *fp, uint64_t cpos,
-                                    uint32_t *len_p, int level) {
-    uint32_t len = *len_p;
-
-    char *g = malloc(len);
-    if (!g)
-        return -1;
-    if (hread(fp, g, len) != len)
-        goto err;
-
-    if (level>1)
-        printf("BZST genomic index, len %d, %s @ %"PRId64"\n",
-               len, g[0]&1 ? "compressed" : "uncompressed",
-               cpos);
-
-    if (level > 2) {
-        uint8_t *gp = (uint8_t *)g, *g_end = gp+len;
-        gp++; // flag: unused
-        if (gp+4 > g_end)
-            goto err;
-        int nchr = le_to_u32(gp); gp += 4;
-        for (int i = 0; i < nchr; i++) {
-            if (gp+5 > g_end)
-                goto err;
-            gp++; // flag
-            int index_sz = le_to_u32(gp); gp += 4;
-            // Should index_sz be uint64_t?
-            printf("    chr-id %d/%d, size %d\n",
-                   i+1, nchr, index_sz);
-            if (gp+index_sz * 20 > g_end)
-                goto err;
-            for (int j = 0; j < index_sz; j++) {
-                int tid = le_to_u32(gp); gp += 4;
-                int beg = le_to_u32(gp); gp += 4;
-                int end = le_to_u32(gp); gp += 4;
-                uint64_t upos = le_to_u64(gp); gp += 8;
-                printf("        %4d: %d, %d..%d at %"PRId64"\n",
-                       j, tid, beg, end, upos);
-            }
-        }
-    }
-
-    free(g);
-    *len_p = 0;
-    return 0;
-
- err:
-    free(g);
-    return -1;
-}
+// static int list_bzst_block_metadata(hFILE *fp, uint64_t cpos,
+//                                      uint32_t *len_p, int level) {
+//     uint32_t len = *len_p;
+//     unsigned char buf[4];
+// 
+//     if (level > 1) {
+//         if (len < 4)
+//             return -1;
+//         if (hread(fp, buf, 4) != 4)
+//             return -1;
+//         uint32_t csize = le_to_u32(buf);
+//         printf("BZST block meta skippable, len %d @ %"PRId64
+//                ", next block csize %u\n", len, cpos, csize);
+// 
+//         len -= 4;
+//         if (len > 0) {
+//             char *m = malloc(len);
+//             if (!m)
+//                 return -1;
+//             if (hread(fp, m, len) != len)
+//                 return -1;
+//             printf("    Meta data: %.*s\n", len, m);
+//             free(m);
+//         }
+//         *len_p = 0;
+//     }
+// 
+//     return 0;
+// }
+// 
+// static int list_bzst_file_metadata(hFILE *fp, uint64_t cpos,
+//                                     uint32_t *len_p, int level) {
+//     uint32_t len = *len_p;
+// 
+//     if (level > 1) {
+//         printf("File meta skippable, len %d @ %"PRId64"\n",
+//                len, cpos);
+//         if (len > 0) {
+//             char *m = malloc(len);
+//             if (!m)
+//                 return -1;
+//             if (hread(fp, m, len) != len)
+//                 return -1;
+//             printf("    Meta data: %.*s\n", len, m);
+//             *len_p = 0;
+//             free(m);
+//         }
+//     }
+// 
+//     return 0;
+// }
+// 
+// static int list_bzst_genomic_index(hFILE *fp, uint64_t cpos,
+//                                     uint32_t *len_p, int level) {
+//     uint32_t len = *len_p;
+// 
+//     char *g = malloc(len);
+//     if (!g)
+//         return -1;
+//     if (hread(fp, g, len) != len)
+//         goto err;
+// 
+//     if (level>1)
+//         printf("BZST genomic index, len %d, %s @ %"PRId64"\n",
+//                len, g[0]&1 ? "compressed" : "uncompressed",
+//                cpos);
+// 
+//     if (level > 2) {
+//         uint8_t *gp = (uint8_t *)g, *g_end = gp+len;
+//         gp++; // flag: unused
+//         if (gp+4 > g_end)
+//             goto err;
+//         int nchr = le_to_u32(gp); gp += 4;
+//         for (int i = 0; i < nchr; i++) {
+//             if (gp+5 > g_end)
+//                 goto err;
+//             gp++; // flag
+//             int index_sz = le_to_u32(gp); gp += 4;
+//             // Should index_sz be uint64_t?
+//             printf("    chr-id %d/%d, size %d\n",
+//                    i+1, nchr, index_sz);
+//             if (gp+index_sz * 20 > g_end)
+//                 goto err;
+//             for (int j = 0; j < index_sz; j++) {
+//                 int tid = le_to_u32(gp); gp += 4;
+//                 int beg = le_to_u32(gp); gp += 4;
+//                 int end = le_to_u32(gp); gp += 4;
+//                 uint64_t upos = le_to_u64(gp); gp += 8;
+//                 printf("        %4d: %d, %d..%d at %"PRId64"\n",
+//                        j, tid, beg, end, upos);
+//             }
+//         }
+//     }
+// 
+//     free(g);
+//     *len_p = 0;
+//     return 0;
+// 
+//  err:
+//     free(g);
+//     return -1;
+// }
 
 static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
     uint8_t *g = NULL, buf[22];
@@ -375,12 +375,7 @@ static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
 
         uint8_t *gp = g, *g_end = gp+len;
 
-        if (count > INT64_MAX/24 || len < 24*count) {
-            fprintf(stderr, "BZST index is too small. Aborting\n");
-            return -1;
-        }
-
-        for (uint64_t i = 0; i < count; i++) {
+        for (uint64_t i = 0; i < count && gp+24 < g_end; i++) {
             uint64_t upos  = le_to_u64(gp);
             uint64_t cpos  = le_to_u64(gp+8);
             uint64_t csize = le_to_u64(gp+16);
@@ -573,7 +568,7 @@ static int list_file(char *fn, int level) {
             }
 
             case BZST_BLOCK_HEADER: {
-                char dat[100];
+                uint8_t dat[100];
                 int l = hread(fp, dat, MIN(100, len));
                 if (l<0)
                     goto err;

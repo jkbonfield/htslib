@@ -50,12 +50,16 @@ struct bgzf_cache_t {
 
 static inline void bgzf_set_private_data(BGZF *fp, void *private_data,
                                          bgzf_private_data_cleanup_func *fn) {
+    if (fp->is_zstd || fp->is_bzst)
+        return;
     assert(fp->cache != NULL);
     fp->cache->private_data = private_data;
     fp->cache->private_data_cleanup = fn;
 }
 
 static inline void bgzf_clear_private_data(BGZF *fp) {
+    if (fp->is_zstd || fp->is_bzst)
+        return;
     assert(fp->cache != NULL);
     if (fp->cache->private_data) {
         if (fp->cache->private_data_cleanup)
@@ -65,6 +69,8 @@ static inline void bgzf_clear_private_data(BGZF *fp) {
 }
 
 static inline void * bgzf_get_private_data(BGZF *fp) {
+    if (fp->is_zstd || fp->is_bzst)
+        return NULL;
     assert(fp->cache != NULL);
     return fp->cache->private_data;
 }

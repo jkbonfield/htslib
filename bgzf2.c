@@ -922,7 +922,7 @@ static int write_file_metadata(bgzf2 *fp, kstring_t *meta) {
         ret |= hwrite(fp->hfp, meta->s, meta->l) != meta->l;
 
     // pointer back to start for reverse reading
-    u32_to_le(10 + meta ? meta->l : 0, buf);
+    u32_to_le(10 + (meta ? meta->l : 0), buf);
     u32_to_le(0x8F92EA4D, buf+4); // file meta-data magic number
     ret |= hwrite(fp->hfp, buf, 8) != 8;
     // TODO XXhash-64
@@ -1239,7 +1239,8 @@ static void bgzf2_mt_seek(bgzf2 *fp) {
         // pos part way through it.  We do this by modifying seek_to, which
         // is used in bgzf2_decode_block_mt.
         fp->seek_to -= idx->pos;
-        fprintf(stderr, "bgzf seek pos %ld, seek_to %ld\n", idx->cpos, fp->seek_to);
+        fprintf(stderr, "bgzf seek pos %lld, seek_to %"PRIu64"\n",
+                (long long)idx->cpos, fp->seek_to);
     }
     fp->hit_eof = 0;
 
@@ -2679,7 +2680,7 @@ int bgzf2_seek(bgzf2 *fp, uint64_t upos) {
 
         if (idx->cpos != hseek(fp->hfp, idx->cpos, SEEK_SET))
             return -1;
-        fprintf(stderr, "Seek to %ld\n", idx->cpos);
+        fprintf(stderr, "Seek to %lld\n", (long long)idx->cpos);
 
         // Load the relevant block
         if (bgzf2_decode_block(fp) < 0)
