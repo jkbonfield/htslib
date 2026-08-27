@@ -834,21 +834,44 @@ char *zlib_mem_inflate(char *cdata, size_t csize, size_t *size) {
         return NULL;
     }
 
+    // cdata[csize-4] should be *a* GZIP ISIZE file.
+    // In theory maybe it's a BGZF stream, but this function both here and
+    // also the non-libdeflate one wouldn't decode that, so it's left as a
+    // future fix.
+    // We also cannot trust it as the data may be corruption / altered.
+//    fprintf(stderr, "CSIZE=%ld ISIZE=%d\t", csize,
+//            csize >= 4 ? le_to_u32((uint8_t *)&cdata[csize-4]) : -1);
+
+    size_t capacity = *size;
+    if (!capacity)
+        capacity = (csize >= 4)
+            ? le_to_u32((uint8_t *)&cdata[csize-4])
+            : csize*2;
+
+    // Sanity check, don't grow beyond max ratio in a single step
+    if (capacity > UINT32_MAX || capacity > csize*1032)
+        capacity = MIN(csize*1032, UINT32_MAX);
+    if (capacity < csize+16)
+        capacity = csize+16;
+//    fprintf(stderr, "cap=%ld\t", capacity);
+
     uint8_t *data = NULL, *new_data;
     for(;;) {
-        new_data = realloc(data, *size);
+        new_data = realloc(data, capacity);
         if (!new_data) {
             hts_log_error("Memory allocation failure");
             goto fail;
         }
         data = new_data;
 
-        int ret = libdeflate_gzip_decompress(z, cdata, csize, data, *size, size);
+        int ret = libdeflate_gzip_decompress(z, cdata, csize, data,
+                                             capacity, size);
 
         // Auto grow output buffer size if needed and try again.
         // Fortunately for all bar one call of this we know the size already.
         if (ret == LIBDEFLATE_INSUFFICIENT_SPACE) {
-            *size = (*size + 16) + (*size >> 1);
+            capacity += capacity>>1; // 50% growth
+//            fprintf(stderr, " (%ld) ", capacity);
             continue;
         }
 
@@ -859,6 +882,8 @@ char *zlib_mem_inflate(char *cdata, size_t csize, size_t *size) {
             break;
         }
     }
+
+//    fprintf(stderr, "%ld (alloc %ld)\n", *size, capacity);
 
     libdeflate_free_decompressor(z);
     return (char *)data;
@@ -917,7 +942,7 @@ static char *libdeflate_deflate(char *data, size_t size, size_t *cdata_size,
 char *zlib_mem_inflate(char *cdata, size_t csize, size_t *size) {
     z_stream s;
     unsigned char *data = NULL; /* Uncompressed output */
-    int data_alloc = 0;
+    uint64_t data_alloc = 0;
     int err;
 
     /* Starting point at uncompressed size, and scale after that */
@@ -947,7 +972,7 @@ char *zlib_mem_inflate(char *cdata, size_t csize, size_t *size) {
     /* Decode to 'data' array */
     for (;s.avail_in;) {
         unsigned char *data_tmp;
-        int alloc_inc;
+        int64_t alloc_inc;
 
         s.next_out = &data[s.total_out];
         err = inflate(&s, Z_NO_FLUSH);
@@ -961,9 +986,31 @@ char *zlib_mem_inflate(char *cdata, size_t csize, size_t *size) {
             return NULL;
         }
 
-        /* More to come, so realloc based on growth so far */
-        alloc_inc = (double)s.avail_in/s.total_in * s.total_out + 100;
-        data = realloc((data_tmp = data), data_alloc += alloc_inc);
+        /*
+         * More to come, so realloc based on compression ratio so far.
+         *
+         * The maximum compression ratio of gzip is a little over 1000
+         * (LZ match of 258 bytes encoded in a 2bit huffman code).
+         * We can trivially verify this too.
+         *
+         * So avail_in/total_in * total_out as an expansion ratio
+         * can never be more than 1032*total_out.
+         * In practice zlib uses unsigned 32-bit counters, so we cannot
+         * ever risk overflowing alloc_int.
+         */
+        alloc_inc = (s.avail_in+1.0)/(s.total_in+1.0) * s.total_out + 100;
+        data_alloc += alloc_inc;
+        if (data_alloc > UINT32_MAX) {
+            if (data_alloc - alloc_inc <= UINT32_MAX) {
+                data_alloc = UINT32_MAX;
+            } else {
+                free(data);
+                inflateEnd(&s);
+                return NULL;
+            }
+        }
+
+        data = realloc((data_tmp = data), data_alloc);
         if (!data) {
             free(data_tmp);
             inflateEnd(&s);
