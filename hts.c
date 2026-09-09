@@ -708,6 +708,11 @@ int hts_detect_format2(hFILE *hfile, const char *fname, htsFormat *fmt)
             fmt->version.major = 1, fmt->version.minor = -1;
             return 0;
         }
+        else if (memcmp(s, "SAM\1", 4) == 0) {
+            fmt->category = sequence_data;
+            fmt->format = sam;
+            return 0;
+        }
         else if (memcmp(s, "BAI\1", 4) == 0) {
             fmt->category = index_file;
             fmt->format = bai;
@@ -736,6 +741,11 @@ int hts_detect_format2(hFILE *hfile, const char *fname, htsFormat *fmt)
         else if (memcmp(s, "TBI\1", 4) == 0) {
             fmt->category = index_file;
             fmt->format = tbi;
+            return 0;
+        }
+        else if (memcmp(s, "VCF\4", 4) == 0) {
+            fmt->category = variant_data;
+            fmt->format = vcf;
             return 0;
         }
         // GZI indexes have no magic numbers, so must be recognised solely by

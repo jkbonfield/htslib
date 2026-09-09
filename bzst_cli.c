@@ -298,56 +298,60 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
 //     return 0;
 // }
 // 
-// static int list_bzst_genomic_index(hFILE *fp, uint64_t cpos,
-//                                     uint32_t *len_p, int level) {
-//     uint32_t len = *len_p;
-// 
-//     char *g = malloc(len);
-//     if (!g)
-//         return -1;
-//     if (hread(fp, g, len) != len)
-//         goto err;
-// 
-//     if (level>1)
-//         printf("BZST genomic index, len %d, %s @ %"PRId64"\n",
-//                len, g[0]&1 ? "compressed" : "uncompressed",
-//                cpos);
-// 
-//     if (level > 2) {
-//         uint8_t *gp = (uint8_t *)g, *g_end = gp+len;
-//         gp++; // flag: unused
-//         if (gp+4 > g_end)
-//             goto err;
-//         int nchr = le_to_u32(gp); gp += 4;
-//         for (int i = 0; i < nchr; i++) {
-//             if (gp+5 > g_end)
-//                 goto err;
-//             gp++; // flag
-//             int index_sz = le_to_u32(gp); gp += 4;
-//             // Should index_sz be uint64_t?
-//             printf("    chr-id %d/%d, size %d\n",
-//                    i+1, nchr, index_sz);
-//             if (gp+index_sz * 20 > g_end)
-//                 goto err;
-//             for (int j = 0; j < index_sz; j++) {
-//                 int tid = le_to_u32(gp); gp += 4;
-//                 int beg = le_to_u32(gp); gp += 4;
-//                 int end = le_to_u32(gp); gp += 4;
-//                 uint64_t upos = le_to_u64(gp); gp += 8;
-//                 printf("        %4d: %d, %d..%d at %"PRId64"\n",
-//                        j, tid, beg, end, upos);
-//             }
-//         }
-//     }
-// 
-//     free(g);
-//     *len_p = 0;
-//     return 0;
-// 
-//  err:
-//     free(g);
-//     return -1;
-// }
+static int list_bzst_genomic_index(hFILE *fp, uint64_t cpos,
+                                    uint32_t *len_p, int level) {
+    uint32_t len = *len_p;
+
+    char *g = malloc(len);
+    if (!g)
+        return -1;
+    if (hread(fp, g, len) != len)
+        goto err;
+
+    if (len <= 0 || g[0] != 0) // format
+        goto err;
+
+    if (level>1)
+        printf("BZST genomic index, len %d, %s @ %"PRId64"\n",
+               len, g[1]&1 ? "compressed" : "uncompressed",
+               cpos);
+
+    if (level > 2) {
+        uint8_t *gp = (uint8_t *)g, *g_end = gp+len;
+        gp++; // format
+        gp++; // flag: unused
+        if (gp+4 > g_end)
+            goto err;
+        int nchr = le_to_u32(gp); gp += 4;
+        for (int i = 0; i < nchr; i++) {
+            if (gp+5 > g_end)
+                goto err;
+            gp++; // flag
+            int index_sz = le_to_u32(gp); gp += 4;
+            // Should index_sz be uint64_t?
+            printf("    chr-id %d/%d, size %d\n",
+                   i+1, nchr, index_sz);
+            if (gp+index_sz * 20 > g_end)
+                goto err;
+            for (int j = 0; j < index_sz; j++) {
+                int tid = le_to_u32(gp); gp += 4;
+                int beg = le_to_u32(gp); gp += 4;
+                int end = le_to_u32(gp); gp += 4;
+                uint64_t upos = le_to_u64(gp); gp += 8;
+                printf("        %4d: %d, %d..%d at %"PRId64"\n",
+                       j, tid, beg, end, upos);
+            }
+        }
+    }
+
+    free(g);
+    *len_p = 0;
+    return 0;
+
+ err:
+    free(g);
+    return -1;
+}
 
 static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
     uint8_t *g = NULL, buf[22];
@@ -608,14 +612,14 @@ static int list_file(char *fn, int level) {
 //                    goto err;
 //                break;
 //            }
-//
-//            case GZST_GENOMIC_INDEX: {
-//                ngindex++;
-//                if (list_bzst_genomic_index(fp, cpos, &len, level) < 0)
-//                    goto err;
-//
-//                break;
-//            }
+
+            case GZST_GENOMIC_INDEX: {
+                ngindex++;
+                if (list_bzst_genomic_index(fp, cpos, &len, level) < 0)
+                    goto err;
+
+                break;
+            }
 
             default:
                 fprintf(stderr, "Unknown skippable frame with sub-type %d\n",

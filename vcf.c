@@ -4700,7 +4700,8 @@ int vcf_write(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
             return -1;
     }
 
-    if (fp->idx && fp->format.compression == bgzf2_compression) {
+    if (fp->idx && (fp->format.compression == bgzf2_compression ||
+                    fp->format.compression == bzst_compression)) {
         // bgzf2 doesn't need tabix hackery
         if (bgzf_idx_push(fp->fp.bgzf, fp->idx,
                           v->rid, v->pos, v->pos + v->rlen,
@@ -4893,7 +4894,8 @@ int bcf_idx_init(htsFile *fp, bcf_hdr_t *h, int min_shift, const char *fnidx) {
     int n_lvls, nids = 0;
 
     if (fp->format.compression != bgzf &&
-        fp->format.compression != bgzf2_compression) {
+        fp->format.compression != bgzf2_compression &&
+        fp->format.compression != bzst_compression) {
         hts_log_error("Indexing is only supported on BGZF-compressed files");
         return -3; // Matches no-compression return for bcf_index_build3()
     }

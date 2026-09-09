@@ -478,6 +478,34 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
 }
 
 /*
+ * Attempts to auto-detect the file format based on the first block.
+ * Returns a static string, with "\0\0\0\0" for unknown format.
+ */
+static char *bzst_detect_format(bzst *fp) {
+    if (strncmp(fp->uncomp->buf, "@HD\t", 4) == 0 ||
+        strncmp(fp->uncomp->buf, "@SQ\t", 4) == 0 ||
+        strncmp(fp->uncomp->buf, "@RG\t", 4) == 0 ||
+        strncmp(fp->uncomp->buf, "@RG\t", 4) == 0 ||
+        strncmp(fp->uncomp->buf, "@CO\t", 4) == 0)
+        return "SAM\1";
+
+    if (strncmp(fp->uncomp->buf, "BAM\1", 4) == 0)
+        return "BAM\1";
+
+    if (strncmp(fp->uncomp->buf, "CRAM", 4) == 0)
+        return "CRAM";
+
+    if (strncmp(fp->uncomp->buf, "##fileformat=VCFv4", 18) == 0)
+        return "VCF\4";
+
+    if (strncmp(fp->uncomp->buf, "BCF\4", 4) == 0)
+        return "BCF\4";
+
+    // TODO: fasta, fastq, and more. See hts_detect_format2()
+    return "\0\0\0\0";
+}
+
+/*
  * Write a BZST header block as a skippable frame.
  *
  * Format is fixed size:
@@ -501,7 +529,8 @@ static int bzst_write_header(bzst *fp) {
     buf[8] = BZST_HEADER;           // sub-type
     buf[9] = 1;                     // header format
     memcpy(buf+10, "BZST", 4);      // BZST magic
-    memcpy(buf+14, "\0\0\0\0", 4);  // parent-format magic
+    char *fmt = bzst_detect_format(fp);
+    memcpy(buf+14, fmt, 4);         // parent-format magic
     buf[18] = 0;                    // profile
     buf[19] = 0;                    // flags
     u64_to_le(XXH64(buf, 20, 0), buf+20);
@@ -566,66 +595,106 @@ static int bzst_read_header(bzst *fp) {
  * with virtual offsets be uncompressed positions (to be used with seekable
  * index).
  *
+ * Format:
+ * 4      skippable id: 0x184D2A5B
+ * 4      frame size
+ * 1      sub-type: GZST_GENOMIC_INDEX
+ * 1      index format
+ * 1      index flag
+ * 4      chromosome count
+ * --- per chromosome
+ *   1    flag (is_aligned, is_sorted, ...)
+ *   4    chr ID (aka tid)
+ *   4    frame count
+ *   --- per frame for this chromosome
+ *     4  chr start pos (relative)
+ *     4  chr end pos   (relative)
+ *     8  frame start offset of GZST_BLOCK_META frame
+ *   ---
+ * ---
+ * 8      XXH64 checksum (not including next 8)
+ * 4      Relative offset back to start of index data
+ *        (NB BZST_INDEX uses 8 byte absolute offset instead)
+ * 4      BZST_EOF  magic
+ *
+ * - An index could be sparse.  We may not need to explicitly have every frame
+ *   as an entry in the index, but we do need one per chromosome.
+ *   Using GZST_BLOCK_META records we can read-skip(seek)-read-skip... until
+ *   we get to the overlapping data. (Also permitted in CRAM's index)
+ *
+ * - Do we also want block size (GZST_BLOCK_META + BZST_BLOCK_HEADER + zstd
+ *   data frame) for ease of chunking directly from the index?  It's just the
+ *   same as next-offset minus this-offset, provided we know where the last
+ *   block ends (eg encoded via a sentinel index entry).
+ *
+ * - Consider adding a chromosome lookup table too.
+ *   So we can jump straight to that element in the index without
+ *   loading the index first.  This also gives us the ability to have a
+ *   load_genomic_index function that is given a list of chrs permitting
+ *   partial reading for fastest lookup.
+ *
  * Returns 0 on success,
  *        <0 on failure
  */
-// static int write_genomic_index(bzst *fp) {
-//     kstring_t ks = {0,0};
-// 
-//     // Header
-//     ks_resize(&ks, 16); // try 8192
-//     u32_to_le(BZST_SKIPPABLE_ID, (uint8_t *)ks.s); // BZST skippable frame
-//     ks.s[8] = GZST_GENOMIC_INDEX;
-//     ks.s[9] = 0; // index format
-//     ks.l += 10; // fill out [4..7] later
-// 
-//     // flag
-//     kputc_(0, &ks); // uncompressed
-// 
-//     // TODO: per file index meta-data.  Basically some bits of "idxstats"
-// 
-//     // Number of chromosomes
-//     u32_to_le(fp->nchr, (uint8_t *)ks.s + ks.l); ks.l += 4;
-// 
-//     int i;
-//     for (i = 0; i < fp->nchr; i++) {
-//         ks_resize(&ks, ks.l + 5 + 20*fp->gindex_sz[i]);
-// 
-//         // flag
-//         kputc_(0, &ks); // is_aligned, is_sorted... TODO
-//         // frame count for this chr
-//         u32_to_le(fp->gindex_sz[i], (uint8_t *)ks.s + ks.l); ks.l += 4;
-//         // TODO: per-ref meta-data.  Eg other bits of "idxstats"
-// 
-//         bzst_gindex_t *g = fp->gindex[i];
-//         int j;
-//         for (j = 0; j < fp->gindex_sz[i]; j++) {
-//             // Tid isn't needed here.  It belongs out of the loop (so we can
-//             // have a mismap between tid values to index and array elements).
-//             u32_to_le(g[j].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
-//             // Should we delta these?  Or change to frame no. + offset?
-//             // FIXME: beg and end are int64.  May want varint.
-//             u32_to_le(g[j].beg, (uint8_t *)ks.s + ks.l); ks.l += 4;
-//             u32_to_le(g[j].end, (uint8_t *)ks.s + ks.l); ks.l += 4;
-//             u64_to_le(g[j].frame_start, (uint8_t *)ks.s + ks.l); ks.l += 8;
-//         }
-//     }
-// 
-//     // Footer; used for seeking backwards to start of frame
-//     ks_resize(&ks, ks.l + 8);
-//     u32_to_le(ks.l + 8, (uint8_t *)ks.s + ks.l); ks.l += 4;
-//     u32_to_le(0x8F92EABB, (uint8_t *)ks.s + ks.l); ks.l += 4;
-// 
-//     // Finish up header and write index
-//     size_t sz = ks.l;
-//     u32_to_le(sz-8, (uint8_t *)ks.s+4); // size of skippable frame
-// 
-//     //write(3, ks.s, sz);
-//     int ret = (sz == hwrite(fp->hfp, ks.s, sz) ? 0 : -1);
-//     free(ks.s);
-// 
-//     return ret;
-// }
+static int write_genomic_index(bzst *fp) {
+    kstring_t ks = {0,0};
+
+    // Header
+    ks_resize(&ks, 16); // try 8192?
+    u32_to_le(BZST_SKIPPABLE_ID, (uint8_t *)ks.s); // BZST skippable frame
+    //ks.s[4] = frame_size
+    ks.s[8] = GZST_GENOMIC_INDEX;
+    ks.s[9] = 0; // index format
+    ks.l += 10; // fill out [4..7] later
+
+    // flag
+    kputc_(0, &ks); // uncompressed
+
+    // TODO: per file index meta-data.  Basically some bits of "idxstats"
+
+    // Number of chromosomes
+    u32_to_le(fp->nchr, (uint8_t *)ks.s + ks.l); ks.l += 4;
+
+    int i;
+    for (i = 0; i < fp->nchr; i++) {
+        ks_resize(&ks, ks.l + 5 + 20*fp->gindex_sz[i]);
+
+        // flag
+        kputc_(0, &ks); // is_aligned, is_sorted... TODO
+        // frame count for this chr
+        u32_to_le(fp->gindex_sz[i], (uint8_t *)ks.s + ks.l); ks.l += 4;
+        // TODO: per-ref meta-data.  Eg other bits of "idxstats"
+
+        bzst_gindex_t *g = fp->gindex[i];
+        int j;
+        for (j = 0; j < fp->gindex_sz[i]; j++) {
+            // tid. Move out of here
+            u32_to_le(g[j].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
+            // Should we delta these?  Or change to frame no. + offset?
+            // FIXME: beg and end are int64.  May want varint.
+            u32_to_le(g[j].beg, (uint8_t *)ks.s + ks.l); ks.l += 4;
+            u32_to_le(g[j].end, (uint8_t *)ks.s + ks.l); ks.l += 4;
+            u64_to_le(g[j].frame_start, (uint8_t *)ks.s + ks.l); ks.l += 8;
+        }
+    }
+
+    // Footer; used for seeking backwards to start of frame
+    ks_resize(&ks, ks.l + 8);
+    u32_to_le(ks.l + 8, (uint8_t *)ks.s + ks.l); ks.l += 4;
+    u32_to_le(0x8F92EABB, (uint8_t *)ks.s + ks.l); ks.l += 4;
+
+    // Finish up header and write index
+    size_t sz = ks.l;
+    u32_to_le(sz-8, (uint8_t *)ks.s+4); // size of skippable frame
+
+    //write(3, ks.s, sz);
+    int ret = (sz == hwrite(fp->hfp, ks.s, sz) ? 0 : -1);
+    free(ks.s);
+
+    fp->idx_cpos += sz;
+
+    return ret;
+}
 
 // Submits a command to bzst_mt_reader.  fp->command_m must be unlocked.
 static void submit_reader_command(bzst *fp, int command, int done) {
@@ -892,7 +961,7 @@ int64_t bzst_query(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end) {
  * 8      Index offset (should be 4 bytes due to frame_size?)
  * 4      BZST_EOF  magic
  *
- * = 46 + N * 24 bytes
+ * = 8 + 3846 + N * 24 bytes
  *
  * Returns 0 on success,
  *        <0 on failure
@@ -922,9 +991,9 @@ static int bzst_write_index(bzst *fp) {
     }
 
     // Index footer
-    u64_to_le(XXH64(buf+9, off-9, 0), buf+off); off += 8;
-    u64_to_le(fp->idx_cpos, buf+off);           off += 8;
-    u32_to_le(BZST_EOF, buf+off);               off += 4;
+    u64_to_le(XXH64(buf, off, 0), buf+off); off += 8;
+    u64_to_le(fp->idx_cpos, buf+off);       off += 8;
+    u32_to_le(BZST_EOF, buf+off);           off += 4;
 
     int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
     //fprintf(stderr, "Wrote %ld for %ld items\n", off, nidx);
@@ -2063,7 +2132,7 @@ int bzst_close(bzst *fp) {
             free(final_meta.s);
         }
 
-        //ret |= write_genomic_index(fp);
+        ret |= write_genomic_index(fp);
         ret |= bzst_write_index(fp);
     }
 
@@ -2699,7 +2768,7 @@ static int bzst_read_index_common(bzst *fp) {
         goto err;
 
     // Validation
-    if (le_to_u64(&buf[sz-20]) != XXH64(buf+9, sz-20-9, 0)) {
+    if (le_to_u64(&buf[sz-20]) != XXH64(buf, sz-20, 0)) {
         fprintf(stderr, "Index checksum failure\n");
         goto err;
     }
@@ -2716,6 +2785,7 @@ static int bzst_read_index_common(bzst *fp) {
     // Decode the index
     cp = buf + 10;
     fp->aindex = fp->nindex = le_to_u64(cp);    cp += 8;
+    fp->index_frame_sz = sz;
     fp->file_size = le_to_u64(cp); cp += 8;
     if ((sz - 26) / 24 < fp->nindex) {
         fprintf(stderr, "Malformed index frame (nindex too large)\n");
@@ -3126,6 +3196,10 @@ hts_itr_t *bzst_itr_query(const hts_idx_t *idx,
         tid = -1;
 
     int64_t pos = bzst_query(bidx->fp, tid, beg, end);
+    if (pos < 0) {
+        free(iter);
+        return NULL;
+    }
 
     // hts_itr_t is public and extremely BGZF(1) specific.
     // We fill out tid, beg, end from arguments here, and we reuse

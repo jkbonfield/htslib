@@ -1223,7 +1223,7 @@ int sam_idx_init(htsFile *fp, sam_hdr_t *h, int min_shift, const char *fnidx) {
         (fp->format.format == sam &&
          (fp->format.compression == bgzf ||
           fp->format.compression == bgzf2_compression ||
-          fp->format.compression != bzst_compression))) {
+          fp->format.compression == bzst_compression))) {
         int n_lvls, fmt = HTS_FMT_CSI;
         if (min_shift > 0) {
             int64_t max_len = 0;
