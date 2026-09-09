@@ -201,7 +201,7 @@ int vcf_readrec(BGZF *fp, void *hp, void *bp,
                 int *tid, hts_pos_t *beg, hts_pos_t *end) {
     //kstring_t s = {0,0,0}; // FIXME cache this somewhere
     //int ret = bgzf_getline(fp, '\n', &s);
-    kstring_t *s = bzst_ks((bzst *)fp);
+    kstring_t *s = fp->is_bzst ? bzst_ks((bzst *)fp) : bgzf2_ks((bgzf2 *)fp);
     int ret = bgzf_getline(fp, '\n', s);
     if (ret < 0)
         return ret;
