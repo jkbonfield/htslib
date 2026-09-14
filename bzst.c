@@ -441,16 +441,30 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
 //    ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, 6);
 //    ZSTD_CCtx_setParameter(zcs, ZSTD_c_minMatch, 6);
 
-    if (level > 6 && level <= 17) {
+    if (level >= 6 && level <= 11) {
         // LDM slows things down and we want to still support the fast
         // modes being fast.  It's often also harmful at the highest
         // compression levels, so we use it for mid-range only.
         //
         // TODO: test novaseq etc.
+
         ZSTD_CCtx_setParameter(zcs, ZSTD_c_enableLongDistanceMatching, 1);
-        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashLog, 16); // winlog-7 def
+
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_targetLength, 32); // 32-128. smaller fast
+
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashLog, 17); // winlog-7 def
         ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmBucketSizeLog, 3);
         ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashRateLog, 4);
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmMinMatch,
+                               16 * (2 + (level>7))); // 32,48,64
+
+                               // 0,1,2,3,4,5,6,7,8,9,0,1
+        static int searchLog[] = {0,0,0,0,0,3,3,3,3,4,4,5}; // 1-11
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, searchLog[level]);
+    } else if (level >= 12 && level <= 13) {
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_chainLog, 22);
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_hashLog, 22);
+        ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, 4 + (level==12));
     }
 
     ZSTD_initCStream(zcs, level);
@@ -470,6 +484,16 @@ static ssize_t compress_block(char *uncomp, size_t uncomp_sz,
 
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_checksumFlag, 1);
     ZSTD_CCtx_setParameter(zcs, ZSTD_c_contentSizeFlag, 1);
+
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_enableLongDistanceMatching, 1);
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashLog, 17); // 16-18? winlog-7 def
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmBucketSizeLog, 3); // 4?
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmHashRateLog, 4); //3?
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_ldmMinMatch, 32);// 32 or 64?
+
+    //ZSTD_CCtx_setParameter(zcs, ZSTD_c_chainLog, 24); // bigger = small/slow
+    //ZSTD_CCtx_setParameter(zcs, ZSTD_c_searchLog, 5); // 4-8? bigger is better
+    ZSTD_CCtx_setParameter(zcs, ZSTD_c_targetLength, 32); // 32-128. smaller fast
 
     size_t csize = ZSTD_compress2(zcs, comp, comp_alloc, uncomp, uncomp_sz);
     ZSTD_freeCStream(zcs);
