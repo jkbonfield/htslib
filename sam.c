@@ -979,7 +979,7 @@ int bam_write1(BGZF *fp, const bam1_t *b)
         if (!fs) {
             if (!(fs = calloc(1, sizeof(*fs))))
                 return -1;
-            bzst_add_flush_callback((bzst *)fp, fs, bam_flush_callback);
+            //bzst_add_flush_callback((bzst *)fp, fs, bam_flush_callback);
         }
 
         fs->nmapped   += (c->flag & BAM_FUNMAP) == 0;

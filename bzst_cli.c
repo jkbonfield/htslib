@@ -246,58 +246,58 @@ static int decode(char *in, char *out, uint64_t start, uint64_t end,
 /* ------------------------------------------------------------------------
  * ZSTD file structure listing
  */
-// static int list_bzst_block_metadata(hFILE *fp, uint64_t cpos,
-//                                      uint32_t *len_p, int level) {
-//     uint32_t len = *len_p;
-//     unsigned char buf[4];
-// 
-//     if (level > 1) {
-//         if (len < 4)
-//             return -1;
-//         if (hread(fp, buf, 4) != 4)
-//             return -1;
-//         uint32_t csize = le_to_u32(buf);
-//         printf("BZST block meta skippable, len %d @ %"PRId64
-//                ", next block csize %u\n", len, cpos, csize);
-// 
-//         len -= 4;
-//         if (len > 0) {
-//             char *m = malloc(len);
-//             if (!m)
-//                 return -1;
-//             if (hread(fp, m, len) != len)
-//                 return -1;
-//             printf("    Meta data: %.*s\n", len, m);
-//             free(m);
-//         }
-//         *len_p = 0;
-//     }
-// 
-//     return 0;
-// }
-// 
-// static int list_bzst_file_metadata(hFILE *fp, uint64_t cpos,
-//                                     uint32_t *len_p, int level) {
-//     uint32_t len = *len_p;
-// 
-//     if (level > 1) {
-//         printf("File meta skippable, len %d @ %"PRId64"\n",
-//                len, cpos);
-//         if (len > 0) {
-//             char *m = malloc(len);
-//             if (!m)
-//                 return -1;
-//             if (hread(fp, m, len) != len)
-//                 return -1;
-//             printf("    Meta data: %.*s\n", len, m);
-//             *len_p = 0;
-//             free(m);
-//         }
-//     }
-// 
-//     return 0;
-// }
-// 
+static int list_bzst_block_metadata(hFILE *fp, uint64_t cpos,
+                                     uint32_t *len_p, int level) {
+    uint32_t len = *len_p;
+    unsigned char buf[4];
+
+    if (level > 1) {
+        if (len < 4)
+            return -1;
+        if (hread(fp, buf, 4) != 4)
+            return -1;
+        uint32_t csize = le_to_u32(buf);
+        printf("BZST block meta skippable, len %d @ %"PRId64
+               ", next block csize %u\n", len, cpos, csize);
+
+        len -= 4;
+        if (len > 0) {
+            char *m = malloc(len);
+            if (!m)
+                return -1;
+            if (hread(fp, m, len) != len)
+                return -1;
+            printf("    Meta data: %.*s\n", len, m);
+            free(m);
+        }
+        *len_p = 0;
+    }
+
+    return 0;
+}
+
+static int list_bzst_file_metadata(hFILE *fp, uint64_t cpos,
+                                    uint32_t *len_p, int level) {
+    uint32_t len = *len_p;
+
+    if (level > 1) {
+        printf("File meta skippable, len %d @ %"PRId64"\n",
+               len, cpos);
+        if (len > 0) {
+            char *m = malloc(len);
+            if (!m)
+                return -1;
+            if (hread(fp, m, len) != len)
+                return -1;
+            printf("    Meta data: %.*s\n", len, m);
+            *len_p = 0;
+            free(m);
+        }
+    }
+
+    return 0;
+}
+
 static int list_bzst_genomic_index(hFILE *fp, uint64_t cpos,
                                     uint32_t *len_p, int level) {
     uint32_t len = *len_p;
@@ -610,21 +610,21 @@ static int list_file(char *fn, int level) {
                 break;
             }
 
-//            case GZST_BLOCK_META: {
-//                nblockmeta++;
-//                blockmeta_sz += len+9;
-//                if (list_bzst_block_metadata(fp, cpos, &len, level) < 0)
-//                    goto err;
-//                break;
-//            }
+            case GZST_BLOCK_META: {
+                nblockmeta++;
+                blockmeta_sz += len+9;
+                if (list_bzst_block_metadata(fp, cpos, &len, level) < 0)
+                    goto err;
+                break;
+            }
 
-//            case GZST_FILE_META: {
-//                nfilemeta++;
-//                filemeta_sz += len+9;
-//                if (list_bzst_file_metadata(fp, cpos, &len, level) < 0)
-//                    goto err;
-//                break;
-//            }
+            case GZST_FILE_META: {
+                nfilemeta++;
+                filemeta_sz += len+9;
+                if (list_bzst_file_metadata(fp, cpos, &len, level) < 0)
+                    goto err;
+                break;
+            }
 
             case GZST_GENOMIC_INDEX: {
                 ngindex++;
