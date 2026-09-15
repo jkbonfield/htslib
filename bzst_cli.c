@@ -539,6 +539,13 @@ static int list_file(char *fn, int level) {
     int64_t nsindex = 0;
     int64_t ngindex = 0;
     int64_t nblock = 0;
+    size_t header_sz = 0;
+    size_t blockmeta_sz = 0;
+    size_t filemeta_sz = 0;
+    size_t blockhdr_sz = 0;
+    size_t data_sz = 0;
+    size_t sindex_sz = 0;
+    size_t gindex_sz = 0;
 
     unsigned char buf[20];
     bzst_frame_t type;
@@ -563,6 +570,7 @@ static int list_file(char *fn, int level) {
                     goto err;
 
                 nheader++;
+                header_sz += len+9;
                 if (level>1)
                     printf("BZST_HEADER: len %d, version %d, format \"%.4s\"\n",
                            len+1, version, format);
@@ -583,6 +591,8 @@ static int list_file(char *fn, int level) {
                 // + 4 byte checksum
                 
                 nblockhdr++;
+                blockhdr_sz += len+9;
+                data_sz += csize;
                 if (level > 1)
                     printf("BZST_BLOCK_HEADER: len %d, csize %"PRIu64
                            ", usize %"PRIu64", flags %d\n",
@@ -594,6 +604,7 @@ static int list_file(char *fn, int level) {
 
             case BZST_INDEX: {
                 nsindex++;
+                sindex_sz += len+9;
                 if (list_bzst_index(fp, len, cpos, level) < 0)
                     goto err;
                 break;
@@ -601,6 +612,7 @@ static int list_file(char *fn, int level) {
 
 //            case GZST_BLOCK_META: {
 //                nblockmeta++;
+//                blockmeta_sz += len+9;
 //                if (list_bzst_block_metadata(fp, cpos, &len, level) < 0)
 //                    goto err;
 //                break;
@@ -608,6 +620,7 @@ static int list_file(char *fn, int level) {
 
 //            case GZST_FILE_META: {
 //                nfilemeta++;
+//                filemeta_sz += len+9;
 //                if (list_bzst_file_metadata(fp, cpos, &len, level) < 0)
 //                    goto err;
 //                break;
@@ -615,6 +628,7 @@ static int list_file(char *fn, int level) {
 
             case GZST_GENOMIC_INDEX: {
                 ngindex++;
+                gindex_sz += len+9;
                 if (list_bzst_genomic_index(fp, cpos, &len, level) < 0)
                     goto err;
 
@@ -655,14 +669,24 @@ static int list_file(char *fn, int level) {
         }
     }
 
-    printf("Frames: %10"PRId64"\tBZST_HEADER\n", nheader);
-    printf("Frames: %10"PRId64"\tBZST_BLOCK_HEADER\n", nblockhdr);
-    printf("Frames: %10"PRId64"\tZSTD data frames\n", ndata);
-    printf("Blocks: %10"PRId64"\tZSTD data blocks\n", nblock);
-    printf("Frames: %10"PRId64"\tframe metadata\n", nblockmeta);  
-    printf("Frames: %10"PRId64"\tfile metadata\n", nfilemeta); 
-    printf("Frames: %10"PRId64"\tgenomic index\n", ngindex);
-    printf("Frames: %10"PRId64"\tBZST_INDEX\n", nsindex);
+    printf("#       %10s\t%12s\tType\n", "Count", "Bytes");
+    printf("# -----------------------------------------------------------\n");
+    printf("Frames: %10"PRId64"\t%12"PRId64"\tBZST_HEADER\n",
+           nheader, header_sz);
+    printf("Frames: %10"PRId64"\t%12"PRId64"\tBZST_BLOCK_HEADER\n",
+           nblockhdr, blockhdr_sz);
+    printf("Frames: %10"PRId64"\t%12"PRId64"\tZSTD data frames\n",
+           ndata, data_sz);
+    printf("Blocks: %10"PRId64"\t%12s\tZSTD data blocks\n",
+           nblock, "-");
+    printf("Frames: %10"PRId64"\t%12"PRId64"\tframe metadata\n",
+           nblockmeta, blockmeta_sz);
+    printf("Frames: %10"PRId64"\t%12"PRId64"\tfile metadata\n",
+           nfilemeta, filemeta_sz); 
+    printf("Frames: %10"PRId64"\t%12"PRId64"\tgenomic index\n",
+           ngindex, gindex_sz);
+    printf("Frames: %10"PRId64"\t%12"PRId64"\tBZST_INDEX\n", nsindex,
+           sindex_sz);
 
     return hclose(fp);
 
