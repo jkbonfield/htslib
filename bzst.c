@@ -2870,7 +2870,7 @@ static bzst_index_t *index_query(bzst *fp, uint64_t upos) {
     }
 
     // We may be a bit early, especially when searching for the last block
-    while (imid+1 < fp->nindex && idx[imid+1].u_pos < upos)
+    while (imid+1 < fp->nindex && idx[imid+1].u_pos <= upos)
         imid++;
 
     return &idx[imid];
