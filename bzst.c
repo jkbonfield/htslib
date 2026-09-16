@@ -108,6 +108,11 @@ Known skippable frame IDs:
 #include "htslib/kstring.h"
 #include "cram/pooled_alloc.h"
 #include "hts_internal.h" // for hts_bzst_idx_t
+#if defined(HAVE_EXTERNAL_LIBHTSCODECS)
+#include <htscodecs/varint.h>
+#else
+#include "htscodecs/htscodecs/varint.h"
+#endif
 
 #ifndef MIN
 #  define MIN(a,b) ((a)<(b)?(a):(b))
@@ -677,11 +682,15 @@ static int write_genomic_index(bzst *fp) {
     // TODO: per file index meta-data.  Basically some bits of "idxstats"
 
     // Number of chromosomes
-    u32_to_le(fp->nchr, (uint8_t *)ks.s + ks.l); ks.l += 4;
+    //u32_to_le(fp->nchr, (uint8_t *)ks.s + ks.l); ks.l += 4;
+    uint8_t *ks_end = ks.s + ks.m;
+    ks.l += var_put_u32((uint8_t *)ks.s + ks.l, ks_end, fp->nchr);
 
     int i;
     for (i = 0; i < fp->nchr; i++) {
-        ks_resize(&ks, ks.l + 5 + 20*fp->gindex_sz[i]);
+        // Worst case
+        ks_resize(&ks, ks.l + 5 + 40*fp->gindex_sz[i]);
+        ks_end = ks.s + ks.m;
 
         // flag
         kputc_(0, &ks); // is_aligned, is_sorted... TODO
@@ -690,15 +699,33 @@ static int write_genomic_index(bzst *fp) {
         // TODO: per-ref meta-data.  Eg other bits of "idxstats"
 
         bzst_gindex_t *g = fp->gindex[i];
+        if (fp->gindex_sz[i])
+            u32_to_le(g[0].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
         int j;
+        uint64_t last_beg = 0, last_end = 0, last_frame = 0;
         for (j = 0; j < fp->gindex_sz[i]; j++) {
             // tid. Move out of here
-            u32_to_le(g[j].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
             // Should we delta these?  Or change to frame no. + offset?
-            // FIXME: beg and end are int64.  May want varint.
-            u32_to_le(g[j].beg, (uint8_t *)ks.s + ks.l); ks.l += 4;
-            u32_to_le(g[j].end, (uint8_t *)ks.s + ks.l); ks.l += 4;
-            u64_to_le(g[j].frame_start, (uint8_t *)ks.s + ks.l); ks.l += 8;
+            ks.l += var_put_u64((uint8_t *)ks.s + ks.l, ks_end,
+                                g[j].beg - last_beg);
+            // We could do end - beg, but end - last_end is typically
+            // a smaller value, particularly for large records.
+            // FIXME: but end - last end could be negative.  Put s64 instead?
+            // Or abandon this idea?
+            ks.l += var_put_u64((uint8_t *)ks.s + ks.l, ks_end,
+                                //g[j].end - g[j].beg);
+                                g[j].end - last_end);
+            ks.l += var_put_u64((uint8_t *)ks.s + ks.l, ks_end,
+                                g[j].frame_start - last_frame);
+
+            last_beg = g[j].beg;
+            last_end = g[j].end;
+            last_frame = g[j].frame_start;
+
+            // // FIXME: beg and end are int64.  May want varint.
+            // u32_to_le(g[j].beg, (uint8_t *)ks.s + ks.l); ks.l += 4;
+            // u32_to_le(g[j].end, (uint8_t *)ks.s + ks.l); ks.l += 4;
+            // u64_to_le(g[j].frame_start, (uint8_t *)ks.s + ks.l); ks.l += 8;
         }
     }
 
@@ -819,9 +846,7 @@ static int load_genomic_index_common(bzst *fp) {
     uint32_t sz = le_to_u32(footer);
     if (!sz)
         goto err;
-    //if (hseek(fp->hfp, -sz, SEEK_CUR) < 0) // why doesn't SEEK_CUR work?
-    // FIXME: because it's uint32.  Cast to off_t first.
-    if (hseek(fp->hfp, -(fp->index_frame_sz + sz), SEEK_END) < 0)
+    if (hseek(fp->hfp, -(off_t)sz, SEEK_CUR) < 0)
         goto err;
 
     if (!(buf = malloc(sz)))
@@ -829,6 +854,7 @@ static int load_genomic_index_common(bzst *fp) {
     if (sz != hread(fp->hfp, buf, sz))
         goto err;
 
+    fprintf(stderr, "eof=%x sz=%u frame=%u id=%x\n", le_to_u32(footer+4), sz, le_to_u32(buf+4), le_to_u32(buf));
     if (le_to_u32(buf) != BZST_SKIPPABLE_ID ||
         buf[8] != GZST_GENOMIC_INDEX ||
         buf[9] != 0) {
@@ -839,7 +865,8 @@ static int load_genomic_index_common(bzst *fp) {
     // buf[4..7] = skippable frame size, could validate if we wanted to.
     // buf[10] = flag. TODO
     uint8_t *cp = buf+11;
-    fp->nchr = le_to_u32(cp);  cp += 4;
+    uint8_t *cp_end = buf+sz;
+    cp += var_get_u32(cp, cp_end, &fp->nchr);
 //    fprintf(stderr, "Index: nchr %d\n", fp->nchr);
 
     fp->gindex_frame_sz = sz;
@@ -859,12 +886,22 @@ static int load_genomic_index_common(bzst *fp) {
             goto err;
 
         bzst_gindex_t *g = fp->gindex[i];
+        uint32_t tid = le_to_u32(cp); cp += 4;
+        uint64_t last_beg = 0, last_end = 0, last_frame = 0;
         for (j = 0; j < fp->gindex_sz[i]; j++) {
-            g[j].tid = le_to_u32(cp); cp += 4;
-            // FIXME: beg and end are int64.  May want varint.
-            g[j].beg = le_to_u32(cp); cp += 4;
-            g[j].end = le_to_u32(cp); cp += 4;
-            g[j].frame_start = le_to_u64(cp); cp += 8;
+            g[j].tid = tid;
+
+            cp += var_get_u64(cp, cp_end, &g[j].beg);
+            cp += var_get_u64(cp, cp_end, &g[j].end);
+            cp += var_get_u64(cp, cp_end, &g[j].frame_start);
+            last_beg = (g[j].beg += last_beg);
+            last_end = (g[j].end += last_end);
+            last_frame = (g[j].frame_start += last_frame);
+
+            //// FIXME: beg and end are int64.  May want varint.
+            //g[j].beg = le_to_u32(cp); cp += 4;
+            //g[j].end = le_to_u32(cp); cp += 4;
+            //g[j].frame_start = le_to_u64(cp); cp += 8;
 
 //          fprintf(stderr, "Index: tid %d, %ld..%ld %ld\n",
 //                  g[j].tid, (long)g[j].beg, (long)g[j].end,
@@ -1000,7 +1037,8 @@ static int bzst_write_index(bzst *fp) {
 
     // header
     u32_to_le(BZST_SKIPPABLE_ID, buf);
-    u32_to_le(frame_size, buf+4);
+    // Compute frame_size later
+    //u32_to_le(frame_size, buf+4);
     buf[8] = BZST_INDEX;             // sub-type
     buf[9] = 0;                      // index flags (uncompressed for now)
     u64_to_le(nidx, buf+10);         // index count
@@ -1008,11 +1046,26 @@ static int bzst_write_index(bzst *fp) {
 
     // Index entries;
     uint64_t off = 26;
+#if 0
     for (uint64_t i = 0; i < nidx; i++, off += 24) {
         u64_to_le(idx[i].u_pos,  buf+off);
         u64_to_le(idx[i].c_pos,  buf+off+8);
         u64_to_le(idx[i].c_size, buf+off+16);
     }
+#else
+    uint8_t *buf_end = buf + frame_size;
+    uint64_t last_u_pos = 0, last_c_pos = 0;
+    for (uint64_t i = 0; i < nidx; i++) {
+        off += var_put_u64(buf+off, buf_end, idx[i].u_pos  - last_u_pos);
+        off += var_put_u64(buf+off, buf_end, idx[i].c_pos  - last_c_pos);
+        off += var_put_u64(buf+off, buf_end, idx[i].c_size);
+        last_u_pos  = idx[i].u_pos;
+        last_c_pos  = idx[i].c_pos;
+    }
+#endif
+
+    // Correct frame_size now we know what it is
+    u32_to_le(off-8+8+8+4, buf+4);
 
     // Index footer
     u64_to_le(XXH64(buf, off, 0), buf+off); off += 8;
@@ -1020,7 +1073,7 @@ static int bzst_write_index(bzst *fp) {
     u32_to_le(BZST_EOF, buf+off);           off += 4;
 
     int ret = (off == hwrite(fp->hfp, buf, off) ? 0 : -1);
-    //fprintf(stderr, "Wrote %ld for %ld items\n", off, nidx);
+    fprintf(stderr, "Wrote %ld for %ld items\n", off, nidx);
     free(buf);
 
     return ret;
@@ -2813,10 +2866,12 @@ static int bzst_read_index_common(bzst *fp) {
     fp->aindex = fp->nindex = le_to_u64(cp);    cp += 8;
     fp->index_frame_sz = sz;
     fp->file_size = le_to_u64(cp); cp += 8;
+#if 0
     if ((sz - 26) / 24 < fp->nindex) {
-        fprintf(stderr, "Malformed index frame (nindex too large)\n");
+b        fprintf(stderr, "Malformed index frame (nindex too large)\n");
         goto err;
     }
+#endif
 
     fp->index = malloc(fp->nindex * 24);
     if (!fp->index) {
@@ -2824,11 +2879,38 @@ static int bzst_read_index_common(bzst *fp) {
         goto err;
     }
 
+#if 0
     for (uint64_t i = 0; i < fp->nindex; i++, cp += 24) {
         fp->index[i].u_pos  = le_to_u64(cp);
         fp->index[i].c_pos  = le_to_u64(cp+8);
         fp->index[i].c_size = le_to_u64(cp+16);
     }
+#else
+    uint8_t *cp_end = cp + sz;
+    uint64_t last_u_pos = 0, last_c_pos = 0;
+    int last_decode;
+    for (uint64_t i = 0; i < fp->nindex; i++) {
+        uint64_t u_delta, c_delta;
+        // TODO: error checking for negatives
+        cp += var_get_u64(cp, cp_end, &u_delta);
+        cp += var_get_u64(cp, cp_end, &c_delta);
+        cp += (last_decode = var_get_u64(cp, cp_end, &fp->index[i].c_size));
+        last_u_pos = (fp->index[i].u_pos = last_u_pos + u_delta);
+        last_c_pos = (fp->index[i].c_pos = last_c_pos + c_delta);
+//        fprintf(stderr, "Index %ld: %ld %ld %ld\n",
+//                i, fp->index[i].u_pos, fp->index[i].c_pos,
+//                fp->index[i].c_size);
+    }
+
+
+    // TODO: fix bzst -lll so it can report the correct values
+
+    if (last_decode == 0) {
+        // overflowed
+        fprintf(stderr, "Malformed index frame (nindex too large)\n");
+        goto err;
+    }
+#endif
 
     // rewind
     if (hseek(fp->hfp, 0, SEEK_SET) < 0)
