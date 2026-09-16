@@ -908,7 +908,7 @@ int bam_flush_callback(kstring_t *ks, void *dat, int final) {
         ret |= ksprintf(ks, "NMAPPED=%"PRIu64";NUNMAPPED=%"PRIu64,
                         fs->nmapped, fs->nunmapped) < 0;
     }
-    fprintf(stderr, "ks=%p final=%d => %s\n", ks, final, ks->s);
+    //fprintf(stderr, "ks=%p final=%d => %s\n", ks, final, ks->s);
     fs->total_nmapped   += fs->nmapped;
     fs->total_nunmapped += fs->nunmapped;
     fs->nmapped = fs->nunmapped = 0;
@@ -980,7 +980,7 @@ int bam_write1(BGZF *fp, const bam1_t *b)
         if (!fs) {
             if (!(fs = calloc(1, sizeof(*fs))))
                 return -1;
-            //bzst_add_flush_callback((bzst *)fp, fs, bam_flush_callback);
+            bzst_add_flush_callback((bzst *)fp, fs, bam_flush_callback);
         }
 
         fs->nmapped   += (c->flag & BAM_FUNMAP) == 0;

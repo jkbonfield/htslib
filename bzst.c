@@ -1156,6 +1156,8 @@ static int write_file_metadata(bzst *fp, kstring_t *meta) {
     ret |= hwrite(fp->hfp, buf, 8) != 8;
     // TODO XXhash-64
 
+    fp->idx_cpos += 10 + meta->l + 8;
+
     return ret ? -1 : 0;
 }
 
