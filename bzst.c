@@ -1503,7 +1503,7 @@ static int bzst_check_EOF_common(bzst *fp) {
     if (hseek(fp->hfp, offset, SEEK_SET) < 0)
         return -1;
 
-    return (memcmp(buf, "\xb1\xea\x92\x8f", 4) == 0) ? 1 : 0;
+    return (memcmp(buf, "\x5b\xea\x92\x8f", 4) == 0) ? 1 : 0;
 }
 
 static void bzst_mt_eof(bzst *fp) {

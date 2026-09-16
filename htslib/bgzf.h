@@ -153,6 +153,8 @@ typedef struct BGZF BGZF;
 static inline ssize_t bgzf_read_small(BGZF *fp, void *data, size_t length) {
     if (fp->is_zstd)
         return bgzf2_read((bgzf2 *)fp, (char *)data, length);
+    if (fp->is_bzst)
+        return bzst_read((bzst *)fp, (char *)data, length);
 
     // A block length of 0 implies current block isn't loaded (see
     // bgzf_seek_common).  That means length - offset may be negative, which
