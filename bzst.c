@@ -1,4 +1,5 @@
 // TODO: have a way to set end coord so MT decode doesn't waste cycles.
+// TODO: check ks_resize returns
 
 /* The MIT License
 
@@ -140,7 +141,6 @@ typedef struct {
 // 32/64-bit little endian and rely on compression?
 typedef struct {
     // TODO: add chr name too so we can do name to tid mappings?
-    int tid;             // chromosome+1.  Unused as it's indexed by this?
     hts_pos_t beg, end;  // inclusive range within chromosome
 
     // or frame number, so we can combine with linear frame index?
@@ -243,7 +243,7 @@ struct bzst {
     // Maybe nchr has holes?
     size_t gindex_frame_sz;  // size of zstd frame holding the gindex
     size_t *gindex_sz;       // size of gindex[chr]; consider used+alloc sz
-    bzst_gindex_t **gindex; // genomic index per chr / tid
+    bzst_gindex_t **gindex; // genomic index per chr (indexed by tid+1)
     // For detection of unsorted data.
     int last_used;  // 0 for first rec, 1 for used (sorted), -1 for unsorted
     int last_tid;
@@ -685,9 +685,10 @@ static int write_genomic_index(bzst *fp) {
     // TODO: per file index meta-data.  Basically some bits of "idxstats"
 
     // Number of chromosomes
-    //u32_to_le(fp->nchr, (uint8_t *)ks.s + ks.l); ks.l += 4;
     uint8_t *ks_end = ks.s + ks.m;
-    ks.l += var_put_u32((uint8_t *)ks.s + ks.l, ks_end, fp->nchr);
+    ks_resize(&ks, ks.l + 4);
+    u32_to_le(fp->nchr, (uint8_t *)ks.s + ks.l);
+    ks.l += 4;
 
     int i;
     for (i = 0; i < fp->nchr; i++) {
@@ -699,11 +700,11 @@ static int write_genomic_index(bzst *fp) {
         kputc_(0, &ks); // is_aligned, is_sorted... TODO
         // frame count for this chr
         u32_to_le(fp->gindex_sz[i], (uint8_t *)ks.s + ks.l); ks.l += 4;
+
         // TODO: per-ref meta-data.  Eg other bits of "idxstats"
+        // Or put this into a separate block type?
 
         bzst_gindex_t *g = fp->gindex[i];
-        if (fp->gindex_sz[i])
-            u32_to_le(g[0].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
         int j;
         uint64_t last_beg = 0, last_frame = 0;
         for (j = 0; j < fp->gindex_sz[i]; j++) {
@@ -714,6 +715,9 @@ static int write_genomic_index(bzst *fp) {
                                 g[j].end - g[j].beg);
             ks.l += var_put_u64((uint8_t *)ks.s + ks.l, ks_end,
                                 g[j].frame_start - last_frame);
+//            fprintf(stderr, "Write %ld %ld %ld\n",
+//                    g[j].beg - last_beg, g[j].end - g[j].beg,
+//                    g[j].frame_start - last_frame);
 
             last_beg = g[j].beg;
             last_frame = g[j].frame_start;
@@ -862,7 +866,8 @@ static int load_genomic_index_common(bzst *fp) {
     // buf[10] = flag. TODO
     uint8_t *cp = buf+11;
     uint8_t *cp_end = buf+sz;
-    cp += var_get_u32(cp, cp_end, &fp->nchr);
+    fp->nchr = le_to_u32(cp);
+    cp += 4;
 //    fprintf(stderr, "Index: nchr %d\n", fp->nchr);
 
     fp->gindex_frame_sz = sz;
@@ -875,18 +880,15 @@ static int load_genomic_index_common(bzst *fp) {
     for (i = 0; i < fp->nchr; i++) {
         cp++; //int flag = *cp++; // TODO
         fp->gindex_sz[i] = le_to_u32(cp); cp += 4;
-//      fprintf(stderr, "Index: chr %d, nframe %ld\n", i, fp->gindex_sz[i]);
 
         fp->gindex[i] = calloc(fp->gindex_sz[i], sizeof(*fp->gindex[i]));
-        if (!fp->gindex[i])
+        if (fp->gindex_sz[i] && !fp->gindex[i])
             goto err;
 
         bzst_gindex_t *g = fp->gindex[i];
-        uint32_t tid = le_to_u32(cp); cp += 4;
+        //fprintf(stderr, "Index: chr %d, nframe %ld\n", i, fp->gindex_sz[i]);
         uint64_t last_beg = 0, last_frame = 0;
         for (j = 0; j < fp->gindex_sz[i]; j++) {
-            g[j].tid = tid;
-
             cp += var_get_u64(cp, cp_end, &g[j].beg);
             cp += var_get_u64(cp, cp_end, &g[j].end);
             cp += var_get_u64(cp, cp_end, &g[j].frame_start);
@@ -2933,7 +2935,7 @@ b        fprintf(stderr, "Malformed index frame (nindex too large)\n");
     if (!sub_index)
         goto err;
 
-    for (uint64_t i = 0; i < nidx_sub; i++) {
+    for (uint32_t i = 0; i < nidx_sub; i++) {
         sub_index[i].u_pos = le_to_u64(cp); cp += 8;
         sub_index[i].c_pos = le_to_u32(cp); cp += 4; // offset into var index
     }
@@ -3252,7 +3254,6 @@ int bzst_idx_add(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end) {
 
         idx = &fp->gindex[tid][fp->gindex_sz[tid]++];
         idx->frame_start = fp->idx_pos + fp->last_flush_try;
-        idx->tid = tid-1;
         idx->beg = beg;
         idx->end = end;
 
