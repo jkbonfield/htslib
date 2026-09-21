@@ -106,6 +106,7 @@ Known skippable frame IDs:
 #include "htslib/thread_pool.h"
 #include "htslib/bzst.h"
 #include "htslib/kstring.h"
+#include "htslib/hts_alloc.h"
 #include "cram/pooled_alloc.h"
 #include "hts_internal.h" // for hts_bzst_idx_t
 #if defined(HAVE_EXTERNAL_LIBHTSCODECS)
@@ -213,6 +214,8 @@ struct bzst {
     bzst_index_t *index;  // index entries
     uint64_t nindex;      // used size of index array
     uint64_t aindex;      // allocated size of index array
+    bzst_index_t *sub_index;
+    uint32_t nsub_index;
     uint64_t file_size;   // total file size (from index)
     //--- index end
 
@@ -702,24 +705,17 @@ static int write_genomic_index(bzst *fp) {
         if (fp->gindex_sz[i])
             u32_to_le(g[0].tid, (uint8_t *)ks.s + ks.l); ks.l += 4;
         int j;
-        uint64_t last_beg = 0, last_end = 0, last_frame = 0;
+        uint64_t last_beg = 0, last_frame = 0;
         for (j = 0; j < fp->gindex_sz[i]; j++) {
-            // tid. Move out of here
-            // Should we delta these?  Or change to frame no. + offset?
             ks.l += var_put_u64((uint8_t *)ks.s + ks.l, ks_end,
                                 g[j].beg - last_beg);
-            // We could do end - beg, but end - last_end is typically
-            // a smaller value, particularly for large records.
-            // FIXME: but end - last end could be negative.  Put s64 instead?
-            // Or abandon this idea?
+
             ks.l += var_put_u64((uint8_t *)ks.s + ks.l, ks_end,
-                                //g[j].end - g[j].beg);
-                                g[j].end - last_end);
+                                g[j].end - g[j].beg);
             ks.l += var_put_u64((uint8_t *)ks.s + ks.l, ks_end,
                                 g[j].frame_start - last_frame);
 
             last_beg = g[j].beg;
-            last_end = g[j].end;
             last_frame = g[j].frame_start;
 
             // // FIXME: beg and end are int64.  May want varint.
@@ -887,7 +883,7 @@ static int load_genomic_index_common(bzst *fp) {
 
         bzst_gindex_t *g = fp->gindex[i];
         uint32_t tid = le_to_u32(cp); cp += 4;
-        uint64_t last_beg = 0, last_end = 0, last_frame = 0;
+        uint64_t last_beg = 0, last_frame = 0;
         for (j = 0; j < fp->gindex_sz[i]; j++) {
             g[j].tid = tid;
 
@@ -895,13 +891,8 @@ static int load_genomic_index_common(bzst *fp) {
             cp += var_get_u64(cp, cp_end, &g[j].end);
             cp += var_get_u64(cp, cp_end, &g[j].frame_start);
             last_beg = (g[j].beg += last_beg);
-            last_end = (g[j].end += last_end);
+            g[j].end += g[j].beg;
             last_frame = (g[j].frame_start += last_frame);
-
-            //// FIXME: beg and end are int64.  May want varint.
-            //g[j].beg = le_to_u32(cp); cp += 4;
-            //g[j].end = le_to_u32(cp); cp += 4;
-            //g[j].frame_start = le_to_u64(cp); cp += 8;
 
 //          fprintf(stderr, "Index: tid %d, %ld..%ld %ld\n",
 //                  g[j].tid, (long)g[j].beg, (long)g[j].end,
@@ -1030,10 +1021,18 @@ int64_t bzst_query(bzst *fp, int tid, hts_pos_t beg, hts_pos_t end) {
 static int bzst_write_index(bzst *fp) {
     bzst_index_t *idx = fp->index;
     uint64_t nidx = fp->nindex;
-    uint64_t frame_size = 38 + nidx * 24;
+    uint64_t frame_size = 38 + nidx * 9*3;
     uint8_t *buf = malloc(8 + frame_size);
     if (!buf)
         return -1;
+
+    // A sub-index.  We don't really need maximum limits here as a 4GB sub
+    // index implies a 1TB index!  However we have it to protect against
+    // adversarial inputs.
+    uint64_t nidx_div = 256;
+    while (nidx % nidx_div  >= INT_MAX)
+        nidx_div *= 2;
+    uint32_t nidx_sub = (nidx + nidx_div-1) / nidx_div;
 
     // header
     u32_to_le(BZST_SKIPPABLE_ID, buf);
@@ -1041,27 +1040,63 @@ static int bzst_write_index(bzst *fp) {
     //u32_to_le(frame_size, buf+4);
     buf[8] = BZST_INDEX;             // sub-type
     buf[9] = 0;                      // index flags (uncompressed for now)
-    u64_to_le(nidx, buf+10);         // index count
-    u64_to_le(fp->idx_upos, buf+18); // total file size
+    uint64_t off = 10;
+    u64_to_le(nidx, buf+off); off+=8;// index count
 
     // Index entries;
-    uint64_t off = 26;
-#if 0
+#if 0 // BZST published spec
+    u64_to_le(fp->idx_upos, buf+off); // total file size
+    off += 8;
     for (uint64_t i = 0; i < nidx; i++, off += 24) {
         u64_to_le(idx[i].u_pos,  buf+off);
         u64_to_le(idx[i].c_pos,  buf+off+8);
         u64_to_le(idx[i].c_size, buf+off+16);
     }
 #else
-    uint8_t *buf_end = buf + frame_size;
+    u32_to_le(nidx_sub, buf+off);     // sub-index count
+    off += 4;
+    u64_to_le(fp->idx_upos, buf+off); // total file size
+    off += 8;
+
+    uint8_t *var_index = malloc(frame_size);
+    uint8_t *sub_index = malloc(nidx_sub*12);
+    if (!var_index || !sub_index) {
+        free(buf);
+        free(var_index);
+        return -1;
+    }
+
+    // Cache variable index
+    uint64_t sub_i = 0;
+    uint8_t *var = var_index, *var_end = var_index + frame_size;
+    uint8_t *sub = sub_index;
     uint64_t last_u_pos = 0, last_c_pos = 0;
+    uint8_t *buf_end = buf + frame_size;
+    int ns = 0;
     for (uint64_t i = 0; i < nidx; i++) {
-        off += var_put_u64(buf+off, buf_end, idx[i].u_pos  - last_u_pos);
-        off += var_put_u64(buf+off, buf_end, idx[i].c_pos  - last_c_pos);
-        off += var_put_u64(buf+off, buf_end, idx[i].c_size);
+        if (i % nidx_div == 0) {
+            // index the index; binary searchable as fixed size fields.
+            u64_to_le(idx[i].u_pos, sub);                sub+=8;
+            u32_to_le((uint32_t)(var - var_index), sub); sub+=4;
+            ns++;
+        }
+
+        var += var_put_u64(var, var_end, idx[i].u_pos  - last_u_pos);
+        var += var_put_u64(var, var_end, idx[i].c_pos  - last_c_pos);
+        // There is potentially a small win for csize-last_csize as s64,
+        // but on a test it was under 4% smaller so likely not worth it.
+        var += var_put_u64(var, var_end, idx[i].c_size);
         last_u_pos  = idx[i].u_pos;
         last_c_pos  = idx[i].c_pos;
     }
+
+    // Copy over the sub-index plus the full var_index
+    memcpy(buf+off, sub_index, sub - sub_index);
+    off += sub - sub_index;
+    memcpy(buf+off, var_index, var - var_index);
+    off += var - var_index;
+    free(sub_index);
+    free(var_index);
 #endif
 
     // Correct frame_size now we know what it is
@@ -2266,6 +2301,7 @@ int bzst_close(bzst *fp) {
         fp->flush_callback(NULL, fp->flush_data, 0);
 
     free(fp->index);
+    free(fp->sub_index);
     free(fp->ks.s);
     free(fp);
 
@@ -2865,7 +2901,6 @@ static int bzst_read_index_common(bzst *fp) {
     cp = buf + 10;
     fp->aindex = fp->nindex = le_to_u64(cp);    cp += 8;
     fp->index_frame_sz = sz;
-    fp->file_size = le_to_u64(cp); cp += 8;
 #if 0
     if ((sz - 26) / 24 < fp->nindex) {
 b        fprintf(stderr, "Malformed index frame (nindex too large)\n");
@@ -2879,7 +2914,8 @@ b        fprintf(stderr, "Malformed index frame (nindex too large)\n");
         goto err;
     }
 
-#if 0
+#if 0 // BZST published index
+    fp->file_size = le_to_u64(cp); cp += 8;
     for (uint64_t i = 0; i < fp->nindex; i++, cp += 24) {
         fp->index[i].u_pos  = le_to_u64(cp);
         fp->index[i].c_pos  = le_to_u64(cp+8);
@@ -2889,6 +2925,21 @@ b        fprintf(stderr, "Malformed index frame (nindex too large)\n");
     uint8_t *cp_end = cp + sz;
     uint64_t last_u_pos = 0, last_c_pos = 0;
     int last_decode;
+    // Sub-index (indexes the index)
+    uint32_t nidx_sub = le_to_u32(cp); cp += 4;
+    fp->file_size = le_to_u64(cp); cp += 8;
+    uint8_t *cp_sub = cp;
+    bzst_index_t *sub_index = hts_malloc_p(nidx_sub, sizeof(*sub_index));
+    if (!sub_index)
+        goto err;
+
+    for (uint64_t i = 0; i < nidx_sub; i++) {
+        sub_index[i].u_pos = le_to_u64(cp); cp += 8;
+        sub_index[i].c_pos = le_to_u32(cp); cp += 4; // offset into var index
+    }
+    fp->sub_index = sub_index;
+    fp->nsub_index = nidx_sub;
+
     for (uint64_t i = 0; i < fp->nindex; i++) {
         uint64_t u_delta, c_delta;
         // TODO: error checking for negatives
