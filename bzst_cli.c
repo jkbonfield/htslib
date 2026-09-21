@@ -33,6 +33,11 @@
 #include "htslib/hfile.h"
 #include "htslib/thread_pool.h"
 #include "htslib/hts_endian.h"
+#if defined(HAVE_EXTERNAL_LIBHTSCODECS)
+#include <htscodecs/varint.h>
+#else
+#include "htscodecs/htscodecs/varint.h"
+#endif
 
 #ifndef MIN
 #  define MIN(a,b) ((a)<(b)?(a):(b))
@@ -326,19 +331,23 @@ static int list_bzst_genomic_index(hFILE *fp, uint64_t cpos,
         for (int i = 0; i < nchr; i++) {
             if (gp+5 > g_end)
                 goto err;
-            gp++; // flag
-            int index_sz = le_to_u32(gp); gp += 4;
+            gp++; // flag: TODO implement this
             // Should index_sz be uint64_t?
-            printf("    chr-id %d/%d, size %d\n",
-                   i+1, nchr, index_sz);
-            if (gp+index_sz * 20 > g_end)
-                goto err;
+            int index_sz = le_to_u32(gp); gp += 4;
+            uint32_t tid = i-1;
+            printf("    chr-id %d/%d (tid %d), size %d\n",
+                   i+1, nchr, tid, index_sz);
+
+            uint64_t last_beg = 0, last_upos = 0;
             for (int j = 0; j < index_sz; j++) {
-                int tid = le_to_u32(gp); gp += 4;
-                int beg = le_to_u32(gp); gp += 4;
-                int end = le_to_u32(gp); gp += 4;
-                uint64_t upos = le_to_u64(gp); gp += 8;
-                printf("        %4d: %d, %d..%d at %"PRId64"\n",
+                uint64_t beg, end, upos;
+                gp += var_get_u64(gp, g_end, &beg);
+                gp += var_get_u64(gp, g_end, &end);
+                gp += var_get_u64(gp, g_end, &upos);
+                last_beg = (beg += last_beg);
+                end += beg;
+                last_upos = (upos += last_upos);
+                printf("        %4d: %d, %ld..%ld at %"PRId64"\n",
                        j, tid, beg, end, upos);
             }
         }
@@ -358,15 +367,30 @@ static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
 
     uint8_t flags;
     uint64_t count;
+    uint32_t sub_count;
     if (level > 1) {
+#if OLD_INDEX
         if (hread(fp, (char *)buf, 17) != 17)
             return -1;
         flags = buf[0];
         count = le_to_u64(buf+1);
         uint64_t fsize = le_to_u64(buf+9);
+
         printf("BZST_INDEX, len %d @ %"PRId64", flags=%d, count=%"PRId64
                ", usize=%"PRId64"\n", len+1, cpos, flags, count, fsize);
         len -= 17;
+#else
+        if (hread(fp, (char *)buf, 21) != 21)
+            return -1;
+        flags = buf[0];
+        count = le_to_u64(buf+1);
+        sub_count = le_to_u32(buf+9);
+        uint64_t fsize = le_to_u64(buf+9+4);
+
+        printf("BZST_INDEX, len %d @ %"PRId64", flags=%d, count=%"PRId64
+               ", usize=%"PRId64"\n", len+1, cpos, flags, count, fsize);
+        len -= 21;
+#endif
     }
 
     if (level > 2) {
@@ -379,6 +403,7 @@ static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
 
         uint8_t *gp = g, *g_end = gp+len;
 
+#if OLD_INDEX
         for (uint64_t i = 0; i < count && gp+24 < g_end; i++) {
             uint64_t upos  = le_to_u64(gp);
             uint64_t cpos  = le_to_u64(gp+8);
@@ -389,11 +414,48 @@ static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
         }
 
         len -= 24*count;
+#else
+        // sub index
+        for (uint32_t i = 0; i < sub_count; i++) {
+            uint64_t upos = le_to_u64(gp); gp += 8;
+            uint32_t ioff = le_to_u32(gp); gp += 4;
+            printf("    Sub %d:  upos %"PRIu64"  index_offset %d\n",
+                   i, upos, ioff);
+        }
+        printf("\n");
+
+        // Main index
+        uint64_t last_u_pos = 0, last_c_pos = 0;
+        uint32_t decode_sz = 0;
+        uint8_t *gp_var = gp;
+        for (uint64_t i = 0; i < count; i++) {
+            uint32_t off = (uint32_t)(gp - gp_var);
+            uint64_t upos, cpos, csize;
+            gp += var_get_u64(gp, g_end, &upos);
+            gp += var_get_u64(gp, g_end, &cpos);
+            gp += (decode_sz = var_get_u64(gp, g_end, &csize));
+            last_u_pos = (upos += last_u_pos);
+            last_c_pos = (cpos += last_c_pos);
+            printf("    Idx %"PRIu64" @ %d: upos %"PRIu64", cpos %"PRIu64
+                   ", csize %"PRIu64" %ld\n", i, off, upos, cpos, csize, last_c_pos);
+        }
+
+        len = g_end - gp;
+#endif
+
+        if (!decode_sz) {
+            fprintf(stderr, "BZST index: unexpected early termination\n");
+            free(g);
+            return -1;
+        }
+
         if (len != 20) {
             fprintf(stderr, "BZST index: expected 20 byte footer, got %d\n",
                     len);
+            free(g);
             return -1;
         }
+
         if (hseek(fp, len, SEEK_CUR) < 0)
             return -1;
 
