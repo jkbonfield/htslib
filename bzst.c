@@ -132,7 +132,9 @@ Known skippable frame IDs:
 typedef struct {
     off_t u_pos;     // absolute offset into uncompressed file
     off_t c_pos;     // absolute offset into compressed file
+#ifdef OLD_INDEX
     off_t c_size;    // size of compressed block (hdr + data)
+#endif
 } bzst_index_t;
 
 // Genomic index.  We maintain one of these per chromosome, indexed by
@@ -1046,7 +1048,7 @@ static int bzst_write_index(bzst *fp) {
     u64_to_le(nidx, buf+off); off+=8;// index count
 
     // Index entries;
-#if 0 // BZST published spec
+#ifdef OLD_INDEX // BZST published spec
     u64_to_le(fp->idx_upos, buf+off); // total file size
     off += 8;
     for (uint64_t i = 0; i < nidx; i++, off += 24) {
@@ -1085,9 +1087,6 @@ static int bzst_write_index(bzst *fp) {
 
         var += var_put_u64(var, var_end, idx[i].u_pos  - last_u_pos);
         var += var_put_u64(var, var_end, idx[i].c_pos  - last_c_pos);
-        // There is potentially a small win for csize-last_csize as s64,
-        // but on a test it was under 4% smaller so likely not worth it.
-        var += var_put_u64(var, var_end, idx[i].c_size);
         last_u_pos  = idx[i].u_pos;
         last_c_pos  = idx[i].c_pos;
     }
@@ -1149,7 +1148,9 @@ static int bzst_add_index(bzst *fp, size_t uncomp, size_t comp,
     idx->c_pos = fp->idx_cpos;
     if ((int64_t)hdr_sz + (int64_t)comp > hdr_sz + comp)
         return -1; // overflow for 32-bit size_t.
+#ifdef OLD_INDEX
     idx->c_size = hdr_sz + comp;
+#endif
 
     fp->idx_upos += uncomp;
     fp->idx_cpos += hdr_sz + comp;
@@ -2903,9 +2904,9 @@ static int bzst_read_index_common(bzst *fp) {
     cp = buf + 10;
     fp->aindex = fp->nindex = le_to_u64(cp);    cp += 8;
     fp->index_frame_sz = sz;
-#if 0
+#ifdef OLD_INDEX
     if ((sz - 26) / 24 < fp->nindex) {
-b        fprintf(stderr, "Malformed index frame (nindex too large)\n");
+        fprintf(stderr, "Malformed index frame (nindex too large)\n");
         goto err;
     }
 #endif
@@ -2916,7 +2917,7 @@ b        fprintf(stderr, "Malformed index frame (nindex too large)\n");
         goto err;
     }
 
-#if 0 // BZST published index
+#ifdef OLD_INDEX // BZST published index
     fp->file_size = le_to_u64(cp); cp += 8;
     for (uint64_t i = 0; i < fp->nindex; i++, cp += 24) {
         fp->index[i].u_pos  = le_to_u64(cp);
@@ -2946,13 +2947,9 @@ b        fprintf(stderr, "Malformed index frame (nindex too large)\n");
         uint64_t u_delta, c_delta;
         // TODO: error checking for negatives
         cp += var_get_u64(cp, cp_end, &u_delta);
-        cp += var_get_u64(cp, cp_end, &c_delta);
-        cp += (last_decode = var_get_u64(cp, cp_end, &fp->index[i].c_size));
+        cp += (last_decode = var_get_u64(cp, cp_end, &c_delta));
         last_u_pos = (fp->index[i].u_pos = last_u_pos + u_delta);
         last_c_pos = (fp->index[i].c_pos = last_c_pos + c_delta);
-//        fprintf(stderr, "Index %ld: %ld %ld %ld\n",
-//                i, fp->index[i].u_pos, fp->index[i].c_pos,
-//                fp->index[i].c_size);
     }
 
 

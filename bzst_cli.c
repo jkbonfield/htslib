@@ -369,7 +369,7 @@ static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
     uint64_t count;
     uint32_t sub_count;
     if (level > 1) {
-#if OLD_INDEX
+#ifdef OLD_INDEX
         if (hread(fp, (char *)buf, 17) != 17)
             return -1;
         flags = buf[0];
@@ -403,7 +403,7 @@ static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
 
         uint8_t *gp = g, *g_end = gp+len;
 
-#if OLD_INDEX
+#ifdef OLD_INDEX
         for (uint64_t i = 0; i < count && gp+24 < g_end; i++) {
             uint64_t upos  = le_to_u64(gp);
             uint64_t cpos  = le_to_u64(gp+8);
@@ -441,13 +441,13 @@ static int list_bzst_index(hFILE *fp, uint32_t len, uint64_t cpos, int level) {
         }
 
         len = g_end - gp;
-#endif
 
         if (!decode_sz) {
             fprintf(stderr, "BZST index: unexpected early termination\n");
             free(g);
             return -1;
         }
+#endif
 
         if (len != 20) {
             fprintf(stderr, "BZST index: expected 20 byte footer, got %d\n",
