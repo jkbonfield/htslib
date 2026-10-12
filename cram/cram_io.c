@@ -1818,6 +1818,12 @@ static int cram_compress_block3(cram_fd *fd, cram_slice *s,
                     c = cram_compress_by_method(s, (char *)b->data, b->uncomp_size,
                                                 b->content_id, &sz[m], m, lvl, strat);
 
+                    hts_log_debug("Compressed block ID %d from %d to %d by "
+                                  "method %s strat %d level %d; %s",
+                                  b->content_id, b->uncomp_size, (int)sz[m],
+                                  cram_block_method2str(m), strat, level,
+                                  c ? "trial" : "FAIL");
+
                     if (c && sz_best > sz[m]) {
                         sz_best = sz[m];
                         method_best = m;
@@ -1994,13 +2000,18 @@ static int cram_compress_block3(cram_fd *fd, cram_slice *s,
                                            b->content_id, &comp_size, method,
                                            method == GZIP_1 ? 1 : level,
                                            strat);
+            hts_log_debug("Compressed block ID %d from %d to %d by method %s"
+                          " strat %d level %d; %s",
+                          b->content_id, b->uncomp_size, (int)comp_size,
+                          cram_block_method2str(method), strat, level,
+                          comp ? "trial" : "FAIL");
             if (!comp) {
                 // Our cached best method failed, but maybe another works?
                 // Rerun with trial mode engaged again.
                 if (!recurse) {
-                    hts_log_warning("Compressed block ID %d method %s failed, "
-                                    "redoing trial", b->content_id,
-                                    cram_block_method2str(method));
+                    hts_log_info("Compressed block ID %d method %s failed, "
+                                 "redoing trial", b->content_id,
+                                 cram_block_method2str(method));
                     pthread_mutex_lock(&fd->metrics_lock);
                     metrics->trial = NTRIALS;
                     metrics->next_trial = TRIAL_SPAN;
@@ -2025,7 +2036,12 @@ static int cram_compress_block3(cram_fd *fd, cram_slice *s,
     } else {
         // no cached metrics, so just do zlib?
         comp = cram_compress_by_method(s, (char *)b->data, b->uncomp_size,
-                                       b->content_id, &comp_size, GZIP, level, Z_FILTERED);
+                                       b->content_id, &comp_size, GZIP, level,
+                                       Z_FILTERED);
+        hts_log_debug("Compressed block ID %d from %d to %d by "
+                      "method GZIP strat Z_FILTERED level %d; %s",
+                      b->content_id, b->uncomp_size, (int)comp_size, level,
+                      comp ? "trial" : "FAIL");
         if (!comp) {
             hts_log_error("Compression failed!");
             return -1;
