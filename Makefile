@@ -773,6 +773,12 @@ test/fuzz/fuzz_expr: $(srcdir)/test/fuzz/fuzz_expr.c test/fuzz/corpus.expr
 	@echo "Run with: ASAN_OPTIONS=allow_addr2line=1:abort_on_error=1:detect_leaks=1 ./test/fuzz/fuzz_expr -dict=$(srcdir)/test/fuzz/corpus.expr.dict test/fuzz/corpus.expr 2>&1 | cat -v"
 
 
+test/fuzz/hts_basemod_fuzzer: test/fuzz/hts_basemod_fuzzer.o libhts.a
+	$(CC) $(LDFLAGS) -fsanitize=fuzzer -o $@ test/fuzz/hts_basemod_fuzzer.o libhts.a $(LIBS) -lpthread
+
+test/fuzz/vcf_api_fuzzer: test/fuzz/vcf_api_fuzzer.o libhts.a
+	$(CC) $(LDFLAGS) -Wl,--wrap=exit -fsanitize=fuzzer -o $@ test/fuzz/vcf_api_fuzzer.o libhts.a $(LIBS) -lpthread 
+
 test/fieldarith: test/fieldarith.o libhts.a
 	$(CC) $(LDFLAGS) -o $@ test/fieldarith.o libhts.a $(LIBS) -lpthread
 
@@ -918,6 +924,8 @@ htscodecs/tests/varint_test.o: htscodecs/tests/varint_test.c config.h $(htscodec
 
 test/hts_endian.o: test/hts_endian.c config.h $(htslib_hts_endian_h)
 test/fuzz/hts_open_fuzzer.o: test/fuzz/hts_open_fuzzer.c config.h $(htslib_hfile_h) $(htslib_hts_h) $(htslib_sam_h) $(htslib_vcf_h)
+test/fuzz/hts_basemod_fuzzer.o: test/fuzz/hts_basemod_fuzzer.c config.h $(htslib_hfile_h) $(htslib_hts_h) $(htslib_sam_h) $(htslib_kstring_h)
+test/fuzz/vcf_api_fuzzer.o: test/fuzz/vcf_api_fuzzer.c config.h $(htslib_hfile_h) $(htslib_hts_h) $(htslib_sam_h) $(htslib_kstring_h)
 test/fieldarith.o: test/fieldarith.c config.h $(htslib_sam_h)
 test/hfile.o: test/hfile.c config.h $(htslib_hfile_h) $(htslib_hts_defs_h) $(htslib_kstring_h)
 test/pileup.o: test/pileup.c config.h $(htslib_sam_h) $(htslib_kstring_h)
