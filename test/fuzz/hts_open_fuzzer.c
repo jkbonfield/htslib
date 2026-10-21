@@ -138,12 +138,23 @@ static void view_sam(const uint8_t *data, size_t size, char *mode,
         hts_close(out);
     out = NULL;
 
-    if (sam_index_build(fn, 0)) {
+    if (sam_index_build(fn, 0) == 0) {
         htsFile *in2 = sam_open(fn, "rb");
         if (in2) {
             hts_idx_t *idx = sam_index_load(in2, fn);
-            if (idx)
+
+            // samtools idxstats equivalent
+            if (idx) {
+                for (int i = 0; i < sam_hdr_nref(hdr); i++) {
+                    printf("%s\t%"PRId64, sam_hdr_tid2name(hdr, i),
+                           (int64_t)sam_hdr_tid2len(hdr, i));
+                    uint64_t u, v;
+                    hts_idx_get_stat(idx, i, &u, &v);
+                    printf("\t%" PRIu64 "\t%" PRIu64 "\n", u, v);
+                }
+                printf("*\t0\t0\t%" PRIu64 "\n", hts_idx_get_n_no_coor(idx));
                 hts_idx_destroy(idx);
+            }
             hts_close(in2);
         }
     }
